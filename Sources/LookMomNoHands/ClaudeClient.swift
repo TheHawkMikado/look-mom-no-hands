@@ -65,10 +65,11 @@ final class ClaudeClient: @unchecked Sendable {
             ]
         ]
 
+        // No effort/thinking params: Haiku 4.5 rejects `effort` with a 400, and
+        // omitting thinking keeps this hot path fast.
         let body: [String: Any] = [
             "model": model.rawValue,
             "max_tokens": 1024,
-            "output_config": ["effort": "low"],          // thinking omitted → fast
             "tools": [tool],
             "tool_choice": ["type": "tool", "name": "emit_action"],
             "messages": [["role": "user", "content": "Spoken command: \"\(transcript)\""]]
