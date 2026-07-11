@@ -436,6 +436,37 @@ final class SpeechEngineTests: XCTestCase {
     }
 }
 
+final class KnowledgeTests: XCTestCase {
+    @MainActor private func store() -> KnowledgeStore {
+        KnowledgeStore(directory: FileManager.default.temporaryDirectory
+            .appendingPathComponent("lmnh-know-\(UUID().uuidString)"))
+    }
+
+    @MainActor func testRememberDedupesAndBuildsPrompt() {
+        let s = store()
+        s.remember("My main project is look-mom-no-hands")
+        s.remember("my main project is look-mom-no-hands")   // dup (case-insensitive)
+        s.remember("")                                        // ignored
+        XCTAssertEqual(s.facts.count, 1)
+        XCTAssertTrue(s.promptContext.contains("look-mom-no-hands"))
+        s.remember("I use Brave")
+        XCTAssertEqual(s.facts.count, 2)
+        XCTAssertTrue(s.promptContext.contains("Brave"))
+    }
+
+    @MainActor func testEmptyKnowledgeHasNoPrompt() {
+        XCTAssertEqual(store().promptContext, "")
+    }
+}
+
+extension PlanDecodingTests {
+    func testPlanDecodesRemember() throws {
+        let json = #"{"say":"ok","steps":[],"confidence":1.0,"goal_complete":true,"remember":"I use Brave"}"#
+        let plan = try JSONDecoder().decode(ActionPlan.self, from: Data(json.utf8))
+        XCTAssertEqual(plan.remember, "I use Brave")
+    }
+}
+
 final class ProcedureTests: XCTestCase {
     @MainActor private func store() -> ProcedureStore {
         ProcedureStore(directory: FileManager.default.temporaryDirectory

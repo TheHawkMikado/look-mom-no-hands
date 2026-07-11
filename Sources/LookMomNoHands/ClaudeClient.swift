@@ -179,6 +179,7 @@ final class ClaudeClient: @unchecked Sendable {
                         ],
                         "required": ["name", "triggers", "steps"]
                     ],
+                    "remember": ["type": "string", "description": "Set to a durable fact when the user tells you to remember something about them or their setup (\"remember that my main project is X\", \"note that I use Brave\", \"for future reference, …\"). One concise fact. Empty otherwise."],
                     "confidence": ["type": "number"],
                     "goal_complete": ["type": "boolean", "description": "true ONLY when the user's whole goal is fully achieved and no further action is needed. false if more steps remain (e.g. you just opened a panel/dialog and must still act inside it)."]
                 ],

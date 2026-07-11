@@ -65,6 +65,7 @@ struct ActionPlan: Decodable, Sendable {
     let clarify: Clarification?         // set ⇒ steps is empty; ask before acting
     let learn: LearnedFact?             // a durable mapping the user just taught/corrected
     let teach: TaughtProcedure?         // a task the user just taught how to do
+    let remember: String                // a durable fact to store ("" = none)
     let confidence: Double
     /// The act-observe loop's stop signal: the model sets this true once the user's
     /// goal is fully achieved. While false (and steps ran), the coordinator re-reads
@@ -81,6 +82,7 @@ struct ActionPlan: Decodable, Sendable {
         say = (try? c.decodeIfPresent(String.self, forKey: .say)) ?? ""
         learn = try? c.decodeIfPresent(LearnedFact.self, forKey: .learn)
         teach = try? c.decodeIfPresent(TaughtProcedure.self, forKey: .teach)
+        remember = (try? c.decodeIfPresent(String.self, forKey: .remember)) ?? ""
         // Decode element-by-element so one bad step doesn't blank the whole array
         // (which would read as an empty, silently-successful plan) — but record
         // that anything was dropped so execution can fail closed. A `steps` field
@@ -106,7 +108,7 @@ struct ActionPlan: Decodable, Sendable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case say, steps, clarify, learn, teach, confidence
+        case say, steps, clarify, learn, teach, remember, confidence
         case goalComplete = "goal_complete"
     }
 
@@ -178,6 +180,21 @@ enum RecorderOutput: Sendable, Equatable {
         case .note: return "Save as note"
         case .both: return "Insert + note"
         }
+    }
+}
+
+/// A durable fact the assistant knows about the user or their setup ("my main
+/// project is look-mom-no-hands", "I use Brave", "my work email is …"). Fed into
+/// every command so it doesn't have to be re-told. The "general memory."
+struct KnowledgeFact: Codable, Identifiable, Sendable, Equatable {
+    let id: String
+    var text: String
+    let createdAt: Date
+
+    init(id: String = UUID().uuidString, text: String, createdAt: Date = Date()) {
+        self.id = id
+        self.text = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.createdAt = createdAt
     }
 }
 

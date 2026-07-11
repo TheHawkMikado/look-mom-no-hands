@@ -8,7 +8,7 @@ struct DashboardView: View {
 
     var body: some View {
         TabView {
-            MemoryTab(coordinator: coordinator, environment: coordinator.environment)
+            MemoryTab(coordinator: coordinator, environment: coordinator.environment, knowledge: coordinator.knowledge)
                 .tabItem { Label("Memory", systemImage: "brain") }
             LiveTab(coordinator: coordinator)
                 .tabItem { Label("Live", systemImage: "waveform") }
@@ -36,6 +36,8 @@ struct DashboardView: View {
 private struct MemoryTab: View {
     @ObservedObject var coordinator: AppCoordinator
     @ObservedObject var environment: EnvironmentTracker
+    @ObservedObject var knowledge: KnowledgeStore
+    @State private var newFact = ""
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -99,7 +101,29 @@ private struct MemoryTab: View {
                     }
                 }
 
-                Section("Recent actions (memory)") {
+                Section("General memory (what it knows about you)") {
+                    HStack(spacing: 6) {
+                        TextField("Add a fact — e.g. “my main project is look-mom-no-hands”", text: $newFact)
+                            .textFieldStyle(.roundedBorder)
+                            .onSubmit { addFact() }
+                        Button("Add") { addFact() }
+                            .disabled(newFact.trimmingCharacters(in: .whitespaces).isEmpty)
+                    }
+                    if knowledge.facts.isEmpty {
+                        Text("Nothing yet — say “remember that …” or add one here.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                    ForEach(knowledge.facts) { fact in
+                        HStack {
+                            Text(fact.text)
+                            Spacer()
+                            Button { knowledge.remove(fact.id) } label: { Image(systemName: "trash").foregroundStyle(.red) }
+                                .buttonStyle(.plain)
+                        }
+                    }
+                }
+
+                Section("Recent actions") {
                     if coordinator.recentActions.isEmpty {
                         Text("Nothing yet").font(.caption).foregroundStyle(.secondary)
                     }
@@ -109,6 +133,13 @@ private struct MemoryTab: View {
                 }
             }
         }
+    }
+
+    private func addFact() {
+        let t = newFact.trimmingCharacters(in: .whitespaces)
+        guard !t.isEmpty else { return }
+        knowledge.remember(t)
+        newFact = ""
     }
 }
 

@@ -113,6 +113,7 @@ final class AppCoordinator: ObservableObject {
     let vocabulary: VocabularyStore
     let profiles: ProfileStore
     let procedures: ProcedureStore
+    let knowledge: KnowledgeStore
 
     // Longer than the old 1.2s: a spoken request can be several action items, so
     // don't cut it off on a mid-sentence breath.
@@ -158,6 +159,7 @@ final class AppCoordinator: ObservableObject {
         vocabulary = VocabularyStore(directory: store.directory)
         profiles = ProfileStore(directory: store.directory)
         procedures = ProcedureStore(directory: store.directory)
+        knowledge = KnowledgeStore(directory: store.directory)
         if UserDefaults.standard.object(forKey: Self.silenceKey) != nil {
             recorderEndPause = UserDefaults.standard.double(forKey: Self.silenceKey)
         }
@@ -897,6 +899,11 @@ final class AppCoordinator: ObservableObject {
                 refreshContextualPhrases()
                 store.log("learn", "\(fact.spoken) → \(fact.written)")
             }
+            // A durable fact to remember about the user/setup (round 0 only).
+            if round == 0, !plan.remember.isEmpty, gen == runGeneration {
+                knowledge.remember(plan.remember)
+                store.log("remember", plan.remember)
+            }
             // The user taught a procedure — save it (only round 0, so a "teach and do
             // it now" task doesn't re-learn a drifting name every round).
             if round == 0, let taught = plan.teach, taught.isValid, gen == runGeneration {
@@ -940,7 +947,7 @@ final class AppCoordinator: ObservableObject {
                 if Task.isCancelled || gen != runGeneration { throw error }
                 let done = performedAll.isEmpty ? "" : performedAll.joined(separator: " → ") + " → "
                 store.addTranscript(TranscriptRecord(kind: "command", transcript: text, outcome: "\(done)FAILED: \(error)"))
-                recordRecentAction("\"\(text)\" → \(done)FAILED")
+                recordRecentAction("\(contextTag())\"\(text)\" → \(done)FAILED")
                 phase = .error("\(error)")
                 store.log("error", "step failed after \(performedAll.count) done: \(error)")
                 await speak(performedAll.isEmpty ? "That didn't work." : "I did part of it, then hit a problem.", gen: gen)
@@ -959,7 +966,7 @@ final class AppCoordinator: ObservableObject {
         guard gen == runGeneration, !Task.isCancelled else { return }
         if !performedAll.isEmpty {
             store.addTranscript(TranscriptRecord(kind: "command", transcript: text, outcome: performedAll.joined(separator: " → ")))
-            recordRecentAction("\"\(text)\" → \(performedAll.joined(separator: " → "))")
+            recordRecentAction("\(contextTag())\"\(text)\" → \(performedAll.joined(separator: " → "))")
         }
         if !complete {
             store.log("command", "stopped after \(round) rounds without goal_complete")
@@ -1031,7 +1038,8 @@ final class AppCoordinator: ObservableObject {
     }
 
     private func buildPlannerContext(command: String, taskProgress: [String]) -> String {
-        var parts = [workingContext.promptText,
+        var parts = [knowledge.promptContext,
+                     workingContext.promptText,
                      procedures.promptContext(for: command),
                      environment.snapshot.promptText,
                      recentActionsBlock()]
@@ -1046,6 +1054,12 @@ final class AppCoordinator: ObservableObject {
     private func recentActionsBlock() -> String {
         guard !recentActions.isEmpty else { return "" }
         return "Recent actions (oldest first):\n" + recentActions.map { "- \($0)" }.joined(separator: "\n")
+    }
+
+    // Tags an action with the window/app it was performed in, so the memory reads
+    // "[Chrome › GitHub] "open PRs" → …" — actions grouped by what they acted on.
+    private func contextTag() -> String {
+        workingContext.isEmpty ? "" : "[\(workingContext.label)] "
     }
 
     private func recordRecentAction(_ line: String) {
