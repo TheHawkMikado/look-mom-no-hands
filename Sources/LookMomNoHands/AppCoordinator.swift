@@ -72,6 +72,7 @@ final class AppCoordinator: ObservableObject {
             guard !(self.micAuthorized && self.speechAuthorized) else { return }
             self.requestPermissions { _ in }
         }
+        startAuthPollingIfNeeded()
     }
 
     private func refreshAuthFlags() {
@@ -80,10 +81,35 @@ final class AppCoordinator: ObservableObject {
         accessibilityTrusted = ScreenController.isTrusted
     }
 
+    // TCC grants take effect live (no relaunch), but AXIsProcessTrusted() etc. are
+    // only read when we poll — so a permission granted in System Settings while
+    // the app is already running would otherwise never update the panel. Poll at a
+    // low rate until everything is granted, then stop (no always-on timer).
+    private var authPoll: Timer?
+
+    private func startAuthPollingIfNeeded() {
+        guard authPoll == nil else { return }
+        guard !(micAuthorized && speechAuthorized && accessibilityTrusted) else { return }
+        authPoll = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in self?.pollAuth() }
+        }
+    }
+
+    private func pollAuth() {
+        refreshAuthFlags()
+        if micAuthorized && speechAuthorized && accessibilityTrusted {
+            authPoll?.invalidate(); authPoll = nil
+            store.log("perm", "all permissions granted")
+        }
+    }
+
     /// Explicit, user-initiated Accessibility prompt (opens System Settings once).
     /// Never called automatically — only from the panel button, so we don't nag.
     func requestAccessibility() {
         ScreenController.requestTrust()
+        // The user is about to grant it — resume polling so the panel flips as
+        // soon as they do, without a relaunch.
+        startAuthPollingIfNeeded()
     }
 
     // MARK: API key
