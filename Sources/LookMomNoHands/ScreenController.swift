@@ -52,7 +52,7 @@ enum ScreenController {
             // .down) would scroll the wrong way and report success.
             guard let direction = action.direction else { throw ControlError.missingDirection }
             try scroll(direction: direction)
-        case .openApp: openApp(named: action.target)
+        case .openApp: try openApp(named: action.target)
         case .dictateStart, .none: break // handled by the coordinator, not here
         }
     }
@@ -108,12 +108,15 @@ enum ScreenController {
             .post(tap: .cghidEventTap)
     }
 
-    static func openApp(named name: String) {
+    static func openApp(named name: String) throws {
+        // Launching an app is as irreversible as a click — a cancelled (stopped)
+        // command must not do it, and a failed launch must surface, not vanish.
+        try Task.checkCancellation()
         // `open -a` resolves fuzzy app names the way Spotlight does.
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: "/usr/bin/open")
         proc.arguments = ["-a", name]
-        try? proc.run()
+        try proc.run()
     }
 
     // MARK: - Accessibility tree search
