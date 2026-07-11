@@ -87,13 +87,18 @@ final class HotkeyMonitor {
             return
         }
         let flags = event.modifierFlags.intersection(Self.relevant)
+        // usedWithKey persists for the whole physical hold (across modifier
+        // wiggles) and only clears on a full release, so a key pressed earlier in
+        // the hold still suppresses the toggle even after a modifier is added and
+        // released.
+        if flags.isEmpty { usedWithKey = false }
         if flags == chord {
-            if !engaged { engaged = true; usedWithKey = false }
+            engaged = true
         } else if engaged {
             engaged = false
             // Fire only on a clean release: a chord key was let go (remaining
             // flags ⊂ chord, not another modifier added) and no other key was
-            // pressed while held. Adding a modifier or pressing a key cancels.
+            // pressed during the hold.
             if !usedWithKey, chord.isSuperset(of: flags) {
                 onToggle?()
             }

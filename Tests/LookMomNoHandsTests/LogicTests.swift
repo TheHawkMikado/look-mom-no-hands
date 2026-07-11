@@ -279,6 +279,10 @@ final class DictateVoicePhraseTests: XCTestCase {
         // Leading start phrase removed.
         XCTAssertEqual(AppCoordinator.stripDictationTriggers("mama dictate this buy milk"),
                        "buy milk")
+        // Overlapping stop phrases: "you stop dictating" must strip whole, not
+        // leave a dangling "you".
+        XCTAssertEqual(AppCoordinator.stripDictationTriggers("buy milk you stop dictating"),
+                       "buy milk")
         // Mid-note content that merely CONTAINS a phrase is preserved.
         XCTAssertEqual(AppCoordinator.stripDictationTriggers("remind me to stop dictating at work when done"),
                        "remind me to stop dictating at work when done")

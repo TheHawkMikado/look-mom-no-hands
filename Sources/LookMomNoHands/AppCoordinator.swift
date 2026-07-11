@@ -281,6 +281,9 @@ final class AppCoordinator: ObservableObject {
             finalizeDictation()
             return
         }
+        // Capture the paste target NOW, before start() might activate our app on a
+        // cold start (which would otherwise make US the frontmost app).
+        insertTargetApp = NSWorkspace.shared.frontmostApplication
         // Insert only needs the API key when cleanup is on (Scribe uses the
         // ElevenLabs key separately); raw paste works with just on-device ASR.
         guard hasKey || !cleanUpInsertedText else {
@@ -347,10 +350,10 @@ final class AppCoordinator: ObservableObject {
         switch mode {
         case .standby:
             if Self.wakePhrases.contains(where: tail.contains) { beginSession() }
-            else if Self.dictateStartPhrases.contains(where: tail.contains) { startDictation(output: .insert) }
+            else if Self.dictateStartPhrases.contains(where: tail.contains) { startInsertByVoice() }
         case .command:
             if Self.stopPhrases.contains(where: tail.contains) { endSession(reason: "\"Adios Mama\"") }
-            else if Self.dictateStartPhrases.contains(where: tail.contains) { startDictation(output: .insert) }
+            else if Self.dictateStartPhrases.contains(where: tail.contains) { startInsertByVoice() }
         case .dictation:
             // A voice stop phrase ends the note; otherwise a long pause does.
             if Self.dictateStopPhrases.contains(where: tail.contains) { finalizeDictation() }
@@ -650,11 +653,17 @@ final class AppCoordinator: ObservableObject {
     // open; a one-tap note from standby returns to standby (no phantom session).
     private var dictationReturnMode: Mode = .command
 
+    /// Voice-triggered insert: capture the paste target before starting (the app
+    /// is already frontmost — no activation happens on this path).
+    private func startInsertByVoice() {
+        insertTargetApp = NSWorkspace.shared.frontmostApplication
+        startDictation(output: .insert)
+    }
+
     private func beginDictation(returnTo: Mode, output: DictationOutput) {
         dictationOutput = output
-        // Remember which app to paste into NOW — before any focus change — so the
-        // final ⌘V lands in the editor the user was in, not our panel.
-        insertTargetApp = output == .insert ? NSWorkspace.shared.frontmostApplication : nil
+        // insertTargetApp is captured at the trigger site (hotkey / voice) before
+        // any focus change, so it isn't touched here.
         store.log("dictation", "started (\(output == .insert ? "insert→cursor" : "report")) — pause or say a stop phrase to finish")
         // A note is a fresh intent — drop any pending clarification/context so it
         // isn't stranded on screen or carried into the next command.
@@ -714,14 +723,16 @@ final class AppCoordinator: ObservableObject {
     nonisolated static func stripDictationTriggers(_ text: String) -> String {
         var out = text.trimmingCharacters(in: .whitespacesAndNewlines)
         let edges = CharacterSet.whitespacesAndNewlines.union(.punctuationCharacters)
-        for phrase in dictateStartPhrases {
+        // Longest phrase first, so "you stop dictating" is tried before the
+        // shorter "stop dictating" (which is its suffix) and doesn't leave "you".
+        for phrase in dictateStartPhrases.sorted(by: { $0.count > $1.count }) {
             if let r = out.range(of: phrase, options: [.caseInsensitive, .anchored]) {
                 out.removeSubrange(..<r.upperBound)
                 break
             }
         }
         out = out.trimmingCharacters(in: edges)
-        for phrase in dictateStopPhrases {
+        for phrase in dictateStopPhrases.sorted(by: { $0.count > $1.count }) {
             if let r = out.range(of: phrase, options: [.caseInsensitive, .backwards]),
                out[r.upperBound...].trimmingCharacters(in: edges).isEmpty {
                 out.removeSubrange(r.lowerBound...)
