@@ -573,6 +573,9 @@ final class AppCoordinator: ObservableObject {
     func startLiveTranscription() {
         guard hasElevenLabsKey else { phase = .error("Live transcript needs an ElevenLabs key"); return }
         guard !processing, mode != .live else { return }
+        // Don't yank the mic out from under an in-progress dictation and silently
+        // drop its note — make the user finish (a pause ends it) before going live.
+        if mode == .dictation { store.log("live", "ignored — finish the current dictation first"); return }
         if !isRunning { pendingLive = true; start(); return }
         liveGeneration += 1   // invalidates any still-in-flight chunk from a prior live session
         liveTranscript = ""
@@ -711,6 +714,8 @@ final class AppCoordinator: ObservableObject {
                     self.store.log("command", "repeat → \(prev)")
                     text = prev
                 } else if !answeringClarification {
+                    // Stored pre-parse: if this command turns out to need clarification,
+                    // "do that again" will re-ask rather than replay the resolved action.
                     self.lastActionableCommand = text
                 }
                 self.store.log("asr", answeringClarification ? "answer: \(text)" : "command: \(text)")
@@ -1012,6 +1017,10 @@ final class AppCoordinator: ObservableObject {
     /// no wake word. `.report` → summary panel; `.insert` → paste at cursor.
     func startDictation(output: DictationOutput = .report) {
         guard isRunning, !processing, mode != .dictation else { return }
+        // Push-to-dictate can fire while live transcription is running; tear the live
+        // session down cleanly first (it flips mode to .standby) so liveActive/capture
+        // don't leak into the dictation. The live transcript so far is retained.
+        if mode == .live { stopLiveTranscription() }
         let returnTo: Mode = mode == .command ? .command : .standby
         if mode == .standby { startTicker() }   // dictation needs the silence-gate ticker
         beginDictation(returnTo: returnTo, output: output)
