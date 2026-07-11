@@ -50,7 +50,9 @@ final class ClaudeClient: @unchecked Sendable {
             Use "dictate_start" when they want to take a note or dictate a passage rather than \
             control the screen. Use "none" if nothing is actionable.
             """,
-            "strict": true,
+            // No `strict: true` — forced tool_choice already guarantees the call,
+            // and strict adds a server-side schema-compilation latency spike on
+            // first use, which is exactly the hot path we want fast.
             "input_schema": [
                 "type": "object",
                 "additionalProperties": false,
@@ -75,7 +77,7 @@ final class ClaudeClient: @unchecked Sendable {
             "messages": [["role": "user", "content": "Spoken command: \"\(transcript)\""]]
         ]
 
-        let json = try await post(body)
+        let json = try await post(body, timeout: 15)
         try Self.checkRefusal(json)
 
         guard let content = json["content"] as? [[String: Any]],
@@ -137,9 +139,10 @@ final class ClaudeClient: @unchecked Sendable {
 
     // MARK: - Transport
 
-    private func post(_ body: [String: Any]) async throws -> [String: Any] {
+    private func post(_ body: [String: Any], timeout: TimeInterval = 30) async throws -> [String: Any] {
         var req = URLRequest(url: endpoint)
         req.httpMethod = "POST"
+        req.timeoutInterval = timeout               // fail fast instead of hanging
         req.setValue(apiKey, forHTTPHeaderField: "x-api-key")
         req.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
         req.setValue("application/json", forHTTPHeaderField: "content-type")

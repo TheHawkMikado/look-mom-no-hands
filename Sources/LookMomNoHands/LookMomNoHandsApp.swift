@@ -37,6 +37,10 @@ struct PanelView: View {
             }
 
             controls
+
+            if !coordinator.accessibilityTrusted {
+                accessibilityNotice
+            }
             Divider()
 
             if let report = coordinator.lastReport {
@@ -92,6 +96,15 @@ struct PanelView: View {
             }
             Spacer()
             Button("Quit") { NSApplication.shared.terminate(nil) }
+        }
+    }
+
+    private var accessibilityNotice: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "cursorarrow.click.badge.clock").foregroundStyle(.orange)
+            Text("Clicking/typing needs Accessibility").font(.caption)
+            Spacer()
+            Button("Enable…") { coordinator.requestAccessibility() }
         }
     }
 

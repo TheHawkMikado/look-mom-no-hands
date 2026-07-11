@@ -21,6 +21,7 @@ final class AppCoordinator: ObservableObject {
     @Published var isActive = false           // wake session open
     @Published var micAuthorized = false
     @Published var speechAuthorized = false
+    @Published var accessibilityTrusted = false
 
     let store = AppStore()
 
@@ -61,6 +62,13 @@ final class AppCoordinator: ObservableObject {
     private func refreshAuthFlags() {
         micAuthorized = AVCaptureDevice.authorizationStatus(for: .audio) == .authorized
         speechAuthorized = SFSpeechRecognizer.authorizationStatus() == .authorized
+        accessibilityTrusted = ScreenController.isTrusted
+    }
+
+    /// Explicit, user-initiated Accessibility prompt (opens System Settings once).
+    /// Never called automatically — only from the panel button, so we don't nag.
+    func requestAccessibility() {
+        ScreenController.requestTrust()
     }
 
     // MARK: API key
@@ -211,6 +219,7 @@ final class AppCoordinator: ObservableObject {
         store.log("asr", "command: \(text)")
         processing = true
         phase = .thinking
+        let startedAt = Date()
 
         Task {
             defer {
@@ -224,7 +233,8 @@ final class AppCoordinator: ObservableObject {
             }
             do {
                 let action = try await claude.parseCommand(text)
-                store.log("claude", "action=\(action.kind.rawValue) target=\"\(action.target)\" conf=\(action.confidence)")
+                let ms = Int(Date().timeIntervalSince(startedAt) * 1000)
+                store.log("claude", "action=\(action.kind.rawValue) target=\"\(action.target)\" conf=\(action.confidence) (\(ms)ms)")
                 switch action.kind {
                 case .dictateStart:
                     self.beginDictation()
@@ -319,10 +329,9 @@ final class AppCoordinator: ObservableObject {
                 }
             }
         }
-        if !ScreenController.isTrusted {
-            store.log("perm", "accessibility not yet trusted — prompting toward System Settings")
-            ScreenController.requestTrust()
-        }
+        // Accessibility is NOT prompted here — only via the panel's explicit button,
+        // so clicking Start never opens System Settings. Just record the status.
+        store.log("perm", "accessibility trusted: \(ScreenController.isTrusted)")
     }
 
     private static func speechName(_ s: SFSpeechRecognizerAuthorizationStatus) -> String {
