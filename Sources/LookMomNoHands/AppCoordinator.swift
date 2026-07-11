@@ -332,6 +332,7 @@ final class AppCoordinator: ObservableObject {
         dialogue = []
         freshUtterance()
         stopTicker()
+        armCaptureForCurrentMode()   // standby ⇒ capture off; stop buffering ambient audio
     }
 
     /// The user clicked an option in the on-screen clarification panel — treat it
@@ -360,17 +361,31 @@ final class AppCoordinator: ObservableObject {
     private func finishProcessing(_ gen: Int) {
         guard gen == runGeneration else { return }
         processing = false
-        guard isRunning, mode == .command else { return }
-        // Preserve an error (so the user sees it) or a pending question (so we
-        // keep waiting for the answer); otherwise return to plain listening.
-        switch phase {
-        case .error, .clarifying: break
-        default: phase = .capturingCommand
+        settleSessionPhase()
+    }
+
+    /// Returns the app to a resting listening state after a command/dictation
+    /// resolves, honoring whatever `mode` is now (a manual note from standby ends
+    /// back in standby, not a phantom command session). Preserves an error or a
+    /// pending question so the user still sees them.
+    private func settleSessionPhase() {
+        guard isRunning else { return }
+        switch mode {
+        case .command:
+            switch phase {
+            case .error, .clarifying: break
+            default: phase = .capturingCommand
+            }
+            sessionIdleSince = Date()
+        case .standby:
+            if case .error = phase {} else { phase = .listeningWake }
+            stopTicker()
+        case .dictation:
+            return   // still capturing; nothing to settle
         }
         // Discard anything heard while we were acting (e.g. our own typing sounds).
         freshUtterance()
-        sessionIdleSince = Date()
-        armCaptureForCurrentMode()   // re-arm (clear) capture for the next command
+        armCaptureForCurrentMode()
     }
 
     // MARK: Commands
@@ -383,8 +398,8 @@ final class AppCoordinator: ObservableObject {
         listener.captureAudio = false
         freshUtterance()
         sessionIdleSince = Date()
-        guard !appleText.isEmpty else { return }
-        guard let claude else { phase = .error("No API key set"); return }
+        guard !appleText.isEmpty else { armCaptureForCurrentMode(); return }
+        guard let claude else { phase = .error("No API key set"); armCaptureForCurrentMode(); return }
 
         // A spoken answer clears the on-screen question — from here it's just
         // another turn in the dialogue.
@@ -475,7 +490,7 @@ final class AppCoordinator: ObservableObject {
                 try Task.checkCancellation()
                 switch step.kind {
                 case .dictateStart:
-                    self.beginDictation()
+                    self.beginDictation(returnTo: .command)
                     return   // dictation owns the session now; remaining steps don't apply
                 case .none:
                     continue
@@ -552,8 +567,17 @@ final class AppCoordinator: ObservableObject {
 
     // MARK: Dictation
 
-    private func beginDictation() {
+    // Where a finishing note returns: a wake-word note keeps the command session
+    // open; a one-tap note from standby returns to standby (no phantom session).
+    private var dictationReturnMode: Mode = .command
+
+    private func beginDictation(returnTo: Mode) {
         store.log("dictation", "started — recording note (pause \(Int(dictationSilence))s to finish)")
+        // A note is a fresh intent — drop any pending clarification/context so it
+        // isn't stranded on screen or carried into the next command.
+        pendingClarification = nil
+        dialogue = []
+        dictationReturnMode = returnTo
         mode = .dictation
         dictationStartAt = Date()
         phase = .dictating
@@ -565,9 +589,10 @@ final class AppCoordinator: ObservableObject {
     /// Starts a dictation immediately, from the panel button — no wake word needed.
     /// Requires listening to be on so the mic pipeline exists.
     func startDictation() {
-        guard isRunning, !processing else { return }
+        guard isRunning, !processing, mode != .dictation else { return }
+        let returnTo: Mode = mode == .command ? .command : .standby
         if mode == .standby { startTicker() }   // dictation needs the silence-gate ticker
-        beginDictation()
+        beginDictation(returnTo: returnTo)
     }
 
     // Capture the utterance's raw audio only when Scribe will re-transcribe it, so
@@ -607,11 +632,12 @@ final class AppCoordinator: ObservableObject {
         let wav = scribeForDictation ? listener.takeCapturedWAV() : nil
         listener.captureAudio = false
         freshUtterance()
-        mode = .command
-        guard !appleText.isEmpty, let claude else {
+        mode = dictationReturnMode
+        // Proceed if EITHER Apple heard something OR we captured audio Scribe can
+        // still transcribe — a dead on-device recognizer must not lose the note.
+        guard !appleText.isEmpty || wav != nil, let claude else {
             store.log("dictation", "empty note")
-            phase = .capturingCommand
-            sessionIdleSince = Date()
+            settleSessionPhase()
             return
         }
         store.log("dictation", "captured \(appleText.count) chars\(wav != nil ? " (+audio for Scribe)" : "") — summarizing")
@@ -622,15 +648,22 @@ final class AppCoordinator: ObservableObject {
         actionTask = Task {
             defer { self.finishProcessing(gen) }
             let text = await self.transcribed(wav: wav, fallback: appleText)
+            guard !text.isEmpty else {
+                self.store.log("dictation", "empty note (no transcript)")
+                return
+            }
             do {
                 try Task.checkCancellation()
                 let report = try await claude.buildDictationReport(text)
                 try Task.checkCancellation()
                 self.lastReport = report
                 self.store.log("claude", "report ready — \(report.keyPoints.count) points, \(report.actionItems.count) action items")
+                // Store the RAW transcript (Scribe or Apple) — it's the note's only
+                // durable copy, and the field means raw ASR text; the model-cleaned
+                // version lives in lastReport for display only.
                 self.store.addTranscript(TranscriptRecord(
                     kind: "dictation",
-                    transcript: report.transcript.isEmpty ? text : report.transcript,
+                    transcript: text,
                     title: report.title,
                     summary: report.summary,
                     keyPoints: report.keyPoints,
