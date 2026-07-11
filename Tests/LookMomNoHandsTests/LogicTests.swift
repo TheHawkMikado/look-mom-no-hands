@@ -132,6 +132,15 @@ final class ActionDecodingTests: XCTestCase {
         XCTAssertFalse(AppCoordinator.isRepeatPhrase(""))
     }
 
+    func testRecorderOutputRouting() {
+        XCTAssertTrue(RecorderOutput.insert.producesInsert)
+        XCTAssertFalse(RecorderOutput.insert.producesNote)
+        XCTAssertTrue(RecorderOutput.note.producesNote)
+        XCTAssertFalse(RecorderOutput.note.producesInsert)
+        XCTAssertTrue(RecorderOutput.both.producesInsert)
+        XCTAssertTrue(RecorderOutput.both.producesNote)
+    }
+
     func testSwitchTabKindDecodes() throws {
         let json = #"{"kind":"switch_tab","target":"Pull Requests","text":"","confidence":1.0}"#
         let action = try JSONDecoder().decode(ScreenAction.self, from: Data(json.utf8))

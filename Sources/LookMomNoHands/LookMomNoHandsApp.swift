@@ -47,7 +47,6 @@ struct PanelView: View {
 
             controls
             dictateRow
-            liveRow
 
             if !coordinator.accessibilityTrusted {
                 accessibilityNotice
@@ -141,14 +140,14 @@ struct PanelView: View {
                 Text("End after pause").font(.caption2).foregroundStyle(.secondary)
                 Spacer()
                 Picker("", selection: Binding(
-                    get: { coordinator.dictationSilence },
-                    set: { coordinator.dictationSilence = $0 }
+                    get: { coordinator.recorderEndPause },
+                    set: { coordinator.recorderEndPause = $0 }
                 )) {
-                    Text("3s").tag(TimeInterval(3))
-                    Text("5s").tag(TimeInterval(5))
-                    Text("10s").tag(TimeInterval(10))
+                    Text("15s").tag(TimeInterval(15))
                     Text("30s").tag(TimeInterval(30))
                     Text("60s").tag(TimeInterval(60))
+                    Text("2m").tag(TimeInterval(120))
+                    Text("Never").tag(TimeInterval(0))
                 }
                 .labelsHidden().frame(width: 90)
             }
@@ -204,45 +203,24 @@ struct PanelView: View {
         }
     }
 
-    // One-tap dictation (no wake word). Records a note; a pause ends it and
-    // produces the report. Only meaningful while listening is on.
+    // The unified recorder: record a note of any length; it transcribes as you go
+    // and processes into a note on stop. Push-to-dictate (the chord) is the insert
+    // variant of the same recorder.
     private var dictateRow: some View {
         HStack(spacing: 8) {
-            if coordinator.phase == .dictating {
+            if coordinator.phase == .recording || coordinator.liveActive {
                 Image(systemName: "waveform.badge.mic").foregroundStyle(.red)
-                Text("Recording note — pause to finish").font(.caption)
+                Text("Recording — pause or say “Mama stop” to finish").font(.caption)
                 Spacer()
+                Button("Stop") { coordinator.stopRecording() }
             } else {
                 Button {
-                    coordinator.startDictation()
+                    coordinator.startRecording(output: .note)
                 } label: {
-                    Label("Dictate a note", systemImage: "mic.circle.fill")
+                    Label("Record a note", systemImage: "mic.circle.fill")
                 }
                 .disabled(!coordinator.isRunning || !coordinator.hasKey)
                 Spacer()
-            }
-        }
-    }
-
-    // Otter-style live transcript. Chunked to Scribe, so it needs an ElevenLabs key.
-    private var liveRow: some View {
-        HStack(spacing: 8) {
-            if coordinator.liveActive {
-                Image(systemName: "waveform").foregroundStyle(.red)
-                Text("Live transcript running").font(.caption)
-                Spacer()
-                Button("Stop") { coordinator.stopLiveTranscription() }
-            } else {
-                Button {
-                    coordinator.startLiveTranscription()
-                } label: {
-                    Label("Live transcript", systemImage: "waveform.badge.plus")
-                }
-                .disabled(!coordinator.hasElevenLabsKey)
-                Spacer()
-                if !coordinator.hasElevenLabsKey {
-                    Text("needs ElevenLabs key").font(.caption2).foregroundStyle(.secondary)
-                }
             }
         }
     }

@@ -118,28 +118,28 @@ private struct LiveTab: View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 10) {
                 if coordinator.liveActive {
-                    Button(role: .destructive) { coordinator.stopLiveTranscription() } label: {
+                    Button(role: .destructive) { coordinator.stopRecording() } label: {
                         Label("Stop", systemImage: "stop.circle.fill")
                     }
                     Label("Recording…", systemImage: "waveform")
                         .foregroundStyle(.red).font(.callout)
                 } else {
-                    Button { coordinator.startLiveTranscription() } label: {
-                        Label("Start live transcript", systemImage: "record.circle")
+                    Button { coordinator.startRecording(output: .note) } label: {
+                        Label("Record a note", systemImage: "record.circle")
                     }
-                    .disabled(!coordinator.hasElevenLabsKey)
+                    .disabled(!coordinator.hasKey)
                 }
                 Spacer()
                 if coordinator.liveBusy { ProgressView().controlSize(.small) }
             }
             if !coordinator.hasElevenLabsKey {
-                Text("Add an ElevenLabs API key to enable live transcription.")
+                Text("Recording works on-device; add an ElevenLabs key for higher-accuracy transcription.")
                     .font(.caption).foregroundStyle(.secondary)
             }
 
             ScrollView {
                 Text(coordinator.liveTranscript.isEmpty
-                     ? "Nothing captured yet. Press Start and talk — the transcript fills in every ~60 seconds."
+                     ? "Nothing captured yet. Press Record and talk — it transcribes as you go and processes into a note when you stop."
                      : coordinator.liveTranscript)
                     .textSelection(.enabled)
                     .foregroundStyle(coordinator.liveTranscript.isEmpty ? .secondary : .primary)
@@ -280,7 +280,8 @@ private struct SettingsTab: View {
     @ObservedObject var coordinator: AppCoordinator
 
     private let pauseOptions: [(String, TimeInterval)] =
-        [("3 seconds", 3), ("5 seconds", 5), ("10 seconds", 10), ("30 seconds", 30), ("1 minute", 60)]
+        [("5 seconds", 5), ("15 seconds", 15), ("30 seconds", 30), ("1 minute", 60),
+         ("2 minutes", 120), ("Never (stop manually)", 0)]
 
     var body: some View {
         Form {
@@ -294,11 +295,11 @@ private struct SettingsTab: View {
                     .font(.caption).foregroundStyle(.secondary)
             }
 
-            Section("Dictation") {
-                Picker("End after pause", selection: $coordinator.dictationSilence) {
+            Section("Recording") {
+                Picker("End after pause", selection: $coordinator.recorderEndPause) {
                     ForEach(pauseOptions, id: \.1) { Text($0.0).tag($0.1) }
                 }
-                Toggle("Clean up dictated text before pasting", isOn: $coordinator.cleanUpInsertedText)
+                Toggle("Clean up inserted text before pasting", isOn: $coordinator.cleanUpInsertedText)
                 Picker("Push-to-dictate chord", selection: $coordinator.dictationChord) {
                     ForEach(DictationChord.allCases, id: \.self) { Text($0.label).tag($0) }
                 }

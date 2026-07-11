@@ -149,11 +149,23 @@ enum ScrollDirection: String, Decodable, Sendable {
     case up, down, left, right
 }
 
-/// Where a finished dictation goes. `report` builds the VoiceDash-style summary
-/// panel; `insert` cleans the text and pastes it at the cursor (+ clipboard).
-enum DictationOutput: Sendable {
-    case report
+/// What the recorder does with a finished transcript. `note` runs the active
+/// processing profile into a saved report; `insert` cleans it and pastes at the
+/// cursor (+ clipboard); `both` does both. One recorder, output chosen per run.
+enum RecorderOutput: Sendable, Equatable {
     case insert
+    case note
+    case both
+
+    var producesNote: Bool { self == .note || self == .both }
+    var producesInsert: Bool { self == .insert || self == .both }
+    var label: String {
+        switch self {
+        case .insert: return "Insert at cursor"
+        case .note: return "Save as note"
+        case .both: return "Insert + note"
+        }
+    }
 }
 
 /// One entry in the user's vocabulary — the unified store behind "dictionary"
@@ -314,11 +326,10 @@ enum AppPhase: Equatable, Sendable {
     case idle                 // waiting for the wake word
     case listeningWake        // wake engine warming/running
     case capturingCommand     // recording a one-shot command
-    case dictating            // recording a long note
+    case recording            // recording a note/dictation (any length)
     case thinking             // Claude call in flight
     case acting               // executing a screen action
     case clarifying           // asked the user a question; listening for the answer
-    case live                 // Otter-style live transcription running
     case error(String)
 
     var label: String {
@@ -326,11 +337,10 @@ enum AppPhase: Equatable, Sendable {
         case .idle: return "Off"
         case .listeningWake: return "Standby — say “Hey Mama”"
         case .capturingCommand: return "Active — listening"
-        case .dictating: return "Dictating…"
+        case .recording: return "Recording…"
         case .thinking: return "Thinking…"
         case .acting: return "Acting…"
         case .clarifying: return "Waiting for your answer…"
-        case .live: return "Live transcript…"
         case .error(let m): return "Error: \(m)"
         }
     }

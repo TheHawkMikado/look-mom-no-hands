@@ -50,10 +50,10 @@ final class AppCoordinator: ObservableObject {
     private static let cleanupKey = "cleanUpInsertedText"
     private static let visionKey = "visionClickEnabled"
     private let hotkey = HotkeyMonitor()
-    private var dictationOutput: DictationOutput = .report   // where the current note goes
-    private var pendingHotkeyDictation = false               // start requested before the mic was on
+    private var recorderOutput: RecorderOutput = .note       // what the current recording produces
     private var starting = false                             // start() in flight (async permission gap)
-    private var pendingLive = false                          // live transcript requested before the mic was on
+    private var pendingRecording = false                     // recording requested before the mic was on
+    private var pendingRecordingOutput: RecorderOutput = .note
     private var insertTargetApp: NSRunningApplication?       // app to paste into (captured at insert start)
     private var lastExternalApp: NSRunningApplication?       // most recent frontmost app that ISN'T us
 
@@ -71,7 +71,7 @@ final class AppCoordinator: ObservableObject {
     @Published private(set) var recentActions: [String] = []   // rolling command→outcome memory for the planner
     private static let recentActionsMax = 8
 
-    private enum Mode { case standby, command, dictation, live }
+    private enum Mode { case standby, command, recording }
     private var mode: Mode = .standby
 
     // Otter-style live transcription: capture continuously and flush ~60s audio
@@ -97,7 +97,6 @@ final class AppCoordinator: ObservableObject {
     private var utterance = ""                // current partial transcript
     private var lastHeardAt = Date()
     private var sessionIdleSince = Date()
-    private var dictationStartAt = Date()
     private var ticker: Timer?
     private var actionTask: Task<Void, Never>?   // in-flight parse/act; cancelled by stop()
     private var runGeneration = 0                // stale task completions must not touch newer state
@@ -113,18 +112,16 @@ final class AppCoordinator: ObservableObject {
     // Longer than the old 1.2s: a spoken request can be several action items, so
     // don't cut it off on a mid-sentence breath.
     private let commandSilence: TimeInterval = 2.2
-    // Seconds of silence that ends a dictation. Editable + persisted: 3s suits
-    // quick paste-at-cursor; crank it up (to 60s) for long-pause / Otter-style
-    // capture, where you end explicitly with the chord or a stop phrase instead.
-    @Published var dictationSilence: TimeInterval = 3.0 {
-        didSet { UserDefaults.standard.set(dictationSilence, forKey: Self.silenceKey) }
+    // Seconds of silence that ends a recording. Editable + persisted. 0 = never
+    // auto-end (you stop with the chord, a stop phrase, or the pill). Default 60s
+    // so a thinking pause doesn't cut a note short. Chunk-flush uses a separate
+    // short pause; this is only the session-end pause.
+    @Published var recorderEndPause: TimeInterval = 60 {
+        didSet { UserDefaults.standard.set(recorderEndPause, forKey: Self.silenceKey) }
     }
-    private static let silenceKey = "dictationSilence"
-    // Hard-cap backstop on one dictation (the ~3s silence gate is the normal end).
-    // 1 hour. Not higher: with ElevenLabs on, the raw audio is buffered in memory
-    // for the whole note (~340MB/hr), so multi-hour continuous dictation needs
-    // streaming, not buffering — a separate change.
-    private let dictationMax: TimeInterval = 3600
+    private static let silenceKey = "recorderEndPause"
+    // No hard cap: capture is chunked (never buffers more than one chunk of audio),
+    // so a recording can run for hours.
     private let sessionIdleLimit: TimeInterval = 90   // quiet this long → standby
 
     // The misspellings are how the recognizer actually renders the phrases;
@@ -155,7 +152,7 @@ final class AppCoordinator: ObservableObject {
     init() {
         vocabulary = VocabularyStore(directory: store.directory)
         if UserDefaults.standard.object(forKey: Self.silenceKey) != nil {
-            dictationSilence = UserDefaults.standard.double(forKey: Self.silenceKey)
+            recorderEndPause = UserDefaults.standard.double(forKey: Self.silenceKey)
         }
         if let raw = UserDefaults.standard.string(forKey: Self.engineKey),
            let saved = SpeechEngine(rawValue: raw) {
@@ -332,8 +329,7 @@ final class AppCoordinator: ObservableObject {
             guard let self else { return }
             self.starting = false
             guard granted else {
-                self.pendingHotkeyDictation = false
-                self.pendingLive = false
+                self.pendingRecording = false
                 self.phase = .error("Mic/Speech permission denied")
                 self.store.log("perm", "denied — cannot start")
                 return
@@ -342,8 +338,7 @@ final class AppCoordinator: ObservableObject {
                 try self.listener.start()
             } catch {
                 // Don't claim to be listening over a dead pipeline.
-                self.pendingHotkeyDictation = false
-                self.pendingLive = false
+                self.pendingRecording = false
                 self.phase = .error("\(error)")
                 self.store.log("error", "listener failed to start: \(error)")
                 return
@@ -354,22 +349,19 @@ final class AppCoordinator: ObservableObject {
             self.phase = .listeningWake
             self.utterance = ""
             self.store.log("app", "listening enabled (standby)")
-            // A hotkey press that started the mic proceeds straight into dictation.
-            if self.pendingHotkeyDictation {
-                self.pendingHotkeyDictation = false
-                self.startDictation(output: .insert)
-            } else if self.pendingLive {
-                self.pendingLive = false
-                self.startLiveTranscription()
+            // A trigger that started the mic proceeds straight into recording.
+            if self.pendingRecording {
+                self.pendingRecording = false
+                self.startRecording(output: self.pendingRecordingOutput)
             }
         }
     }
 
-    /// The push-to-dictate chord/hotkey: toggles insert-mode dictation, starting
+    /// The push-to-dictate chord/hotkey: toggles insert-mode recording, starting
     /// the mic on demand if the app wasn't already listening.
     func toggleHotkeyDictation() {
-        if mode == .dictation {
-            finalizeDictation()
+        if mode == .recording {
+            stopRecording()
             return
         }
         // Capture the paste target NOW, before start() might activate our app on a
@@ -383,13 +375,14 @@ final class AppCoordinator: ObservableObject {
             return
         }
         if isRunning {
-            startDictation(output: .insert)
-        } else if starting || pendingHotkeyDictation {
+            startRecording(output: .insert)
+        } else if starting || pendingRecording {
             // A second press during the async startup cancels the pending start.
-            pendingHotkeyDictation = false
+            pendingRecording = false
             store.log("hotkey", "startup cancelled by second press")
         } else {
-            pendingHotkeyDictation = true
+            pendingRecording = true
+            pendingRecordingOutput = .insert
             start()
         }
     }
@@ -402,8 +395,7 @@ final class AppCoordinator: ObservableObject {
         speaking = false
         flushing = false
         pendingClarification = nil
-        pendingHotkeyDictation = false
-        pendingLive = false
+        pendingRecording = false
         liveActive = false
         dialogue = []
         isRunning = false
@@ -445,18 +437,17 @@ final class AppCoordinator: ObservableObject {
         switch mode {
         case .standby:
             if Self.wakePhrases.contains(where: tail.contains) { beginSession() }
-            else if Self.liveStartPhrases.contains(where: tail.contains) { startLiveTranscription() }
+            else if Self.liveStartPhrases.contains(where: tail.contains) { startRecording(output: .note) }
             else if Self.dictateStartPhrases.contains(where: tail.contains) { startInsertByVoice() }
         case .command:
             if Self.stopPhrases.contains(where: tail.contains) { endSession(reason: "\"Adios Mama\"") }
-            else if Self.liveStartPhrases.contains(where: tail.contains) { startLiveTranscription() }
+            else if Self.liveStartPhrases.contains(where: tail.contains) { startRecording(output: .note) }
             else if Self.dictateStartPhrases.contains(where: tail.contains) { startInsertByVoice() }
-        case .dictation:
-            // A voice stop phrase ends the note; otherwise a long pause does.
-            if Self.dictateStopPhrases.contains(where: tail.contains) { finalizeDictation() }
-        case .live:
-            // Only a stop phrase ends live capture; the chunks accumulate otherwise.
-            if Self.liveStopPhrases.contains(where: tail.contains) { stopLiveTranscription() }
+        case .recording:
+            // Either a dictation or a live stop phrase ends the recording; otherwise
+            // capture continues (chunks accumulate) until a long pause or the pill.
+            if Self.dictateStopPhrases.contains(where: tail.contains)
+                || Self.liveStopPhrases.contains(where: tail.contains) { stopRecording() }
         }
     }
 
@@ -482,16 +473,23 @@ final class AppCoordinator: ObservableObject {
                       Date().timeIntervalSince(sessionIdleSince) > sessionIdleLimit {
                 endSession(reason: "inactivity")
             }
-        case .dictation:
-            let tooLong = Date().timeIntervalSince(dictationStartAt) > dictationMax
-            if (!utterance.isEmpty && quiet > dictationSilence) || tooLong {
-                finalizeDictation()
+        case .recording:
+            // Chunk-flush (Scribe only) at a short pause; unchanged from live.
+            if scribeForRecording, !flushing {
+                let sinceFlush = Date().timeIntervalSince(lastFlushAt)
+                if (sinceFlush > liveChunkSeconds && quiet > liveChunkSilence) || sinceFlush > liveChunkMax {
+                    flushLiveChunk(final: false)
+                }
             }
-        case .live:
-            let sinceFlush = Date().timeIntervalSince(lastFlushAt)
-            // Flush after ~60s at the next pause (sentence end), or force it by 90s.
-            if !flushing, (sinceFlush > liveChunkSeconds && quiet > liveChunkSilence) || sinceFlush > liveChunkMax {
-                flushLiveChunk(final: false)
+            // End the whole recording after a long configured pause (0 = never).
+            let hasContent = !utterance.isEmpty || !liveTranscript.isEmpty
+            if recorderEndPause > 0, hasContent, quiet > recorderEndPause {
+                stopRecording()
+            } else if !hasContent, quiet > sessionIdleLimit {
+                // Nothing was ever said (accidental trigger, muted mic) — don't leave
+                // the mic + ticker running forever.
+                store.log("recorder", "ended — no speech in \(Int(sessionIdleLimit))s")
+                stopRecording()
             }
         }
     }
@@ -566,7 +564,7 @@ final class AppCoordinator: ObservableObject {
         case .standby:
             if case .error = phase {} else { phase = .listeningWake }
             stopTicker()
-        case .dictation, .live:
+        case .recording:
             return   // still capturing; nothing to settle
         }
         // Discard anything heard while we were acting (e.g. our own typing sounds).
@@ -574,47 +572,122 @@ final class AppCoordinator: ObservableObject {
         armCaptureForCurrentMode()
     }
 
-    // MARK: Live transcription (Otter-style, chunked)
+    // MARK: Recorder (unified dictation + live, chunked, any length)
 
-    /// Begins continuous background transcription: captures audio and flushes ~60s
-    /// chunks to Scribe, appending to `liveTranscript`. Requires an ElevenLabs key
-    /// (chunks are transcribed by Scribe). Starts the mic on demand.
-    func startLiveTranscription() {
-        guard hasElevenLabsKey else { phase = .error("Live transcript needs an ElevenLabs key"); return }
-        guard !processing, mode != .live else { return }
-        // Don't yank the mic out from under an in-progress dictation and silently
-        // drop its note — make the user finish (a pause ends it) before going live.
-        if mode == .dictation { store.log("live", "ignored — finish the current dictation first"); return }
-        if !isRunning { pendingLive = true; start(); return }
-        liveGeneration += 1   // invalidates any still-in-flight chunk from a prior live session
+    private var flushTask: Task<Void, Never>?   // in-flight periodic chunk transcription
+
+    /// Starts one recorder for any length of speech. `output` decides what happens
+    /// on stop: paste at the cursor, save a processed note, or both. Uses Scribe
+    /// (chunked, unbounded) when the engine allows + a key exists; otherwise Apple
+    /// on-device only. Starts the mic on demand.
+    func startRecording(output: RecorderOutput) {
+        // A note needs Claude to process; a raw insert doesn't. Fail early only when
+        // the chosen output genuinely can't be produced.
+        if output.producesNote, claude == nil {
+            phase = .error("Saving a note needs an API key")
+            store.log("recorder", "ignored — note output needs Claude")
+            return
+        }
+        guard !processing, mode != .recording else { return }
+        if !isRunning { pendingRecording = true; pendingRecordingOutput = output; start(); return }
+        recorderOutput = output
+        recorderReturnMode = (mode == .command) ? .command : .standby
+        liveGeneration += 1   // invalidates any still-in-flight chunk from a prior recording
         liveTranscript = ""
         liveActive = true
-        mode = .live
-        phase = .live
+        mode = .recording
+        phase = .recording
         lastFlushAt = Date()
+        lastHeardAt = Date()   // don't let the end-pause fire before any speech
         flushing = false
         freshUtterance()
         listener.carryForward = true
-        armCaptureForCurrentMode()   // captureAudio = true
+        armCaptureForCurrentMode()
         startTicker()
-        store.log("live", "started")
+        store.log("recorder", "started (\(output))")
     }
 
-    func stopLiveTranscription() {
-        guard mode == .live else { return }
-        flushLiveChunk(final: true)   // transcribe the remaining audio
-        mode = .standby
+    /// Ends the recording and applies its output. Kicks a task that waits for the
+    /// last chunk, assembles the full transcript, then inserts/processes it.
+    func stopRecording() {
+        guard mode == .recording else { return }
+        let output = recorderOutput
+        mode = recorderReturnMode
         liveActive = false
-        phase = isRunning ? .listeningWake : .idle
-        listener.captureAudio = false
         listener.carryForward = false
-        stopTicker()
-        freshUtterance()
-        store.log("live", "stopped — \(liveTranscript.count) chars")
+        store.log("recorder", "stopped (\(output)) — processing")
+        finishRecording(output: output)
     }
 
-    /// Takes the current audio chunk, transcribes it via Scribe, and appends the
-    /// text to the running transcript — never holding more than one chunk in memory.
+    private func finishRecording(output: RecorderOutput) {
+        processing = true
+        phase = .thinking
+        let gen = runGeneration
+        actionTask = Task {
+            defer { self.finishProcessing(gen) }
+            let raw = await self.finalizeRecorderTranscript()
+            let text = Self.stripDictationTriggers(raw).trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !text.isEmpty else {
+                // Silence reads as success in a hands-free app — say so instead.
+                self.store.log("recorder", "empty recording")
+                guard gen == self.runGeneration, !Task.isCancelled else { return }
+                self.phase = .error("couldn't make out that recording")
+                await self.speak("Sorry, I couldn't make out that recording.", gen: gen)
+                return
+            }
+            do {
+                try Task.checkCancellation()
+                if output.producesInsert {
+                    try await self.insertDictation(text, claude: self.claude, gen: gen)
+                }
+                if output.producesNote {
+                    guard let claude = self.claude else {
+                        self.store.addTranscript(TranscriptRecord(kind: "dictation", transcript: text))
+                        return
+                    }
+                    let report = try await claude.buildDictationReport(text, vocabulary: self.vocabulary.promptContext)
+                    try Task.checkCancellation()
+                    self.lastReport = report
+                    self.store.addTranscript(TranscriptRecord(kind: "dictation", transcript: text,
+                        title: report.title, summary: report.summary,
+                        keyPoints: report.keyPoints, actionItems: report.actionItems))
+                    self.store.log("claude", "note ready — \(report.keyPoints.count) points, \(report.actionItems.count) action items")
+                }
+            } catch {
+                // Never lose the note — the raw text is the only durable copy.
+                let outcome = Task.isCancelled ? "cancelled" : "error: \(error)"
+                self.store.addTranscript(TranscriptRecord(kind: "dictation", transcript: text, outcome: outcome))
+                guard !Task.isCancelled, gen == self.runGeneration else { return }
+                self.phase = .error("\(error)")
+                self.store.log("error", "\(error)")
+            }
+        }
+    }
+
+    /// Waits for any in-flight periodic chunk, transcribes the trailing audio, and
+    /// returns the complete transcript. Prefers Scribe's accumulated text but falls
+    /// back to Apple's on-device transcript — a Scribe outage must never lose a note.
+    private func finalizeRecorderTranscript() async -> String {
+        await flushTask?.value   // let the last periodic chunk land before the tail
+        var tailWav: Data?
+        if scribeForRecording, let key = elevenLabsKey, let wav = listener.takeCapturedWAV() {
+            tailWav = wav
+            let tail = ((try? await ScribeClient(apiKey: key).transcribe(wav: wav)) ?? "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if !tail.isEmpty { liveTranscript += (liveTranscript.isEmpty ? "" : " ") + tail }
+        }
+        listener.captureAudio = false
+        let scribe = liveTranscript.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !scribe.isEmpty { return scribe }
+        // Scribe produced nothing (offline / rate-limited / disabled) — use Apple's.
+        if !utterance.isEmpty { return utterance }
+        // Both engines silent but we had audio: persist the tail so it's recoverable.
+        if let tailWav { await store.saveAudioAndWait(tailWav) }
+        return ""
+    }
+
+    /// Transcribes one ~chunk of audio via Scribe and appends it — never holding
+    /// more than a chunk in memory (what makes multi-hour recording safe).
     private func flushLiveChunk(final: Bool) {
         guard let key = elevenLabsKey else { return }
         guard let wav = listener.takeCapturedWAV() else { lastFlushAt = Date(); return }
@@ -622,18 +695,16 @@ final class AppCoordinator: ObservableObject {
         lastFlushAt = Date()
         let gen = runGeneration
         let liveGen = liveGeneration
-        Task {
+        flushTask = Task {
             let text = ((try? await ScribeClient(apiKey: key).transcribe(wav: wav)) ?? "")
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             self.flushing = false
-            // Keep this chunk unless the app was hard-stopped (runGeneration bumped)
-            // or a *new* live session started (liveGeneration bumped). A graceful stop
-            // flips `mode` to .standby but leaves both generations, so the tail chunk
-            // still lands — checking `mode == .live` here would silently drop it.
+            // Drop only if the app was hard-stopped or a *new* recording started; a
+            // graceful stop leaves both generations so the tail still lands.
             guard gen == self.runGeneration, liveGen == self.liveGeneration else { return }
             guard !text.isEmpty else { return }
             self.liveTranscript += (self.liveTranscript.isEmpty ? "" : " ") + text
-            self.store.log("live", "\(final ? "final " : "")chunk +\(text.count) chars")
+            self.store.log("recorder", "\(final ? "final " : "")chunk +\(text.count) chars")
         }
     }
 
@@ -844,8 +915,8 @@ final class AppCoordinator: ObservableObject {
                 try Task.checkCancellation()
                 switch step.kind {
                 case .dictateStart:
-                    self.beginDictation(returnTo: .command, output: .report)
-                    return   // dictation owns the session now; remaining steps don't apply
+                    self.startRecording(output: .note)
+                    return   // the recorder owns the session now; remaining steps don't apply
                 case .describeScreen:
                     // Writes its own transcript record (the spoken answer), so it's
                     // not added to `performed` — that would double-log a thin record.
@@ -1046,17 +1117,17 @@ final class AppCoordinator: ObservableObject {
         return out.trimmingCharacters(in: .whitespacesAndNewlines.union(.punctuationCharacters))
     }
 
-    // MARK: Dictation
+    // MARK: Recorder triggers
 
-    // Where a finishing note returns: a wake-word note keeps the command session
-    // open; a one-tap note from standby returns to standby (no phantom session).
-    private var dictationReturnMode: Mode = .command
+    // Where a finishing recording returns: a wake-word note keeps the command
+    // session open; a one-tap note from standby returns to standby.
+    private var recorderReturnMode: Mode = .command
 
     /// Voice-triggered insert: capture the paste target before starting (the app
     /// is already frontmost — no activation happens on this path).
     private func startInsertByVoice() {
         captureInsertTarget()
-        startDictation(output: .insert)
+        startRecording(output: .insert)
     }
 
     /// The app to paste into: the current frontmost app, or — if that's us (panel
@@ -1071,37 +1142,6 @@ final class AppCoordinator: ObservableObject {
         }
     }
 
-    private func beginDictation(returnTo: Mode, output: DictationOutput) {
-        dictationOutput = output
-        // insertTargetApp is captured at the trigger site (hotkey / voice) before
-        // any focus change, so it isn't touched here.
-        store.log("dictation", "started (\(output == .insert ? "insert→cursor" : "report")) — pause or say a stop phrase to finish")
-        // A note is a fresh intent — drop any pending clarification/context so it
-        // isn't stranded on screen or carried into the next command.
-        pendingClarification = nil
-        dialogue = []
-        dictationReturnMode = returnTo
-        mode = .dictation
-        dictationStartAt = Date()
-        phase = .dictating
-        freshUtterance()
-        listener.carryForward = true   // a note may cross a recognition-request cycle
-        armCaptureForCurrentMode()
-    }
-
-    /// Starts a dictation immediately (panel button, voice phrase, or hotkey) with
-    /// no wake word. `.report` → summary panel; `.insert` → paste at cursor.
-    func startDictation(output: DictationOutput = .report) {
-        guard isRunning, !processing, mode != .dictation else { return }
-        // Push-to-dictate can fire while live transcription is running; tear the live
-        // session down cleanly first (it flips mode to .standby) so liveActive/capture
-        // don't leak into the dictation. The live transcript so far is retained.
-        if mode == .live { stopLiveTranscription() }
-        let returnTo: Mode = mode == .command ? .command : .standby
-        if mode == .standby { startTicker() }   // dictation needs the silence-gate ticker
-        beginDictation(returnTo: returnTo, output: output)
-    }
-
     // Capture the utterance's raw audio only when Scribe will re-transcribe it, so
     // Apple stays the sole engine (and no buffering) whenever Scribe isn't in play.
     private func armCaptureForCurrentMode() {
@@ -1109,13 +1149,14 @@ final class AppCoordinator: ObservableObject {
         switch mode {
         case .standby: want = false
         case .command: want = hasElevenLabsKey && speechEngine.usesScribe(forDictation: false)
-        case .dictation: want = hasElevenLabsKey && speechEngine.usesScribe(forDictation: true)
-        case .live: want = hasElevenLabsKey   // live always uses Scribe (chunked)
+        case .recording: want = scribeForRecording   // Apple-only recording captures nothing extra
         }
         listener.captureAudio = want   // setting true also clears the prior clip
     }
 
-    private var scribeForDictation: Bool { hasElevenLabsKey && speechEngine.usesScribe(forDictation: true) }
+    // Recording uses Scribe (chunked, high-accuracy) when the engine setting allows
+    // and a key exists; otherwise it's Apple on-device only (still works, unbounded).
+    private var scribeForRecording: Bool { hasElevenLabsKey && speechEngine.usesScribe(forDictation: true) }
     private var scribeForCommand: Bool { hasElevenLabsKey && speechEngine.usesScribe(forDictation: false) }
 
     /// Re-transcribes the captured clip through Scribe for higher accuracy; returns
@@ -1177,88 +1218,6 @@ final class AppCoordinator: ObservableObject {
             }
         }
         return words.joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-
-    private func finalizeDictation() {
-        listener.carryForward = false
-        let output = dictationOutput
-        // A spoken start/stop phrase lands at the note's edges — strip only there.
-        let appleText = Self.stripDictationTriggers(utterance)
-        // Grab the captured clip (if any) before freshUtterance/arming touches it.
-        let wav = scribeForDictation ? listener.takeCapturedWAV() : nil
-        listener.captureAudio = false
-        freshUtterance()
-        mode = dictationReturnMode
-        // Report and cleanup-on insert need Claude; raw insert doesn't. Scribe uses
-        // the ElevenLabs key separately.
-        let needsClaude = output == .report || cleanUpInsertedText
-        // Proceed if EITHER Apple heard something OR we captured audio Scribe can
-        // still transcribe — a dead on-device recognizer must not lose the note.
-        guard !appleText.isEmpty || wav != nil else {
-            store.log("dictation", "empty note")
-            settleSessionPhase()
-            return
-        }
-        if needsClaude, claude == nil {
-            phase = .error("No API key set")
-            store.log("dictation", "needs an API key for \(output == .report ? "the report" : "cleanup")")
-            settleSessionPhase()
-            return
-        }
-        store.log("dictation", "captured \(appleText.count) chars\(wav != nil ? " (+audio for Scribe)" : "") — \(output == .insert ? "pasting" : "summarizing")")
-        processing = true
-        phase = .thinking
-        let gen = runGeneration
-
-        actionTask = Task {
-            defer { self.finishProcessing(gen) }
-            var text = await self.transcribed(wav: wav, fallback: appleText)
-            // Scribe re-transcribes the whole clip, edge triggers included — strip again.
-            text = Self.stripDictationTriggers(text)
-            guard !text.isEmpty else {
-                // Empty ⟹ Apple heard nothing AND Scribe returned nothing/failed on a
-                // clip that existed. Persist it (recoverable) and surface — never
-                // pretend success. (Insert notes still get an error so nothing is
-                // pasted silently.)
-                if let wav { await self.store.saveAudioAndWait(wav) }
-                guard gen == self.runGeneration else { return }
-                self.phase = .error("couldn't transcribe that note")
-                self.store.log("dictation", "transcription failed on captured audio")
-                await self.speak("Sorry, I couldn't make out that note.", gen: gen)
-                return
-            }
-            do {
-                try Task.checkCancellation()
-                switch output {
-                case .insert:
-                    try await self.insertDictation(text, claude: self.claude, gen: gen)
-                case .report:
-                    guard let claude = self.claude else { return }   // guaranteed by needsClaude
-                    let report = try await claude.buildDictationReport(text, vocabulary: self.vocabulary.promptContext)
-                    try Task.checkCancellation()
-                    self.lastReport = report
-                    self.store.log("claude", "report ready — \(report.keyPoints.count) points, \(report.actionItems.count) action items")
-                    // Store the RAW transcript (Scribe or Apple) — it's the note's
-                    // only durable copy, and the field means raw ASR text; the
-                    // model-cleaned version lives in lastReport for display only.
-                    self.store.addTranscript(TranscriptRecord(
-                        kind: "dictation", transcript: text,
-                        title: report.title, summary: report.summary,
-                        keyPoints: report.keyPoints, actionItems: report.actionItems))
-                }
-            } catch {
-                // Whatever went wrong, never lose the note — the raw text is already
-                // gone from the live buffer, so this record is its only copy.
-                let outcome = Task.isCancelled ? "cancelled" : "error: \(error)"
-                self.store.addTranscript(TranscriptRecord(kind: "dictation", transcript: text, outcome: outcome))
-                guard !Task.isCancelled, gen == self.runGeneration else {
-                    self.store.log("dictation", "stopped mid-summarize — raw note saved")
-                    return
-                }
-                self.phase = .error("\(error)")
-                self.store.log("error", "\(error)")
-            }
-        }
     }
 
     /// Insert mode: optionally clean the text, then paste it into the app the user
