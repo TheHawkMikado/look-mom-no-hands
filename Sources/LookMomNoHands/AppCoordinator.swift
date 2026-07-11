@@ -536,14 +536,19 @@ final class AppCoordinator: ObservableObject {
                 self.lastCommand = text
                 self.store.log("asr", answeringClarification ? "answer: \(text)" : "command: \(text)")
                 // Read the actual screen only when the command likely acts on it —
-                // simple "open X" commands skip the (slower) AX walk. Off the main
-                // actor; a failure just falls back to no screen context.
+                // simple "open X" commands skip the (slower) AX walk. Runs in a
+                // task-group child (off the main actor AND cancellation-aware, so
+                // Stop interrupts the walk); a failure falls back to no context.
                 var screen = ""
                 if Self.needsScreenContext(text) {
-                    screen = (try? await Task.detached(priority: .userInitiated) {
-                        try ScreenController.focusedWindowSnapshot()?.promptText
-                    }.value) ?? ""
-                    if !screen.isEmpty { self.store.log("screen", "read \(screen.split(separator: "\n").count - 1) elements") }
+                    let snap = try await withThrowingTaskGroup(of: ScreenController.Snapshot?.self) { group in
+                        group.addTask { try? ScreenController.focusedWindowSnapshot() }
+                        return try await group.next() ?? nil
+                    }
+                    if let snap {
+                        screen = snap.promptText
+                        self.store.log("screen", "read \(snap.elements.count) elements from \(snap.app)")
+                    }
                 }
                 let plan = try await claude.parsePlan(text, dialogue: priorDialogue,
                                                       vocabulary: self.vocabulary.promptContext, screen: screen)
@@ -686,8 +691,12 @@ final class AppCoordinator: ObservableObject {
     // the page first.
     nonisolated static let screenIntentWords = [
         "click", "press", "tap", "select", "choose", "read", "what", "which",
-        "this", "that", "here", "page", "screen", "button", "link", "field",
-        "check", "toggle", "close the", "scroll", "fill", "submit", "on the",
+        "this", "that", "here", "it", "them", "page", "screen", "button", "link",
+        "field", "check", "toggle", "close the", "scroll", "fill", "submit",
+        "on the", "delete", "remove", "drag", "hover", "first", "second", "third",
+        "last", "row", "item", "send", "save", "enter", "refresh", "back", "menu",
+        "find", "search", "expand", "collapse", "dropdown", "checkbox", "icon",
+        "the top", "the bottom", "open the", "go to the",
     ]
     nonisolated static func needsScreenContext(_ text: String) -> Bool {
         let t = text.lowercased()

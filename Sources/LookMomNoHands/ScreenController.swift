@@ -148,7 +148,7 @@ enum ScreenController {
 
     // MARK: - Reading the screen
 
-    struct Snapshot {
+    struct Snapshot: Sendable {
         let app: String
         let title: String
         let url: String
@@ -204,7 +204,7 @@ enum ScreenController {
         if elements.count >= cap || depth > 30 { return }
         try Task.checkCancellation()
         if let role = string(element, kAXRoleAttribute) {
-            if role == "AXWebArea", url.isEmpty, let u = string(element, kAXURLAttribute as String) { url = u }
+            if role == "AXWebArea", url.isEmpty, let u = axURL(element) { url = u }
             if interactiveRoles.contains(role), let label = descriptiveText(of: element), !label.isEmpty {
                 elements.append((role, String(label.prefix(80))))
             }
@@ -505,6 +505,16 @@ enum ScreenController {
     private static func string(_ element: AXUIElement, _ attribute: String) -> String? {
         var value: CFTypeRef?
         guard AXUIElementCopyAttributeValue(element, attribute as CFString, &value) == .success else { return nil }
+        return value as? String
+    }
+
+    /// kAXURLAttribute returns a CFURL, not a String — casting to String (as the
+    /// generic helper does) silently yields nil, so URL reads need this.
+    private static func axURL(_ element: AXUIElement) -> String? {
+        var value: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, kAXURLAttribute as CFString, &value) == .success else { return nil }
+        if let u = value as? URL { return u.absoluteString }
+        if let u = value as? NSURL { return u.absoluteString }
         return value as? String
     }
 
