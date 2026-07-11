@@ -191,17 +191,30 @@ enum ScreenController {
         return nil
     }
 
-    /// Picks the best ".app" filename for a query: exact stem match first, then a
-    /// name that contains the query ("chrome" → "Google Chrome.app"). Pure.
+    /// Picks the best ".app" filename for a query, in descending quality:
+    ///   1. exact stem ("safari" → "Safari.app")
+    ///   2. query as a whole word in the name ("code" → "Visual Studio Code.app",
+    ///      NOT "Xcode.app"; "chrome" → "Google Chrome.app")
+    ///   3. plain substring, shortest name (last-resort fuzzy match)
+    /// Within a tier the shortest stem wins ("Google Chrome" over "…Canary").
+    /// Pure.
     static func bestAppMatch(_ files: [String], query: String) -> String? {
         let q = query.trimmingCharacters(in: .whitespaces).lowercased()
         guard !q.isEmpty else { return nil }
-        let apps = files.filter { $0.hasSuffix(".app") }
-        if let exact = apps.first(where: { $0.dropLast(4).lowercased() == q }) { return exact }
-        // Prefer the shortest containing match so "Google Chrome" wins over
-        // "Google Chrome Canary" for "chrome".
-        return apps.filter { $0.dropLast(4).lowercased().contains(q) }
-                   .min { $0.count < $1.count }
+        let stems = files.filter { $0.hasSuffix(".app") }
+            .map { (file: $0, stem: String($0.dropLast(4)).lowercased()) }
+
+        if let exact = stems.first(where: { $0.stem == q }) { return exact.file }
+
+        let wholeWord = stems.filter { tokens($0.stem).contains(q) }
+        if let best = wholeWord.min(by: { $0.stem.count < $1.stem.count }) { return best.file }
+
+        return stems.filter { $0.stem.contains(q) }
+            .min(by: { $0.stem.count < $1.stem.count })?.file
+    }
+
+    private static func tokens(_ s: String) -> [String] {
+        s.split { !$0.isLetter && !$0.isNumber }.map(String.init)
     }
 
     /// Bare hostnames ("youtube.com") become https URLs; anything with a scheme

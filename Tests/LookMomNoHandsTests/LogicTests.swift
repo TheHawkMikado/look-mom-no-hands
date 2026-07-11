@@ -369,6 +369,11 @@ final class URLAndKeystrokeTests: XCTestCase {
                     "Google Chrome Canary.app", "Safari.app", "Notes.app"]
         // "chrome" → the shortest containing match (Google Chrome), not the decoy.
         XCTAssertEqual(ScreenController.bestAppMatch(apps, query: "chrome"), "Google Chrome.app")
+        // Whole-word beats mid-word substring: "code" → Visual Studio Code, not Xcode.
+        XCTAssertEqual(ScreenController.bestAppMatch(["Xcode.app", "Visual Studio Code.app"], query: "code"),
+                       "Visual Studio Code.app")
+        // With only a mid-word substring available, it's still reachable last-resort.
+        XCTAssertEqual(ScreenController.bestAppMatch(["Xcode.app"], query: "code"), "Xcode.app")
         // Exact stem wins.
         XCTAssertEqual(ScreenController.bestAppMatch(apps, query: "Safari"), "Safari.app")
         XCTAssertEqual(ScreenController.bestAppMatch(apps, query: "SAFARI"), "Safari.app")
