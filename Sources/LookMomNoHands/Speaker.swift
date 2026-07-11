@@ -6,6 +6,12 @@ import AVFoundation
 /// synthesizer when there's no key or the request fails, so replies never go
 /// silent. One utterance at a time — the coordinator awaits each speak() and
 /// mutes recognition while it runs, so the app can't hear itself.
+///
+/// @MainActor is load-bearing: AVAudioPlayer/AVSpeechSynthesizer deliver their
+/// delegate callbacks on the thread that started playback, so starting on the
+/// main run loop guarantees they fire, and it keeps `continuation`/`player`
+/// single-threaded — no lock, no double-resume race.
+@MainActor
 final class Speaker: NSObject, AVAudioPlayerDelegate, AVSpeechSynthesizerDelegate {
 
     /// ElevenLabs key; nil/empty → local voice. Set by the coordinator.
@@ -70,27 +76,36 @@ final class Speaker: NSObject, AVAudioPlayerDelegate, AVSpeechSynthesizerDelegat
         }
     }
 
-    /// Cuts off whatever is playing (Stop pressed). The delegate/`finish()` still
-    /// resumes the awaiting speak(), so nothing hangs.
+    /// Cuts off whatever is playing (Stop pressed). The delegate callbacks that
+    /// follow find `continuation` already nil, so nothing double-resumes.
     func cancel() {
         player?.stop()
         synth.stopSpeaking(at: .immediate)
         finish()
     }
 
-    // Resumes exactly once even if a delegate fires twice (finish + error).
+    // Resumes exactly once; a second delegate/cancel finds continuation nil.
     private func finish() {
         continuation?.resume()
         continuation = nil
     }
 
-    // MARK: AVAudioPlayerDelegate
+    // MARK: Delegates
+    //
+    // AVFoundation calls these on the playback-start thread (main, since we start
+    // on the main actor). They're nonisolated to satisfy the protocols; each just
+    // hops to the main actor to touch `continuation` through finish().
 
-    func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) { finish() }
-    func audioPlayerDecodeErrorDidOccur(_ player: AVAudioPlayer, error: Error?) { finish() }
-
-    // MARK: AVSpeechSynthesizerDelegate
-
-    func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didFinish utterance: AVSpeechUtterance) { finish() }
-    func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didCancel utterance: AVSpeechUtterance) { finish() }
+    nonisolated func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {
+        Task { @MainActor in self.finish() }
+    }
+    nonisolated func audioPlayerDecodeErrorDidOccur(_ player: AVAudioPlayer, error: Error?) {
+        Task { @MainActor in self.finish() }
+    }
+    nonisolated func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didFinish utterance: AVSpeechUtterance) {
+        Task { @MainActor in self.finish() }
+    }
+    nonisolated func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didCancel utterance: AVSpeechUtterance) {
+        Task { @MainActor in self.finish() }
+    }
 }

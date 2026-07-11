@@ -343,12 +343,21 @@ final class AppCoordinator: ObservableObject {
                     self.store.log("action", "abandoned — stopped mid-command")
                     return
                 }
+                // A parse that never produced a plan resolves this exchange —
+                // don't carry the abandoned dialogue into the next command.
+                self.dialogue = []
                 self.phase = .error("\(error)")
                 self.store.log("error", "\(error)")
                 self.store.addTranscript(TranscriptRecord(kind: "command", transcript: text, outcome: "error: \(error)"))
+                await self.speak("Sorry, that didn't go through.", gen: gen)
             }
         }
     }
+
+    // Clarification history is capped so a stuck follow-up loop can't grow the
+    // (latency-critical) Haiku context without bound. Even count keeps the
+    // sequence starting on a user turn, as the Messages API requires.
+    private static let maxDialogueTurns = 8
 
     /// Runs a parsed plan: either ask a clarifying question (and wait for the
     /// next utterance), or execute each step in order. Speaks the model's reply.
@@ -359,47 +368,63 @@ final class AppCoordinator: ObservableObject {
             dialogue = priorDialogue
             dialogue.append((role: "user", content: transcript))
             dialogue.append((role: "assistant", content: "I need to clarify: \(clarify.question)"))
+            if dialogue.count > Self.maxDialogueTurns {
+                dialogue.removeFirst(dialogue.count - Self.maxDialogueTurns)
+            }
             store.log("clarify", clarify.question)
-            await speak(clarify.spoken)
-            guard gen == runGeneration else { return }
-            // Set phase last: the task's defer runs finishProcessing, which
-            // preserves .clarifying (so we keep listening for the answer).
+            // Publish the panel/phase BEFORE speaking, so even if TTS stalls the
+            // question is on screen. finishProcessing (task defer) preserves
+            // .clarifying, so we keep listening for the answer.
             pendingClarification = clarify
             phase = .clarifying
+            await speak(clarify.spoken, gen: gen)
             return
         }
 
         dialogue = []   // request resolved; next utterance starts fresh
-        await speak(plan.say)
+        await speak(plan.say, gen: gen)
         guard gen == runGeneration, !Task.isCancelled else { return }
 
         var performed: [String] = []
-        for step in plan.steps {
-            try Task.checkCancellation()
-            switch step.kind {
-            case .dictateStart:
-                self.beginDictation()
-                return   // dictation owns the session now; remaining steps don't apply
-            case .none:
-                continue
-            default:
-                self.phase = .acting
-                // The AX walk + CGEvent posting is synchronous and can be slow on a
-                // complex UI — run it off the main actor (a task-group child leaves
-                // the actor). Structured, not detached: cancelling actionTask
-                // propagates in, and perform() checks cancellation before every
-                // irreversible event, so Stop halts mid-walk/mid-typing.
-                try await withThrowingTaskGroup(of: Void.self) { group in
-                    group.addTask { try ScreenController.perform(step) }
-                    try await group.waitForAll()
+        do {
+            for step in plan.steps {
+                try Task.checkCancellation()
+                switch step.kind {
+                case .dictateStart:
+                    self.beginDictation()
+                    return   // dictation owns the session now; remaining steps don't apply
+                case .none:
+                    continue
+                default:
+                    self.phase = .acting
+                    // The AX walk + CGEvent posting is synchronous and can be slow on
+                    // a complex UI — run it off the main actor (a task-group child
+                    // leaves the actor). Structured, not detached: cancelling
+                    // actionTask propagates in, and perform() checks cancellation
+                    // before every irreversible event, so Stop halts mid-walk/typing.
+                    try await withThrowingTaskGroup(of: Void.self) { group in
+                        group.addTask { try ScreenController.perform(step) }
+                        try await group.waitForAll()
+                    }
+                    performed.append(Self.describe(step))
+                    self.store.log("action", "performed: \(Self.describe(step))")
                 }
-                performed.append(Self.describe(step))
-                self.store.log("action", "performed: \(Self.describe(step))")
             }
-        }
-        if !performed.isEmpty {
+            if !performed.isEmpty {
+                self.store.addTranscript(TranscriptRecord(kind: "command", transcript: transcript,
+                                                          outcome: performed.joined(separator: " → ")))
+            }
+        } catch {
+            if Task.isCancelled || gen != runGeneration { throw error }
+            // A step failed partway. Persist what actually ran (so history and any
+            // retry see partial completion, not a clean slate), report it on screen
+            // AND aloud — this is a hands-free app, silence reads as success.
+            let done = performed.isEmpty ? "" : performed.joined(separator: " → ") + " → "
             self.store.addTranscript(TranscriptRecord(kind: "command", transcript: transcript,
-                                                      outcome: performed.joined(separator: " → ")))
+                                                      outcome: "\(done)FAILED: \(error)"))
+            self.phase = .error("\(error)")
+            self.store.log("error", "step failed after \(performed.count) done: \(error)")
+            await self.speak(performed.isEmpty ? "That didn't work." : "I did the first part, then hit a problem.", gen: gen)
         }
     }
 
@@ -414,13 +439,16 @@ final class AppCoordinator: ObservableObject {
     }
 
     /// Speaks a reply with recognition muted so the app can't hear itself, then
-    /// flushes whatever the mic captured meanwhile.
-    private func speak(_ text: String) async {
+    /// flushes whatever the mic captured meanwhile. `gen` guards against a Stop→
+    /// Start that supersedes this run mid-utterance: the stale completion must
+    /// not clear the new session's `speaking` flag or reset its live listener.
+    private func speak(_ text: String, gen: Int) async {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
         speaking = true
         store.log("say", trimmed)
         await speaker.speak(trimmed)
+        guard gen == runGeneration else { return }
         speaking = false
         freshUtterance()   // drop anything heard while talking
         lastHeardAt = Date()

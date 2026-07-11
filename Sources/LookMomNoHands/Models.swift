@@ -65,12 +65,21 @@ struct ActionPlan: Decodable, Sendable {
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         say = (try? c.decodeIfPresent(String.self, forKey: .say)) ?? ""
-        steps = (try? c.decodeIfPresent([ScreenAction].self, forKey: .steps)) ?? []
+        // Decode steps element-by-element: one malformed step (e.g. an unknown
+        // kind) drops only itself instead of erasing the whole plan.
+        let raw = (try? c.decodeIfPresent([FailableStep].self, forKey: .steps)) ?? []
+        steps = raw.compactMap(\.value)
         clarify = try? c.decodeIfPresent(Clarification.self, forKey: .clarify)
         confidence = (try? c.decodeIfPresent(Double.self, forKey: .confidence)) ?? 0
     }
 
     private enum CodingKeys: String, CodingKey { case say, steps, clarify, confidence }
+
+    /// Never throws out of an array decode — a bad element becomes nil.
+    private struct FailableStep: Decodable {
+        let value: ScreenAction?
+        init(from decoder: Decoder) throws { value = try? ScreenAction(from: decoder) }
+    }
 }
 
 /// An on-screen (and spoken) question the model asks when a request needs

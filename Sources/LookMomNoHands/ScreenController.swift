@@ -120,10 +120,19 @@ enum ScreenController {
     }
 
     static func openURL(_ raw: String, inApp app: String) throws {
-        let url = normalizedURL(raw)
+        var site = raw
+        var browser = app
+        // The model sometimes swaps the fields (puts the site in the browser
+        // slot). If the url is empty but the "browser" looks like a host, it's
+        // the site; a real browser name has a space or no dot.
+        if normalizedURL(site).isEmpty, looksLikeHost(browser) {
+            site = browser
+            browser = ""
+        }
+        let url = normalizedURL(site)
         guard !url.isEmpty else { throw ControlError.appLaunchFailed(raw) }
         // A named browser routes the URL there; otherwise the system default.
-        try runOpen(app.isEmpty ? [url] : ["-a", app, url], failureName: url)
+        try runOpen(browser.isEmpty ? [url] : ["-a", browser, url], failureName: url)
     }
 
     /// Bare hostnames ("youtube.com") become https URLs; anything with a scheme
@@ -132,6 +141,11 @@ enum ScreenController {
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return "" }
         return trimmed.contains("://") ? trimmed : "https://" + trimmed
+    }
+
+    private static func looksLikeHost(_ s: String) -> Bool {
+        let t = s.trimmingCharacters(in: .whitespacesAndNewlines)
+        return t.contains(".") && !t.contains(" ")
     }
 
     private static func runOpen(_ arguments: [String], failureName: String) throws {
@@ -181,12 +195,17 @@ enum ScreenController {
     static func parseKeystroke(_ spec: String) -> (key: CGKeyCode, flags: CGEventFlags)? {
         var flags: CGEventFlags = []
         var key: CGKeyCode?
-        for part in spec.lowercased().split(separator: "+").map({ $0.trimmingCharacters(in: .whitespaces) }) {
+        // Split on "+" but keep a literal "+" token (from "cmd++"), which the
+        // separator would otherwise drop as an empty component.
+        let normalized = spec.lowercased().replacingOccurrences(of: "++", with: "+plus")
+        for part in normalized.split(separator: "+").map({ $0.trimmingCharacters(in: .whitespaces) }) {
             switch part {
             case "cmd", "command", "meta": flags.insert(.maskCommand)
             case "shift": flags.insert(.maskShift)
             case "opt", "option", "alt": flags.insert(.maskAlternate)
             case "ctrl", "control": flags.insert(.maskControl)
+            case "":
+                continue
             default:
                 guard let code = keyCodes[part] else { return nil }
                 key = code
@@ -204,7 +223,11 @@ enum ScreenController {
         "o": 31, "u": 32, "i": 34, "p": 35, "l": 37, "j": 38, "k": 40, "n": 45, "m": 46,
         "return": 36, "enter": 36, "tab": 48, "space": 49, "esc": 53, "escape": 53,
         "delete": 51, "backspace": 51,
-        "left": 123, "right": 124, "down": 125, "up": 126
+        "left": 123, "right": 124, "down": 125, "up": 126,
+        // Symbols and their spoken aliases — zoom (cmd+=/cmd+-), etc.
+        "=": 24, "equals": 24, "plus": 24, "-": 27, "minus": 27,
+        "[": 33, "]": 30, ";": 41, "'": 39, ",": 43, "comma": 43,
+        ".": 47, "period": 47, "/": 44, "slash": 44, "\\": 42, "`": 50
     ]
 
     // MARK: - Accessibility tree search

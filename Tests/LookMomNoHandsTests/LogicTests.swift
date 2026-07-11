@@ -195,6 +195,20 @@ final class PlanDecodingTests: XCTestCase {
         XCTAssertEqual(plan.say, "")
         XCTAssertNil(plan.clarify)
     }
+
+    func testOneBadStepDoesNotEraseValidSteps() throws {
+        // A single unknown `kind` must drop only itself, not the whole plan.
+        let json = #"""
+        {"say":"","confidence":0.9,"steps":[
+          {"kind":"open_app","target":"Safari","text":"","url":"","keys":"","direction":"down"},
+          {"kind":"teleport","target":"","text":"","url":"","keys":"","direction":"down"},
+          {"kind":"keystroke","target":"","text":"","url":"","keys":"cmd+t","direction":"down"}
+        ]}
+        """#
+        let plan = try JSONDecoder().decode(ActionPlan.self, from: Data(json.utf8))
+        XCTAssertEqual(plan.steps.count, 2, "the bad middle step drops, the two valid ones survive")
+        XCTAssertEqual(plan.steps.map(\.kind), [.openApp, .keystroke])
+    }
 }
 
 final class URLAndKeystrokeTests: XCTestCase {
@@ -223,5 +237,20 @@ final class URLAndKeystrokeTests: XCTestCase {
     func testUnknownKeystrokeReturnsNil() {
         XCTAssertNil(ScreenController.parseKeystroke("cmd+")) // no base key
         XCTAssertNil(ScreenController.parseKeystroke("cmd+f13")) // unmapped key
+    }
+
+    func testZoomShortcutsParse() throws {
+        // "zoom in/out" idioms the model is likely to emit.
+        XCTAssertEqual(try XCTUnwrap(ScreenController.parseKeystroke("cmd+=")).key, 24)
+        XCTAssertEqual(try XCTUnwrap(ScreenController.parseKeystroke("cmd+plus")).key, 24)
+        XCTAssertEqual(try XCTUnwrap(ScreenController.parseKeystroke("cmd+minus")).key, 27)
+        // "cmd++" would collapse to just the modifier without the ++ → +plus fix.
+        XCTAssertEqual(try XCTUnwrap(ScreenController.parseKeystroke("cmd++")).key, 24)
+    }
+
+    func testURLNormalizationEdgeCases() {
+        XCTAssertEqual(ScreenController.normalizedURL("youtube.com/watch?v=x"), "https://youtube.com/watch?v=x")
+        XCTAssertEqual(ScreenController.normalizedURL(""), "")
+        XCTAssertEqual(ScreenController.normalizedURL("file:///tmp/x"), "file:///tmp/x")
     }
 }
