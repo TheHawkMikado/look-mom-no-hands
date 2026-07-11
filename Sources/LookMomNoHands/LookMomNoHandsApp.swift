@@ -52,6 +52,7 @@ struct PanelView: View {
                 accessibilityNotice
             }
             voiceReplyRow
+            pushToDictateRow
             Divider()
 
             if let report = coordinator.lastReport {
@@ -107,6 +108,38 @@ struct PanelView: View {
                     .frame(maxWidth: 210)
                 }
             }
+        }
+    }
+
+    // Push-to-dictate: a chord/voice phrase that dictates straight to the cursor.
+    private var pushToDictateRow: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 6) {
+                Image(systemName: "keyboard").foregroundStyle(.secondary)
+                Text("Push-to-dictate").font(.caption).foregroundStyle(.secondary)
+                Spacer()
+                Picker("", selection: Binding(
+                    get: { coordinator.dictationChord },
+                    set: { coordinator.dictationChord = $0 }
+                )) {
+                    ForEach(DictationChord.allCases, id: \.self) { chord in
+                        Text(chord.label).tag(chord)
+                    }
+                }
+                .labelsHidden()
+                .frame(maxWidth: 180)
+            }
+            Toggle(isOn: Binding(
+                get: { coordinator.cleanUpInsertedText },
+                set: { coordinator.cleanUpInsertedText = $0 }
+            )) {
+                Text("Clean up dictated text before pasting").font(.caption2).foregroundStyle(.secondary)
+            }
+            .toggleStyle(.checkbox)
+            Text(coordinator.dictationChord == .off
+                 ? "Chord off — say “Mama dictate this” to start, “Mama stop dictating” to paste."
+                 : "Press the chord (or say “Mama dictate this”) to start; press again or say “Mama stop dictating” to paste at your cursor.")
+                .font(.caption2).foregroundStyle(.secondary)
         }
     }
 

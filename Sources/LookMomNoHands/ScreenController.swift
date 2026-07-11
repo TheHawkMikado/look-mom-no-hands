@@ -99,6 +99,20 @@ enum ScreenController {
         }
     }
 
+    /// Puts text on the clipboard (so it's recoverable even without Accessibility).
+    @discardableResult
+    static func setClipboard(_ text: String) -> Bool {
+        guard !text.isEmpty else { return false }
+        let pb = NSPasteboard.general
+        pb.clearContents()
+        return pb.setString(text, forType: .string)
+    }
+
+    /// Sends ⌘V to paste the clipboard at the cursor. Needs Accessibility.
+    static func sendPaste() throws {
+        try keystroke("cmd+v")
+    }
+
     static func scroll(direction: ScrollDirection) throws {
         try Task.checkCancellation()
         let source = CGEventSource(stateID: .combinedSessionState)

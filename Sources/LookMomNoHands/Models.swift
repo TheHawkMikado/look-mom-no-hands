@@ -124,6 +124,13 @@ enum ScrollDirection: String, Decodable, Sendable {
     case up, down, left, right
 }
 
+/// Where a finished dictation goes. `report` builds the VoiceDash-style summary
+/// panel; `insert` cleans the text and pastes it at the cursor (+ clipboard).
+enum DictationOutput: Sendable {
+    case report
+    case insert
+}
+
 /// Which speech-to-text engine transcribes captured utterances. Apple on-device
 /// always runs the always-on wake-word + silence gating regardless — this only
 /// controls the higher-quality re-transcription of the actual command/dictation.

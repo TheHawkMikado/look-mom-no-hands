@@ -183,6 +183,42 @@ final class ClaudeClient: @unchecked Sendable {
         return body
     }
 
+    // MARK: Dictation-insert cleanup (fast, plain text out)
+
+    /// Lightly cleans dictated text for pasting at the cursor: fixes obvious ASR
+    /// errors, adds punctuation/capitalization, drops filler — keeps the wording.
+    /// Haiku for latency (this sits directly in front of a paste). Returns the
+    /// cleaned text, or throws so the caller can paste the raw transcript.
+    func cleanUpDictation(_ raw: String) async throws -> String {
+        let body: [String: Any] = [
+            "model": ClaudeModel.haiku45.rawValue,
+            "max_tokens": 4000,
+            "messages": [[
+                "role": "user",
+                "content": """
+                Clean up this dictated text so it can be pasted as-is: fix obvious \
+                speech-to-text errors, add sensible punctuation and capitalization, \
+                and remove filler words and false starts (um, uh, "like", repeated \
+                words). Keep the user's wording and meaning — do NOT summarize, \
+                rephrase, or add anything. Output ONLY the cleaned text.
+
+                \(raw)
+                """
+            ]]
+        ]
+        let json = try await post(body, timeout: 15)
+        try Self.checkRefusal(json)
+        guard let text = Self.firstTextBlock(json), !text.isEmpty else {
+            throw ClaudeError.decoding("no text block")
+        }
+        return text.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    static func firstTextBlock(_ json: [String: Any]) -> String? {
+        (json["content"] as? [[String: Any]])?
+            .first { $0["type"] as? String == "text" }?["text"] as? String
+    }
+
     // MARK: - Response unpacking
 
     // Both endpoints unpack "first block of a type → decode its payload" — one

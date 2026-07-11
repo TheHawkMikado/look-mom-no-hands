@@ -30,6 +30,23 @@ final class AppCoordinator: ObservableObject {
     private static let engineKey = "speechEngine"
     private var elevenLabsKey: String?
 
+    /// Modifier chord that toggles push-to-dictate (insert mode). Persisted.
+    @Published var dictationChord: DictationChord = .controlOption {
+        didSet {
+            UserDefaults.standard.set(dictationChord.rawValue, forKey: Self.chordKey)
+            hotkey.setChord(dictationChord.flags)
+        }
+    }
+    /// Clean up push-to-dictate text with the model before pasting. Persisted.
+    @Published var cleanUpInsertedText = true {
+        didSet { UserDefaults.standard.set(cleanUpInsertedText, forKey: Self.cleanupKey) }
+    }
+    private static let chordKey = "dictationChord"
+    private static let cleanupKey = "cleanUpInsertedText"
+    private let hotkey = HotkeyMonitor()
+    private var dictationOutput: DictationOutput = .report   // where the current note goes
+    private var pendingHotkeyDictation = false               // start requested before the mic was on
+
     /// Wake session open. Derived from `mode` so it can never desync; every mode
     /// change is accompanied by a `phase` write, which publishes the update.
     var isActive: Bool { mode != .standby }
@@ -66,15 +83,33 @@ final class AppCoordinator: ObservableObject {
     // contextualStrings biasing (set in init) reduces but doesn't eliminate them.
     nonisolated static let wakePhrases = ["hey mama", "hey mamma", "hey momma", "hey ma ma"]
     nonisolated static let stopPhrases = ["adios mama", "adios mamma", "adios momma", "adios ma ma", "adiós mama"]
+    // Direct push-to-dictate voice triggers (no wake word needed). Kept distinct
+    // from the wake/stop words so they don't collide.
+    nonisolated static let dictateStartPhrases = ["mama dictate this", "mama dictate", "mama take dictation",
+                                                  "mama start dictating", "you dictate this"]
+    nonisolated static let dictateStopPhrases = ["mama stop dictating", "mama stop dictation",
+                                                 "mama done dictating", "stop dictating", "you stop dictating"]
 
     init() {
         if let raw = UserDefaults.standard.string(forKey: Self.engineKey),
            let saved = SpeechEngine(rawValue: raw) {
             speechEngine = saved
         }
+        if let raw = UserDefaults.standard.string(forKey: Self.chordKey),
+           let saved = DictationChord(rawValue: raw) {
+            dictationChord = saved
+        }
+        if UserDefaults.standard.object(forKey: Self.cleanupKey) != nil {
+            cleanUpInsertedText = UserDefaults.standard.bool(forKey: Self.cleanupKey)
+        }
         listener.contextualPhrases = ["Hey Mama", "Adios Mama"]
         listener.onPartial = { [weak self] text in self?.handlePartial(text) }
         listener.onInfo = { [weak self] msg in self?.store.log("speech", msg) }
+        // Push-to-dictate chord works whenever the app is running, even before
+        // Start — it turns the mic on on demand. Global delivery needs Accessibility.
+        hotkey.onToggle = { [weak self] in self?.toggleHotkeyDictation() }
+        hotkey.setChord(dictationChord.flags)
+        hotkey.start()
         store.log("app", "launched")
         loadKey()
         refreshAuthFlags()
@@ -207,6 +242,7 @@ final class AppCoordinator: ObservableObject {
         requestPermissions { [weak self] granted in
             guard let self else { return }
             guard granted else {
+                self.pendingHotkeyDictation = false
                 self.phase = .error("Mic/Speech permission denied")
                 self.store.log("perm", "denied — cannot start")
                 return
@@ -215,6 +251,7 @@ final class AppCoordinator: ObservableObject {
                 try self.listener.start()
             } catch {
                 // Don't claim to be listening over a dead pipeline.
+                self.pendingHotkeyDictation = false
                 self.phase = .error("\(error)")
                 self.store.log("error", "listener failed to start: \(error)")
                 return
@@ -225,6 +262,31 @@ final class AppCoordinator: ObservableObject {
             self.phase = .listeningWake
             self.utterance = ""
             self.store.log("app", "listening enabled (standby)")
+            // A hotkey press that started the mic proceeds straight into dictation.
+            if self.pendingHotkeyDictation {
+                self.pendingHotkeyDictation = false
+                self.startDictation(output: .insert)
+            }
+        }
+    }
+
+    /// The push-to-dictate chord/hotkey: toggles insert-mode dictation, starting
+    /// the mic on demand if the app wasn't already listening.
+    func toggleHotkeyDictation() {
+        if mode == .dictation {
+            finalizeDictation()
+            return
+        }
+        guard hasKey else {
+            phase = .error("No API key set")
+            store.log("hotkey", "ignored — no API key")
+            return
+        }
+        if isRunning {
+            startDictation(output: .insert)
+        } else {
+            pendingHotkeyDictation = true
+            start()
         }
     }
 
@@ -275,10 +337,13 @@ final class AppCoordinator: ObservableObject {
         switch mode {
         case .standby:
             if Self.wakePhrases.contains(where: tail.contains) { beginSession() }
+            else if Self.dictateStartPhrases.contains(where: tail.contains) { startDictation(output: .insert) }
         case .command:
             if Self.stopPhrases.contains(where: tail.contains) { endSession(reason: "\"Adios Mama\"") }
+            else if Self.dictateStartPhrases.contains(where: tail.contains) { startDictation(output: .insert) }
         case .dictation:
-            break // a long pause ends the note; "adios" could be part of it
+            // A voice stop phrase ends the note; otherwise a long pause does.
+            if Self.dictateStopPhrases.contains(where: tail.contains) { finalizeDictation() }
         }
     }
 
@@ -494,7 +559,7 @@ final class AppCoordinator: ObservableObject {
                 try Task.checkCancellation()
                 switch step.kind {
                 case .dictateStart:
-                    self.beginDictation(returnTo: .command)
+                    self.beginDictation(returnTo: .command, output: .report)
                     return   // dictation owns the session now; remaining steps don't apply
                 case .none:
                     continue
@@ -575,8 +640,9 @@ final class AppCoordinator: ObservableObject {
     // open; a one-tap note from standby returns to standby (no phantom session).
     private var dictationReturnMode: Mode = .command
 
-    private func beginDictation(returnTo: Mode) {
-        store.log("dictation", "started — recording note (pause \(Int(dictationSilence))s to finish)")
+    private func beginDictation(returnTo: Mode, output: DictationOutput) {
+        dictationOutput = output
+        store.log("dictation", "started (\(output == .insert ? "insert→cursor" : "report")) — pause or say a stop phrase to finish")
         // A note is a fresh intent — drop any pending clarification/context so it
         // isn't stranded on screen or carried into the next command.
         pendingClarification = nil
@@ -590,13 +656,13 @@ final class AppCoordinator: ObservableObject {
         armCaptureForCurrentMode()
     }
 
-    /// Starts a dictation immediately, from the panel button — no wake word needed.
-    /// Requires listening to be on so the mic pipeline exists.
-    func startDictation() {
+    /// Starts a dictation immediately (panel button, voice phrase, or hotkey) with
+    /// no wake word. `.report` → summary panel; `.insert` → paste at cursor.
+    func startDictation(output: DictationOutput = .report) {
         guard isRunning, !processing, mode != .dictation else { return }
         let returnTo: Mode = mode == .command ? .command : .standby
         if mode == .standby { startTicker() }   // dictation needs the silence-gate ticker
-        beginDictation(returnTo: returnTo)
+        beginDictation(returnTo: returnTo, output: output)
     }
 
     // Capture the utterance's raw audio only when Scribe will re-transcribe it, so
@@ -631,7 +697,11 @@ final class AppCoordinator: ObservableObject {
 
     private func finalizeDictation() {
         listener.carryForward = false
-        let appleText = utterance.trimmingCharacters(in: .whitespacesAndNewlines)
+        let output = dictationOutput
+        // Voice stop/start phrases get spoken into the clip — strip them so they
+        // aren't summarized or pasted.
+        let strip = Self.dictateStopPhrases + Self.dictateStartPhrases
+        let appleText = Self.strippingPhrases(strip, from: utterance)
         // Grab the captured clip (if any) before freshUtterance/arming touches it.
         let wav = scribeForDictation ? listener.takeCapturedWAV() : nil
         listener.captureAudio = false
@@ -644,21 +714,21 @@ final class AppCoordinator: ObservableObject {
             settleSessionPhase()
             return
         }
-        store.log("dictation", "captured \(appleText.count) chars\(wav != nil ? " (+audio for Scribe)" : "") — summarizing")
+        store.log("dictation", "captured \(appleText.count) chars\(wav != nil ? " (+audio for Scribe)" : "") — \(output == .insert ? "pasting" : "summarizing")")
         processing = true
         phase = .thinking
         let gen = runGeneration
 
         actionTask = Task {
             defer { self.finishProcessing(gen) }
-            let text = await self.transcribed(wav: wav, fallback: appleText)
+            var text = await self.transcribed(wav: wav, fallback: appleText)
+            // Scribe re-transcribes the whole clip, stop phrase included — strip again.
+            text = Self.strippingPhrases(strip, from: text)
             guard !text.isEmpty else {
-                // Reaching here means Apple heard nothing AND Scribe returned
-                // nothing/failed — and the outer guard guarantees a captured clip
-                // exists (empty appleText only passes with wav != nil). That's a
-                // transcription failure on a real note, so persist the clip
-                // (best-effort, recoverable) and ALWAYS surface it — never pretend
-                // success, even if the save itself fails.
+                // Empty ⟹ Apple heard nothing AND Scribe returned nothing/failed on a
+                // clip that existed. Persist it (recoverable) and surface — never
+                // pretend success. (Insert notes still get an error so nothing is
+                // pasted silently.)
                 if let wav { await self.store.saveAudioAndWait(wav) }
                 guard gen == self.runGeneration else { return }
                 self.phase = .error("couldn't transcribe that note")
@@ -668,21 +738,22 @@ final class AppCoordinator: ObservableObject {
             }
             do {
                 try Task.checkCancellation()
-                let report = try await claude.buildDictationReport(text)
-                try Task.checkCancellation()
-                self.lastReport = report
-                self.store.log("claude", "report ready — \(report.keyPoints.count) points, \(report.actionItems.count) action items")
-                // Store the RAW transcript (Scribe or Apple) — it's the note's only
-                // durable copy, and the field means raw ASR text; the model-cleaned
-                // version lives in lastReport for display only.
-                self.store.addTranscript(TranscriptRecord(
-                    kind: "dictation",
-                    transcript: text,
-                    title: report.title,
-                    summary: report.summary,
-                    keyPoints: report.keyPoints,
-                    actionItems: report.actionItems
-                ))
+                switch output {
+                case .insert:
+                    try await self.insertDictation(text, claude: claude, gen: gen)
+                case .report:
+                    let report = try await claude.buildDictationReport(text)
+                    try Task.checkCancellation()
+                    self.lastReport = report
+                    self.store.log("claude", "report ready — \(report.keyPoints.count) points, \(report.actionItems.count) action items")
+                    // Store the RAW transcript (Scribe or Apple) — it's the note's
+                    // only durable copy, and the field means raw ASR text; the
+                    // model-cleaned version lives in lastReport for display only.
+                    self.store.addTranscript(TranscriptRecord(
+                        kind: "dictation", transcript: text,
+                        title: report.title, summary: report.summary,
+                        keyPoints: report.keyPoints, actionItems: report.actionItems))
+                }
             } catch {
                 // Whatever went wrong, never lose the note — the raw text is already
                 // gone from the live buffer, so this record is its only copy.
@@ -696,6 +767,32 @@ final class AppCoordinator: ObservableObject {
                 self.store.log("error", "\(error)")
             }
         }
+    }
+
+    /// Insert mode: optionally clean the text, then paste it at the cursor and
+    /// leave it on the clipboard. The final text is recorded so nothing is lost.
+    private func insertDictation(_ raw: String, claude: ClaudeClient, gen: Int) async throws {
+        let final: String
+        if cleanUpInsertedText {
+            // Cleanup is a nicety — a failure just pastes the raw transcript.
+            final = (try? await claude.cleanUpDictation(raw)) ?? raw
+        } else {
+            final = raw
+        }
+        try Task.checkCancellation()
+        guard gen == runGeneration else { return }
+        ScreenController.setClipboard(final)   // always — recoverable without Accessibility
+        store.addTranscript(TranscriptRecord(kind: "dictation", transcript: final))
+        guard ScreenController.isTrusted else {
+            store.log("dictation", "\(final.count) chars on clipboard — press ⌘V (auto-paste needs Accessibility)")
+            return
+        }
+        // Let the frontmost app register the new clipboard before ⌘V (async — no
+        // main-thread blocking), then re-check the run isn't stale.
+        try? await Task.sleep(nanoseconds: 40_000_000)
+        guard gen == runGeneration, !Task.isCancelled else { return }
+        try? ScreenController.sendPaste()
+        store.log("dictation", "pasted \(final.count) chars at cursor")
     }
 
     // MARK: Permissions

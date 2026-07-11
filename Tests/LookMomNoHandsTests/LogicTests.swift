@@ -240,6 +240,40 @@ final class PlanDecodingTests: XCTestCase {
     }
 }
 
+import AppKit
+
+final class DictationChordTests: XCTestCase {
+    func testChordFlags() {
+        XCTAssertNil(DictationChord.off.flags)
+        XCTAssertEqual(DictationChord.controlOption.flags, [.control, .option])
+        XCTAssertEqual(DictationChord.commandControlOption.flags, [.command, .control, .option])
+    }
+
+    func testChordRawValueRoundTrips() {
+        for c in DictationChord.allCases {
+            XCTAssertEqual(DictationChord(rawValue: c.rawValue), c)
+        }
+    }
+
+    func testAllChordsHaveLabels() {
+        for c in DictationChord.allCases { XCTAssertFalse(c.label.isEmpty) }
+    }
+}
+
+final class DictateVoicePhraseTests: XCTestCase {
+    func testStartAndStopPhrasesDoNotCollideWithWake() {
+        // "mama dictate this" must not read as a wake or stop word, and vice versa.
+        for start in AppCoordinator.dictateStartPhrases {
+            XCTAssertFalse(AppCoordinator.wakePhrases.contains(where: start.contains), start)
+            XCTAssertFalse(AppCoordinator.stopPhrases.contains(where: start.contains), start)
+        }
+        // The stop phrase gets stripped out of a captured note.
+        let note = "buy milk and eggs mama stop dictating"
+        let stripped = AppCoordinator.strippingPhrases(AppCoordinator.dictateStopPhrases, from: note)
+        XCTAssertEqual(stripped, "buy milk and eggs")
+    }
+}
+
 final class SpeechEngineTests: XCTestCase {
     func testScribeRoutingPerMode() {
         XCTAssertFalse(SpeechEngine.appleOnly.usesScribe(forDictation: true))
