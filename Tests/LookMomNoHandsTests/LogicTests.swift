@@ -570,6 +570,17 @@ final class URLAndKeystrokeTests: XCTestCase {
         XCTAssertGreaterThan(deepExact, shallowPrefix)
     }
 
+    func testNormalizedToScreenMapping() {
+        // Primary display at origin: center maps to center, corners to corners.
+        let main = CGRect(x: 0, y: 0, width: 1920, height: 1080)
+        XCTAssertEqual(ScreenController.normalizedToScreen(x: 0.5, y: 0.5, in: main), CGPoint(x: 960, y: 540))
+        XCTAssertEqual(ScreenController.normalizedToScreen(x: 0, y: 0, in: main), CGPoint(x: 0, y: 0))
+        XCTAssertEqual(ScreenController.normalizedToScreen(x: 1, y: 1, in: main), CGPoint(x: 1920, y: 1080))
+        // A second display offset to the right maps with its global origin applied.
+        let right = CGRect(x: 1920, y: 0, width: 2560, height: 1440)
+        XCTAssertEqual(ScreenController.normalizedToScreen(x: 0.5, y: 0.5, in: right), CGPoint(x: 1920 + 1280, y: 720))
+    }
+
     func testTextInputRoleDetection() {
         XCTAssertTrue(ScreenController.isTextInput("AXTextField"))
         XCTAssertTrue(ScreenController.isTextInput("AXTextArea"))

@@ -41,8 +41,14 @@ final class AppCoordinator: ObservableObject {
     @Published var cleanUpInsertedText = true {
         didSet { UserDefaults.standard.set(cleanUpInsertedText, forKey: Self.cleanupKey) }
     }
+    /// When the Accessibility tree has no match for a click target, screenshot the
+    /// screen and let Claude vision find it by pixel. Needs Screen Recording. Persisted.
+    @Published var visionClickEnabled = true {
+        didSet { UserDefaults.standard.set(visionClickEnabled, forKey: Self.visionKey) }
+    }
     private static let chordKey = "dictationChord"
     private static let cleanupKey = "cleanUpInsertedText"
+    private static let visionKey = "visionClickEnabled"
     private let hotkey = HotkeyMonitor()
     private var dictationOutput: DictationOutput = .report   // where the current note goes
     private var pendingHotkeyDictation = false               // start requested before the mic was on
@@ -139,6 +145,9 @@ final class AppCoordinator: ObservableObject {
         }
         if UserDefaults.standard.object(forKey: Self.cleanupKey) != nil {
             cleanUpInsertedText = UserDefaults.standard.bool(forKey: Self.cleanupKey)
+        }
+        if UserDefaults.standard.object(forKey: Self.visionKey) != nil {
+            visionClickEnabled = UserDefaults.standard.bool(forKey: Self.visionKey)
         }
         refreshContextualPhrases()
         listener.onPartial = { [weak self] text in self?.handlePartial(text) }
@@ -780,14 +789,20 @@ final class AppCoordinator: ObservableObject {
                     continue
                 default:
                     self.phase = .acting
-                    // The AX walk + CGEvent posting is synchronous and can be slow on
-                    // a complex UI — run it off the main actor (a task-group child
-                    // leaves the actor). Structured, not detached: cancelling
-                    // actionTask propagates in, and perform() checks cancellation
-                    // before every irreversible event, so Stop halts mid-walk/typing.
-                    try await withThrowingTaskGroup(of: Void.self) { group in
-                        group.addTask { try ScreenController.perform(step) }
-                        try await group.waitForAll()
+                    if step.kind == .click {
+                        // A click gets a screenshot fallback (see performClick); the
+                        // other kinds run the plain synchronous AX/CGEvent path.
+                        try await self.performClick(target: step.target, gen: gen)
+                    } else {
+                        // The AX walk + CGEvent posting is synchronous and can be slow on
+                        // a complex UI — run it off the main actor (a task-group child
+                        // leaves the actor). Structured, not detached: cancelling
+                        // actionTask propagates in, and perform() checks cancellation
+                        // before every irreversible event, so Stop halts mid-walk/typing.
+                        try await withThrowingTaskGroup(of: Void.self) { group in
+                            group.addTask { try ScreenController.perform(step) }
+                            try await group.waitForAll()
+                        }
                     }
                     performed.append(Self.describe(step))
                     self.store.log("action", "performed: \(Self.describe(step))")
@@ -808,6 +823,40 @@ final class AppCoordinator: ObservableObject {
             self.phase = .error("\(error)")
             self.store.log("error", "step failed after \(performed.count) done: \(error)")
             await self.speak(performed.isEmpty ? "That didn't work." : "I did the first part, then hit a problem.", gen: gen)
+        }
+    }
+
+    /// Clicks `target`, first via the Accessibility tree; if that finds nothing and
+    /// vision is enabled, screenshots the screen and lets Claude locate it by pixel.
+    /// The vision path is why an all-canvas/Electron UI (poor AX) is still clickable.
+    private func performClick(target: String, gen: Int) async throws {
+        guard ScreenController.isTrusted else { throw ScreenController.ControlError.notTrusted }
+        do {
+            // Off the main actor + cancellable, same as the generic action path.
+            try await withThrowingTaskGroup(of: Void.self) { group in
+                group.addTask { try ScreenController.click(target: target) }
+                try await group.waitForAll()
+            }
+            return
+        } catch let error as ScreenController.ControlError {
+            // Only an AX miss is worth a screenshot retry; a real failure (not
+            // trusted, cancelled) propagates unchanged.
+            guard case .elementNotFound = error, visionClickEnabled, let claude else { throw error }
+            store.log("vision", "AX had no match for \"\(target)\" — trying screenshot")
+            try Task.checkCancellation()
+            guard let shot = await ScreenController.captureDisplayForFrontWindow() else {
+                throw error   // no Screen Recording permission → report the original miss
+            }
+            // Abandon (not silently succeed) if Stop/a newer command intervened during
+            // the async screenshot or vision call — matches every other cancel path.
+            guard gen == runGeneration, !Task.isCancelled else { throw CancellationError() }
+            guard let norm = try await claude.locateElement(described: target, pngBase64: shot.pngBase64) else {
+                throw error   // model couldn't see it either
+            }
+            guard gen == runGeneration, !Task.isCancelled else { throw CancellationError() }
+            let point = ScreenController.normalizedToScreen(x: norm.x, y: norm.y, in: shot.frame)
+            ScreenController.clickAt(point)
+            store.log("vision", "clicked \"\(target)\" via screenshot at \(Int(point.x)),\(Int(point.y))")
         }
     }
 

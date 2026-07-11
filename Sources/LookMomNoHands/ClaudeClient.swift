@@ -275,6 +275,62 @@ final class ClaudeClient: @unchecked Sendable {
             .first { $0["type"] as? String == "text" }?["text"] as? String
     }
 
+    // MARK: - Vision click fallback
+
+    /// Given a screenshot (base64 PNG) and a description of what to click, returns
+    /// the point to click as a fraction (0…1) of the image, or nil if the model
+    /// can't see it. Used only when the Accessibility tree has no match — many
+    /// Electron/web UIs expose almost nothing to AX, so this is the "actually look
+    /// at the pixels" path. Opus (not Haiku) because localization accuracy matters
+    /// more than latency on this rare fallback.
+    func locateElement(described target: String, pngBase64: String) async throws -> (x: Double, y: Double)? {
+        let tool: [String: Any] = [
+            "name": "locate",
+            "description": "Report where on the screenshot to click for the described element.",
+            "input_schema": [
+                "type": "object",
+                "additionalProperties": false,
+                "properties": [
+                    "found": ["type": "boolean", "description": "true only if the element is actually visible in the image"],
+                    "x": ["type": "number", "description": "horizontal click point as a fraction of image width (0=left edge, 1=right edge)"],
+                    "y": ["type": "number", "description": "vertical click point as a fraction of image height (0=top edge, 1=bottom edge)"]
+                ],
+                "required": ["found", "x", "y"]
+            ]
+        ]
+        let body: [String: Any] = [
+            "model": ClaudeModel.opus48.rawValue,
+            "max_tokens": 300,
+            "tool_choice": ["type": "tool", "name": "locate"],
+            "tools": [tool],
+            "messages": [[
+                "role": "user",
+                "content": [
+                    ["type": "image", "source": ["type": "base64", "media_type": "image/png", "data": pngBase64]],
+                    ["type": "text", "text": "Point to the center of this UI element so I can click it: \"\(target)\". If it isn't visible on screen, set found=false."]
+                ]
+            ]]
+        ]
+        let json = try await post(body, timeout: 30)
+        try Self.checkRefusal(json)
+        let hit: VisionHit = try Self.decodeBlock(json, blockType: "tool_use", payloadKey: "input")
+        // Missing coordinates count as "not found" rather than defaulting to (0,0),
+        // which would click the display's top-left corner.
+        guard hit.found, let x = hit.x, let y = hit.y else { return nil }
+        return (min(max(x, 0), 1), min(max(y, 0), 1))
+    }
+
+    private struct VisionHit: Decodable {
+        let found: Bool; let x: Double?; let y: Double?
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            found = (try? c.decodeIfPresent(Bool.self, forKey: .found)) ?? false
+            x = (try? c.decodeIfPresent(Double.self, forKey: .x)) ?? nil
+            y = (try? c.decodeIfPresent(Double.self, forKey: .y)) ?? nil
+        }
+        private enum CodingKeys: String, CodingKey { case found, x, y }
+    }
+
     // MARK: - Response unpacking
 
     // Both endpoints unpack "first block of a type → decode its payload" — one

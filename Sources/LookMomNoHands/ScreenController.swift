@@ -2,6 +2,7 @@ import Foundation
 import AppKit
 import ApplicationServices
 import CoreGraphics
+import ScreenCaptureKit
 
 /// Executes screen actions via the Accessibility tree (to locate elements) and
 /// CGEvent (to synthesize input). Requires the app to be granted Accessibility
@@ -577,5 +578,66 @@ enum ScreenController {
             .post(tap: .cghidEventTap)
         CGEvent(mouseEventSource: source, mouseType: .leftMouseUp, mouseCursorPosition: point, mouseButton: .left)?
             .post(tap: .cghidEventTap)
+    }
+
+    // MARK: - Vision click (screenshot fallback when AX finds nothing)
+
+    /// Clicks a global screen point directly (used by the vision fallback, which
+    /// has pixel coordinates rather than an AX element).
+    static func clickAt(_ point: CGPoint) { clickMouse(at: point) }
+
+    /// Maps a normalized (0…1, top-left origin) point within a display to a global
+    /// screen point in Quartz coordinates — the same space CGEvent posts into, so
+    /// the result is directly clickable. Pure, so it's unit-tested.
+    static func normalizedToScreen(x: Double, y: Double, in frame: CGRect) -> CGPoint {
+        CGPoint(x: frame.minX + CGFloat(x) * frame.width,
+                y: frame.minY + CGFloat(y) * frame.height)
+    }
+
+    /// Captures the display holding the frontmost window as a base64 PNG plus that
+    /// display's global frame (for mapping the model's normalized answer back to a
+    /// clickable point). Downscaled to ≤1568px long edge to keep the upload small;
+    /// normalized coordinates make the downscale irrelevant to accuracy. Returns
+    /// nil if Screen Recording isn't granted — the caller then reports the original
+    /// AX miss instead of a phantom click.
+    static func captureDisplayForFrontWindow() async -> (pngBase64: String, frame: CGRect)? {
+        guard let content = try? await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true) else {
+            return nil
+        }
+        // The target of a click is the frontmost *controlled* app's window, which may
+        // be on a different display than this menu-bar app's NSScreen.main. Pick the
+        // display that actually contains that window; fall back to key screen, then any.
+        let focusedID = NSScreen.main?.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID
+        let windowCenter = frontWindowCenter()
+        let display = content.displays.first(where: { d in
+            windowCenter.map { CGDisplayBounds(d.displayID).contains($0) } ?? false
+        }) ?? content.displays.first(where: { $0.displayID == focusedID }) ?? content.displays.first
+        guard let display else { return nil }
+        let longEdge = max(display.width, display.height)
+        let scale = longEdge > 1568 ? 1568.0 / Double(longEdge) : 1.0
+        let config = SCStreamConfiguration()
+        config.width = Int((Double(display.width) * scale).rounded())
+        config.height = Int((Double(display.height) * scale).rounded())
+        let filter = SCContentFilter(display: display, excludingWindows: [])
+        guard let cg = try? await SCScreenshotManager.captureImage(contentFilter: filter, configuration: config),
+              let png = pngBase64(from: cg) else { return nil }
+        return (png, CGDisplayBounds(display.displayID))
+    }
+
+    /// Global-coordinate center of the frontmost app's focused window, for choosing
+    /// which display to screenshot. AX positions are already in Quartz global space.
+    private static func frontWindowCenter() -> CGPoint? {
+        guard let app = NSWorkspace.shared.frontmostApplication else { return nil }
+        let axApp = AXUIElementCreateApplication(app.processIdentifier)
+        var winRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(axApp, kAXFocusedWindowAttribute as CFString, &winRef) == .success,
+              let window = winRef as! AXUIElement? else { return nil }
+        return center(of: window)
+    }
+
+    private static func pngBase64(from cg: CGImage) -> String? {
+        let rep = NSBitmapImageRep(cgImage: cg)
+        guard let data = rep.representation(using: .png, properties: [:]) else { return nil }
+        return data.base64EncodedString()
     }
 }

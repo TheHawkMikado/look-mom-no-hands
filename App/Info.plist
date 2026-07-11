@@ -26,5 +26,7 @@
     <string>Look Ma, No Hands listens to your voice so you can control your Mac hands-free.</string>
     <key>NSSpeechRecognitionUsageDescription</key>
     <string>Speech is transcribed on-device to detect the wake word and understand your commands.</string>
+    <key>NSScreenCaptureUsageDescription</key>
+    <string>When the app can't find a button through Accessibility, it screenshots the screen to locate what you asked it to click.</string>
 </dict>
 </plist>

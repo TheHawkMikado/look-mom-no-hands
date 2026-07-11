@@ -227,13 +227,16 @@ private struct SettingsTab: View {
                     .font(.caption).foregroundStyle(.secondary)
             }
 
-            Section("Voice control") {
+            Section("Screen control") {
                 Text("Say “Hey Mama” to start a command, “Adios Mama” to end the session.")
                     .font(.caption).foregroundStyle(.secondary)
                 LabeledContent("Accessibility (mouse/keyboard)") { statusPill(coordinator.accessibilityTrusted) }
                 if !coordinator.accessibilityTrusted {
                     Button("Grant Accessibility…") { coordinator.requestAccessibility() }
                 }
+                Toggle("Vision fallback (screenshot a target the app can't find)", isOn: $coordinator.visionClickEnabled)
+                Text("When on, a click the Accessibility tree can't resolve is retried by screenshotting the screen and locating it visually. Needs Screen Recording permission (macOS will prompt the first time).")
+                    .font(.caption).foregroundStyle(.secondary)
             }
         }
         .formStyle(.grouped)
