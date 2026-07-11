@@ -553,6 +553,30 @@ final class URLAndKeystrokeTests: XCTestCase {
         XCTAssertNil(ScreenController.bestWindowIndex(labels, query: ""))
     }
 
+    func testElementMatchScoringPrefersExactThenField() {
+        // Exact label beats a substring-containing sibling regardless of tree order.
+        let exact = ScreenController.elementMatchScore(label: "send", needle: "send", depth: 8, isTextInput: false)
+        let contains = ScreenController.elementMatchScore(label: "send message", needle: "send", depth: 2, isTextInput: false)
+        XCTAssertGreaterThan(exact, contains)
+        // Non-match scores zero (never clicked).
+        XCTAssertEqual(ScreenController.elementMatchScore(label: "cancel", needle: "send", depth: 0, isTextInput: false), 0)
+        // Among equal labels, a text input wins (typing target).
+        let field = ScreenController.elementMatchScore(label: "chat", needle: "chat", depth: 5, isTextInput: true)
+        let heading = ScreenController.elementMatchScore(label: "chat", needle: "chat", depth: 5, isTextInput: false)
+        XCTAssertGreaterThan(field, heading)
+        // A deep exact match still beats a shallow prefix match.
+        let deepExact = ScreenController.elementMatchScore(label: "ok", needle: "ok", depth: 30, isTextInput: false)
+        let shallowPrefix = ScreenController.elementMatchScore(label: "okay then", needle: "ok", depth: 0, isTextInput: false)
+        XCTAssertGreaterThan(deepExact, shallowPrefix)
+    }
+
+    func testTextInputRoleDetection() {
+        XCTAssertTrue(ScreenController.isTextInput("AXTextField"))
+        XCTAssertTrue(ScreenController.isTextInput("AXTextArea"))
+        XCTAssertTrue(ScreenController.isTextInput("AXComboBox"))
+        XCTAssertFalse(ScreenController.isTextInput("AXButton"))
+    }
+
     func testAppNameResolvesShorthand() {
         // Mirrors the reporter's real /Applications, incl. a longer decoy that
         // also contains "chrome".

@@ -137,13 +137,21 @@ enum ScreenController {
 
         let root = AXUIElementCreateApplication(app.processIdentifier)
         let needle = target.lowercased()
-        guard let element = try findElement(in: root, matching: needle, depth: 0),
-              let center = center(of: element) else {
+        var best: ElementMatch?
+        var budget = 4000   // bound the full-tree walk on big Electron/browser trees
+        try findBestElement(in: root, matching: needle, depth: 0, budget: &budget, best: &best)
+        guard let match = best, let center = center(of: match.element) else {
             throw ControlError.elementNotFound(target)
         }
         // Last gate before the irreversible part: Stop mid-walk must not click.
         try Task.checkCancellation()
         clickMouse(at: center)
+        // A text field must actually hold focus for a following `type`/paste to
+        // land. The geometric click alone can miss (inset/overlapped hit area or a
+        // field that grabs focus on a child), so also set AX focus explicitly.
+        if isTextInput(match.role) {
+            AXUIElementSetAttributeValue(match.element, kAXFocusedAttribute as CFString, kCFBooleanTrue)
+        }
     }
 
     // MARK: - Reading the screen
@@ -466,30 +474,59 @@ enum ScreenController {
 
     // MARK: - Accessibility tree search
 
-    private static func findElement(in element: AXUIElement, matching needle: String, depth: Int) throws -> AXUIElement? {
-        if depth > 40 { return nil } // guard against pathological trees
-        // The walk can grind for seconds on big AX trees (browsers, Electron);
-        // checking per node is what lets Stop abandon it promptly.
-        try Task.checkCancellation()
+    struct ElementMatch { let element: AXUIElement; let role: String; let score: Int }
 
-        if let label = descriptiveText(of: element)?.lowercased(), label.contains(needle),
-           isClickable(element) {
-            return element
-        }
-        for child in children(of: element) {
-            if let hit = try findElement(in: child, matching: needle, depth: depth + 1) { return hit }
-        }
-        return nil
+    /// Content roles that aren't in `interactiveRoles` but are still legitimate
+    /// click targets (a result row, a label, an icon). Unioned with the interactive
+    /// set so anything the snapshot advertised as clickable is actually clickable —
+    /// the old executor rejected text fields/popups/tabs the snapshot offered.
+    private static let contentRoles: Set<String> = ["AXStaticText", "AXCell", "AXImage", "AXRow"]
+
+    private static func clickableRole(_ role: String) -> Bool {
+        interactiveRoles.contains(role) || contentRoles.contains(role)
     }
 
-    private static func isClickable(_ element: AXUIElement) -> Bool {
-        guard let role = string(element, kAXRoleAttribute) else { return false }
-        return ["AXButton", "AXLink", "AXMenuItem", "AXCheckBox", "AXRadioButton",
-                "AXStaticText", "AXCell", "AXImage"].contains(role)
+    static func isTextInput(_ role: String) -> Bool {
+        role == "AXTextField" || role == "AXTextArea" || role == "AXComboBox"
+    }
+
+    /// Walks the AX tree and keeps the single best label match instead of the first
+    /// hit, so "chat" prefers the actual input over a "Chat" heading that appears
+    /// earlier in tree order. Bounded depth + per-node cancellation like before.
+    private static func findBestElement(in element: AXUIElement, matching needle: String,
+                                        depth: Int, budget: inout Int, best: inout ElementMatch?) throws {
+        if depth > 40 || budget <= 0 { return } // bound pathological / huge trees
+        budget -= 1
+        try Task.checkCancellation()
+
+        if let role = string(element, kAXRoleAttribute), clickableRole(role),
+           let label = descriptiveText(of: element)?.lowercased(), !label.isEmpty {
+            let s = elementMatchScore(label: label, needle: needle, depth: depth, isTextInput: isTextInput(role))
+            if s > 0, best == nil || s > best!.score {
+                best = ElementMatch(element: element, role: role, score: s)
+            }
+        }
+        for child in children(of: element) {
+            try findBestElement(in: child, matching: needle, depth: depth + 1, budget: &budget, best: &best)
+        }
+    }
+
+    /// Pure scorer (testable). Exact label beats prefix beats substring; ties break
+    /// toward text inputs (typing targets) and then shallower/more-prominent nodes.
+    static func elementMatchScore(label: String, needle: String, depth: Int, isTextInput: Bool) -> Int {
+        let base: Int
+        if label == needle { base = 300 }
+        else if label.hasPrefix(needle) { base = 200 }
+        else if label.contains(needle) { base = 100 }
+        else { return 0 }
+        return base + (isTextInput ? 20 : 0) - min(depth, 40)
     }
 
     private static func descriptiveText(of element: AXUIElement) -> String? {
-        for attr in [kAXTitleAttribute, kAXDescriptionAttribute, kAXValueAttribute] {
+        // Placeholder before value so an *empty* field (a chat box, a search box)
+        // is still identifiable by its prompt ("Ask Copilot…") rather than vanishing
+        // — that's exactly the field a "type in the chat" command targets.
+        for attr in [kAXTitleAttribute, kAXDescriptionAttribute, kAXPlaceholderValueAttribute, kAXValueAttribute] {
             if let s = string(element, attr), !s.isEmpty { return s }
         }
         return nil
