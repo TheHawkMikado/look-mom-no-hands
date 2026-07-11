@@ -267,10 +267,23 @@ final class DictateVoicePhraseTests: XCTestCase {
             XCTAssertFalse(AppCoordinator.wakePhrases.contains(where: start.contains), start)
             XCTAssertFalse(AppCoordinator.stopPhrases.contains(where: start.contains), start)
         }
-        // The stop phrase gets stripped out of a captured note.
-        let note = "buy milk and eggs mama stop dictating"
-        let stripped = AppCoordinator.strippingPhrases(AppCoordinator.dictateStopPhrases, from: note)
-        XCTAssertEqual(stripped, "buy milk and eggs")
+    }
+
+    func testTriggersStrippedOnlyAtEdges() {
+        // Trailing stop phrase removed.
+        XCTAssertEqual(AppCoordinator.stripDictationTriggers("buy milk and eggs mama stop dictating"),
+                       "buy milk and eggs")
+        // Trailing stop phrase with punctuation still removed.
+        XCTAssertEqual(AppCoordinator.stripDictationTriggers("Buy milk and eggs. Mama stop dictating."),
+                       "Buy milk and eggs")
+        // Leading start phrase removed.
+        XCTAssertEqual(AppCoordinator.stripDictationTriggers("mama dictate this buy milk"),
+                       "buy milk")
+        // Mid-note content that merely CONTAINS a phrase is preserved.
+        XCTAssertEqual(AppCoordinator.stripDictationTriggers("remind me to stop dictating at work when done"),
+                       "remind me to stop dictating at work when done")
+        XCTAssertEqual(AppCoordinator.stripDictationTriggers("tell mama dictate the recipe to grandma"),
+                       "tell mama dictate the recipe to grandma")
     }
 }
 

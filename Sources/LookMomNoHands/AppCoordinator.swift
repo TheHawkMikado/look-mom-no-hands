@@ -46,6 +46,8 @@ final class AppCoordinator: ObservableObject {
     private let hotkey = HotkeyMonitor()
     private var dictationOutput: DictationOutput = .report   // where the current note goes
     private var pendingHotkeyDictation = false               // start requested before the mic was on
+    private var starting = false                             // start() in flight (async permission gap)
+    private var insertTargetApp: NSRunningApplication?       // app to paste into (captured at insert start)
 
     /// Wake session open. Derived from `mode` so it can never desync; every mode
     /// change is accompanied by a `phase` write, which publishes the update.
@@ -238,9 +240,11 @@ final class AppCoordinator: ObservableObject {
     // MARK: Lifecycle
 
     func start() {
-        guard !isRunning else { return }
+        guard !isRunning, !starting else { return }
+        starting = true
         requestPermissions { [weak self] granted in
             guard let self else { return }
+            self.starting = false
             guard granted else {
                 self.pendingHotkeyDictation = false
                 self.phase = .error("Mic/Speech permission denied")
@@ -277,13 +281,19 @@ final class AppCoordinator: ObservableObject {
             finalizeDictation()
             return
         }
-        guard hasKey else {
+        // Insert only needs the API key when cleanup is on (Scribe uses the
+        // ElevenLabs key separately); raw paste works with just on-device ASR.
+        guard hasKey || !cleanUpInsertedText else {
             phase = .error("No API key set")
-            store.log("hotkey", "ignored — no API key")
+            store.log("hotkey", "ignored — no API key (needed for cleanup)")
             return
         }
         if isRunning {
             startDictation(output: .insert)
+        } else if starting || pendingHotkeyDictation {
+            // A second press during the async startup cancels the pending start.
+            pendingHotkeyDictation = false
+            store.log("hotkey", "startup cancelled by second press")
         } else {
             pendingHotkeyDictation = true
             start()
@@ -642,6 +652,9 @@ final class AppCoordinator: ObservableObject {
 
     private func beginDictation(returnTo: Mode, output: DictationOutput) {
         dictationOutput = output
+        // Remember which app to paste into NOW — before any focus change — so the
+        // final ⌘V lands in the editor the user was in, not our panel.
+        insertTargetApp = output == .insert ? NSWorkspace.shared.frontmostApplication : nil
         store.log("dictation", "started (\(output == .insert ? "insert→cursor" : "report")) — pause or say a stop phrase to finish")
         // A note is a fresh intent — drop any pending clarification/context so it
         // isn't stranded on screen or carried into the next command.
@@ -695,22 +708,52 @@ final class AppCoordinator: ObservableObject {
         }
     }
 
+    /// Strips a leading start phrase and a trailing stop phrase (only at the
+    /// edges, where the spoken triggers actually land) so legitimate note content
+    /// that merely contains those words mid-sentence is preserved.
+    nonisolated static func stripDictationTriggers(_ text: String) -> String {
+        var out = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let edges = CharacterSet.whitespacesAndNewlines.union(.punctuationCharacters)
+        for phrase in dictateStartPhrases {
+            if let r = out.range(of: phrase, options: [.caseInsensitive, .anchored]) {
+                out.removeSubrange(..<r.upperBound)
+                break
+            }
+        }
+        out = out.trimmingCharacters(in: edges)
+        for phrase in dictateStopPhrases {
+            if let r = out.range(of: phrase, options: [.caseInsensitive, .backwards]),
+               out[r.upperBound...].trimmingCharacters(in: edges).isEmpty {
+                out.removeSubrange(r.lowerBound...)
+                break
+            }
+        }
+        return out.trimmingCharacters(in: edges)
+    }
+
     private func finalizeDictation() {
         listener.carryForward = false
         let output = dictationOutput
-        // Voice stop/start phrases get spoken into the clip — strip them so they
-        // aren't summarized or pasted.
-        let strip = Self.dictateStopPhrases + Self.dictateStartPhrases
-        let appleText = Self.strippingPhrases(strip, from: utterance)
+        // A spoken start/stop phrase lands at the note's edges — strip only there.
+        let appleText = Self.stripDictationTriggers(utterance)
         // Grab the captured clip (if any) before freshUtterance/arming touches it.
         let wav = scribeForDictation ? listener.takeCapturedWAV() : nil
         listener.captureAudio = false
         freshUtterance()
         mode = dictationReturnMode
+        // Report and cleanup-on insert need Claude; raw insert doesn't. Scribe uses
+        // the ElevenLabs key separately.
+        let needsClaude = output == .report || cleanUpInsertedText
         // Proceed if EITHER Apple heard something OR we captured audio Scribe can
         // still transcribe — a dead on-device recognizer must not lose the note.
-        guard !appleText.isEmpty || wav != nil, let claude else {
+        guard !appleText.isEmpty || wav != nil else {
             store.log("dictation", "empty note")
+            settleSessionPhase()
+            return
+        }
+        if needsClaude, claude == nil {
+            phase = .error("No API key set")
+            store.log("dictation", "needs an API key for \(output == .report ? "the report" : "cleanup")")
             settleSessionPhase()
             return
         }
@@ -722,8 +765,8 @@ final class AppCoordinator: ObservableObject {
         actionTask = Task {
             defer { self.finishProcessing(gen) }
             var text = await self.transcribed(wav: wav, fallback: appleText)
-            // Scribe re-transcribes the whole clip, stop phrase included — strip again.
-            text = Self.strippingPhrases(strip, from: text)
+            // Scribe re-transcribes the whole clip, edge triggers included — strip again.
+            text = Self.stripDictationTriggers(text)
             guard !text.isEmpty else {
                 // Empty ⟹ Apple heard nothing AND Scribe returned nothing/failed on a
                 // clip that existed. Persist it (recoverable) and surface — never
@@ -740,8 +783,9 @@ final class AppCoordinator: ObservableObject {
                 try Task.checkCancellation()
                 switch output {
                 case .insert:
-                    try await self.insertDictation(text, claude: claude, gen: gen)
+                    try await self.insertDictation(text, claude: self.claude, gen: gen)
                 case .report:
+                    guard let claude = self.claude else { return }   // guaranteed by needsClaude
                     let report = try await claude.buildDictationReport(text)
                     try Task.checkCancellation()
                     self.lastReport = report
@@ -769,11 +813,12 @@ final class AppCoordinator: ObservableObject {
         }
     }
 
-    /// Insert mode: optionally clean the text, then paste it at the cursor and
-    /// leave it on the clipboard. The final text is recorded so nothing is lost.
-    private func insertDictation(_ raw: String, claude: ClaudeClient, gen: Int) async throws {
+    /// Insert mode: optionally clean the text, then paste it into the app the user
+    /// was in and leave it on the clipboard. The final text is recorded so nothing
+    /// is lost, even if the paste can't happen.
+    private func insertDictation(_ raw: String, claude: ClaudeClient?, gen: Int) async throws {
         let final: String
-        if cleanUpInsertedText {
+        if cleanUpInsertedText, let claude {
             // Cleanup is a nicety — a failure just pastes the raw transcript.
             final = (try? await claude.cleanUpDictation(raw)) ?? raw
         } else {
@@ -787,6 +832,13 @@ final class AppCoordinator: ObservableObject {
             store.log("dictation", "\(final.count) chars on clipboard — press ⌘V (auto-paste needs Accessibility)")
             return
         }
+        // If our own UI grabbed focus (e.g. we had to prompt for a permission on a
+        // cold start), put the user's app back in front so ⌘V lands there.
+        if let target = insertTargetApp,
+           NSWorkspace.shared.frontmostApplication?.processIdentifier != target.processIdentifier {
+            target.activate(options: [])
+            try? await Task.sleep(nanoseconds: 80_000_000)
+        }
         // Let the frontmost app register the new clipboard before ⌘V (async — no
         // main-thread blocking), then re-check the run isn't stale.
         try? await Task.sleep(nanoseconds: 40_000_000)
@@ -798,8 +850,13 @@ final class AppCoordinator: ObservableObject {
     // MARK: Permissions
 
     func requestPermissions(_ completion: @escaping (Bool) -> Void) {
-        // A menu-bar (accessory) app must be active for the TCC prompt to appear.
-        NSApplication.shared.activate(ignoringOtherApps: true)
+        // A menu-bar (accessory) app must be active for a TCC prompt to appear —
+        // but ONLY activate when a prompt is actually pending (status not yet
+        // determined). Stealing focus when permissions are already settled would
+        // yank the user's editor away right before a push-to-dictate paste.
+        let needsPrompt = SFSpeechRecognizer.authorizationStatus() == .notDetermined
+            || AVCaptureDevice.authorizationStatus(for: .audio) == .notDetermined
+        if needsPrompt { NSApplication.shared.activate(ignoringOtherApps: true) }
         store.log("perm", "requesting: speech=\(Self.speechName(SFSpeechRecognizer.authorizationStatus())) mic=\(Self.micName(AVCaptureDevice.authorizationStatus(for: .audio)))")
         SFSpeechRecognizer.requestAuthorization { [weak self] speechStatus in
             AVCaptureDevice.requestAccess(for: .audio) { micGranted in
