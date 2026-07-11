@@ -168,6 +168,43 @@ enum RecorderOutput: Sendable, Equatable {
     }
 }
 
+/// A named set of instructions that shapes how a recording is turned into a note
+/// — "what to extract and when." The user picks the active one; its `instructions`
+/// are injected into the report prompt (title/summary/points/actions still frame
+/// the output, the instructions steer emphasis and what counts as a point/action).
+struct ProcessingProfile: Codable, Identifiable, Sendable, Equatable {
+    let id: String
+    var name: String
+    var instructions: String
+    let builtIn: Bool
+
+    init(id: String = UUID().uuidString, name: String, instructions: String, builtIn: Bool = false) {
+        self.id = id
+        self.name = name
+        self.instructions = instructions
+        self.builtIn = builtIn
+    }
+
+    /// Seeded on first run; the user can edit/duplicate/add their own.
+    static let seeds: [ProcessingProfile] = [
+        ProcessingProfile(id: "builtin.general", name: "General note", builtIn: true, instructionsText:
+            "A clear title, a 2–3 sentence summary, the key points, and any concrete action items (with an owner and date when stated)."),
+        ProcessingProfile(id: "builtin.meeting", name: "Meeting", builtIn: true, instructionsText:
+            "Treat this as meeting notes. Summary of what was discussed, decisions made, action items with owners and due dates, and any open questions. List attendees if named."),
+        ProcessingProfile(id: "builtin.tasks", name: "Task list", builtIn: true, instructionsText:
+            "Extract a checklist of concrete to-dos, each as a short imperative bullet under action items. Keep the summary to one line. Ignore filler."),
+        ProcessingProfile(id: "builtin.idea", name: "Idea / brainstorm", builtIn: true, instructionsText:
+            "Capture the core idea in the summary, then list every distinct thought as a key point. Only include action items if a concrete next step was stated."),
+        ProcessingProfile(id: "builtin.journal", name: "Journal", builtIn: true, instructionsText:
+            "A reflective title and a faithful prose summary in the first person. Key points optional; usually no action items.")
+    ]
+
+    // Convenience init used only by the seeds above (keeps them readable).
+    private init(id: String, name: String, builtIn: Bool, instructionsText: String) {
+        self.init(id: id, name: name, instructions: instructionsText, builtIn: builtIn)
+    }
+}
+
 /// One entry in the user's vocabulary — the unified store behind "dictionary"
 /// (recognize/spell terms), "corrections" (fix consistent mishearings), and
 /// "snippets" (expand a spoken trigger). All three are the same shape (a spoken

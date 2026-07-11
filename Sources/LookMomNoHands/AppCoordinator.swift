@@ -108,6 +108,7 @@ final class AppCoordinator: ObservableObject {
     private var claude: ClaudeClient?
     private let speaker = Speaker()
     let vocabulary: VocabularyStore
+    let profiles: ProfileStore
 
     // Longer than the old 1.2s: a spoken request can be several action items, so
     // don't cut it off on a mid-sentence breath.
@@ -151,6 +152,7 @@ final class AppCoordinator: ObservableObject {
 
     init() {
         vocabulary = VocabularyStore(directory: store.directory)
+        profiles = ProfileStore(directory: store.directory)
         if UserDefaults.standard.object(forKey: Self.silenceKey) != nil {
             recorderEndPause = UserDefaults.standard.double(forKey: Self.silenceKey)
         }
@@ -645,7 +647,7 @@ final class AppCoordinator: ObservableObject {
                         self.store.addTranscript(TranscriptRecord(kind: "dictation", transcript: text))
                         return
                     }
-                    let report = try await claude.buildDictationReport(text, vocabulary: self.vocabulary.promptContext)
+                    let report = try await claude.buildDictationReport(text, vocabulary: self.vocabulary.promptContext, instructions: self.profiles.activeInstructions)
                     try Task.checkCancellation()
                     self.lastReport = report
                     self.store.addTranscript(TranscriptRecord(kind: "dictation", transcript: text,
@@ -721,7 +723,7 @@ final class AppCoordinator: ObservableObject {
         liveBusy = true
         Task {
             defer { self.liveBusy = false }
-            if let report = try? await claude.buildDictationReport(text, vocabulary: self.vocabulary.promptContext) {
+            if let report = try? await claude.buildDictationReport(text, vocabulary: self.vocabulary.promptContext, instructions: self.profiles.activeInstructions) {
                 self.lastReport = report
                 self.store.addTranscript(TranscriptRecord(kind: "dictation", transcript: text,
                     title: report.title, summary: report.summary,

@@ -176,13 +176,13 @@ final class ClaudeClient: @unchecked Sendable {
 
     // MARK: Dictation report (output_config.format + adaptive thinking where supported)
 
-    func buildDictationReport(_ rawTranscript: String, vocabulary: String = "") async throws -> DictationReport {
-        let json = try await post(Self.reportRequestBody(transcript: rawTranscript, vocabulary: vocabulary, model: .opus48))
+    func buildDictationReport(_ rawTranscript: String, vocabulary: String = "", instructions: String = "") async throws -> DictationReport {
+        let json = try await post(Self.reportRequestBody(transcript: rawTranscript, vocabulary: vocabulary, instructions: instructions, model: .opus48))
         try Self.checkRefusal(json)
         return try Self.decodeBlock(json, blockType: "text", payloadKey: "text")
     }
 
-    static func reportRequestBody(transcript: String, vocabulary: String = "", model: ClaudeModel) -> [String: Any] {
+    static func reportRequestBody(transcript: String, vocabulary: String = "", instructions: String = "", model: ClaudeModel) -> [String: Any] {
         let schema: [String: Any] = [
             "type": "object",
             "additionalProperties": false,
@@ -215,7 +215,7 @@ final class ClaudeClient: @unchecked Sendable {
                 - action_items: concrete to-dos as short bullets (empty if none).
                 - transcript: the dictation lightly cleaned up (fix obvious ASR errors, \
                 remove filler, keep the meaning and wording).
-
+                \(instructions.isEmpty ? "" : "\n                Follow the user's processing instructions for what to emphasize and include:\n                \(instructions)\n")
                 Dictation:
                 \(transcript)
                 """

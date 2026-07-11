@@ -17,6 +17,8 @@ struct DashboardView: View {
             VocabularyTab(vocabulary: coordinator.vocabulary,
                           onChange: { coordinator.refreshContextualPhrases() })
                 .tabItem { Label("Vocabulary", systemImage: "character.book.closed") }
+            ProfilesTab(profiles: coordinator.profiles)
+                .tabItem { Label("Profiles", systemImage: "slider.horizontal.3") }
             ActivityTab(store: coordinator.store)
                 .tabItem { Label("Activity", systemImage: "list.bullet.rectangle") }
             SettingsTab(coordinator: coordinator)
@@ -190,6 +192,82 @@ private struct LiveTab: View {
     }
 }
 
+/// Processing profiles: named instruction sets that decide how a recording turns
+/// into a note (what to extract and when). The active one drives every note.
+private struct ProfilesTab: View {
+    @ObservedObject var profiles: ProfileStore
+    @State private var draftName = ""
+    @State private var draftInstructions = ""
+    @State private var editingID: String?
+
+    var body: some View {
+        HSplitView {
+            List(selection: Binding(get: { profiles.activeID }, set: { profiles.activeID = $0 ?? profiles.activeID })) {
+                ForEach(profiles.profiles) { p in
+                    HStack {
+                        Image(systemName: p.id == profiles.activeID ? "largecircle.fill.circle" : "circle")
+                            .foregroundStyle(p.id == profiles.activeID ? Color.accentColor : Color.secondary)
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text(p.name)
+                            if p.builtIn { Text("built-in").font(.caption2).foregroundStyle(.secondary) }
+                        }
+                    }
+                    .tag(p.id)
+                    .contextMenu {
+                        if !p.builtIn { Button("Delete", role: .destructive) { profiles.remove(p.id) } }
+                    }
+                }
+                Button { addProfile() } label: { Label("New profile", systemImage: "plus") }
+                    .buttonStyle(.borderless)
+            }
+            .frame(minWidth: 200)
+
+            editor
+                .frame(minWidth: 320)
+                .padding()
+        }
+        .onAppear(perform: loadDraft)
+        .onChange(of: profiles.activeID) { _ in loadDraft() }
+    }
+
+    @ViewBuilder private var editor: some View {
+        if let p = profiles.active {
+            VStack(alignment: .leading, spacing: 10) {
+                Text("Active profile").font(.caption).foregroundStyle(.secondary)
+                TextField("Name", text: $draftName)
+                    .textFieldStyle(.roundedBorder)
+                    .disabled(p.builtIn)
+                Text("Instructions — what the app should produce from a recording, and when.")
+                    .font(.caption).foregroundStyle(.secondary)
+                TextEditor(text: $draftInstructions)
+                    .font(.body)
+                    .frame(minHeight: 160)
+                    .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.secondary.opacity(0.3)))
+                HStack {
+                    if p.builtIn {
+                        Text("Built-in — edits are saved to your copy.").font(.caption2).foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Button("Save") { profiles.update(p.id, name: draftName, instructions: draftInstructions) }
+                        .disabled(draftName.trimmingCharacters(in: .whitespaces).isEmpty)
+                }
+            }
+        } else {
+            Text("No profile selected").foregroundStyle(.secondary)
+        }
+    }
+
+    private func loadDraft() {
+        guard let p = profiles.active else { return }
+        draftName = p.name; draftInstructions = p.instructions; editingID = p.id
+    }
+
+    private func addProfile() {
+        profiles.add(name: "New profile", instructions: "A title, a short summary, and any action items.")
+        loadDraft()
+    }
+}
+
 /// Unified "dictionary + snippets": names/terms to spell right, corrections for
 /// consistent mishearings, and snippet expansions. The model applies all three.
 private struct VocabularyTab: View {
@@ -296,6 +374,12 @@ private struct SettingsTab: View {
             }
 
             Section("Recording") {
+                Picker("Note profile", selection: Binding(
+                    get: { coordinator.profiles.activeID },
+                    set: { coordinator.profiles.activeID = $0 }
+                )) {
+                    ForEach(coordinator.profiles.profiles) { Text($0.name).tag($0.id) }
+                }
                 Picker("End after pause", selection: $coordinator.recorderEndPause) {
                     ForEach(pauseOptions, id: \.1) { Text($0.0).tag($0.1) }
                 }

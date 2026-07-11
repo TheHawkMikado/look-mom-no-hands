@@ -428,6 +428,43 @@ final class SpeechEngineTests: XCTestCase {
     }
 }
 
+final class ProfileTests: XCTestCase {
+    @MainActor private func store() -> ProfileStore {
+        ProfileStore(directory: FileManager.default.temporaryDirectory
+            .appendingPathComponent("lmnh-prof-\(UUID().uuidString)"))
+    }
+
+    @MainActor func testSeedsBuiltInsAndActiveInstructions() {
+        let s = store()
+        // Every built-in seed is present.
+        for seed in ProcessingProfile.seeds {
+            XCTAssertTrue(s.profiles.contains { $0.id == seed.id }, seed.id)
+        }
+        s.activeID = "builtin.meeting"
+        XCTAssertTrue(s.activeInstructions.lowercased().contains("meeting"))
+        XCTAssertFalse(s.activeInstructions.isEmpty)
+    }
+
+    @MainActor func testAddSelectsAndRemoveKeepsActiveValid() {
+        let s = store()
+        s.add(name: "Standup", instructions: "Yesterday, today, blockers.")
+        let added = s.profiles.first { $0.name == "Standup" }!
+        XCTAssertEqual(s.activeID, added.id)   // adding selects it
+        XCTAssertTrue(s.activeInstructions.contains("blockers"))
+        s.remove(added.id)
+        XCTAssertFalse(s.profiles.contains { $0.id == added.id })
+        XCTAssertTrue(s.profiles.contains { $0.id == s.activeID })   // active stays valid
+    }
+
+    @MainActor func testBuiltInCannotBeDeleted() {
+        let s = store()
+        let before = s.profiles.count
+        s.remove("builtin.general")
+        XCTAssertEqual(s.profiles.count, before)
+        XCTAssertTrue(s.profiles.contains { $0.id == "builtin.general" })
+    }
+}
+
 final class VocabularyTests: XCTestCase {
     @MainActor private func store() -> VocabularyStore {
         VocabularyStore(directory: FileManager.default.temporaryDirectory
