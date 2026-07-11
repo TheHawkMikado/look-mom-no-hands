@@ -46,6 +46,7 @@ struct PanelView: View {
             }
 
             controls
+            dictateRow
 
             if !coordinator.accessibilityTrusted {
                 accessibilityNotice
@@ -87,6 +88,23 @@ struct PanelView: View {
                         showVoiceSetup = false
                     }
                     .disabled(elevenField.isEmpty)
+                }
+            }
+            if coordinator.hasElevenLabsKey {
+                HStack(spacing: 6) {
+                    Image(systemName: "text.viewfinder").foregroundStyle(.secondary)
+                    Text("Transcription").font(.caption).foregroundStyle(.secondary)
+                    Spacer()
+                    Picker("", selection: Binding(
+                        get: { coordinator.speechEngine },
+                        set: { coordinator.speechEngine = $0 }
+                    )) {
+                        ForEach(SpeechEngine.allCases, id: \.self) { engine in
+                            Text(engine.label).tag(engine)
+                        }
+                    }
+                    .labelsHidden()
+                    .frame(maxWidth: 210)
                 }
             }
         }
@@ -137,6 +155,26 @@ struct PanelView: View {
         }
     }
 
+    // One-tap dictation (no wake word). Records a note; a pause ends it and
+    // produces the report. Only meaningful while listening is on.
+    private var dictateRow: some View {
+        HStack(spacing: 8) {
+            if coordinator.phase == .dictating {
+                Image(systemName: "waveform.badge.mic").foregroundStyle(.red)
+                Text("Recording note — pause to finish").font(.caption)
+                Spacer()
+            } else {
+                Button {
+                    coordinator.startDictation()
+                } label: {
+                    Label("Dictate a note", systemImage: "mic.circle.fill")
+                }
+                .disabled(!coordinator.isRunning || !coordinator.hasKey)
+                Spacer()
+            }
+        }
+    }
+
     private var accessibilityNotice: some View {
         HStack(spacing: 6) {
             Image(systemName: "cursorarrow.click.badge.clock").foregroundStyle(.orange)
@@ -149,9 +187,19 @@ struct PanelView: View {
     @ViewBuilder
     private func reportView(_ report: DictationReport) -> some View {
         VStack(alignment: .leading, spacing: 8) {
-            Label("Summary", systemImage: "text.line.first.and.arrowtriangle.forward").font(.caption.bold())
-            Text(report.summary).font(.callout)
-
+            if !report.title.isEmpty {
+                Text(report.title).font(.headline)
+            }
+            if !report.summary.isEmpty {
+                Label("Summary", systemImage: "text.line.first.and.arrowtriangle.forward").font(.caption.bold())
+                Text(report.summary).font(.callout)
+            }
+            if !report.keyPoints.isEmpty {
+                Label("Key points", systemImage: "list.bullet").font(.caption.bold())
+                ForEach(Array(report.keyPoints.enumerated()), id: \.offset) { _, item in
+                    Text("• \(item)").font(.callout)
+                }
+            }
             if !report.actionItems.isEmpty {
                 Label("Action items", systemImage: "checklist").font(.caption.bold())
                 ForEach(Array(report.actionItems.enumerated()), id: \.offset) { _, item in
@@ -159,13 +207,34 @@ struct PanelView: View {
                 }
             }
 
+            HStack {
+                Button {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(Self.reportText(report), forType: .string)
+                } label: { Label("Copy report", systemImage: "doc.on.doc") }
+                    .font(.caption)
+                Spacer()
+            }
+
             DisclosureGroup("Transcript") {
                 ScrollView {
-                    Text(report.transcript).font(.caption).frame(maxWidth: .infinity, alignment: .leading)
+                    Text(report.transcript).font(.caption)
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
                 }
                 .frame(maxHeight: 120)
             }
         }
+    }
+
+    private static func reportText(_ r: DictationReport) -> String {
+        var out = ""
+        if !r.title.isEmpty { out += "\(r.title)\n\n" }
+        if !r.summary.isEmpty { out += "Summary:\n\(r.summary)\n\n" }
+        if !r.keyPoints.isEmpty { out += "Key points:\n" + r.keyPoints.map { "• \($0)" }.joined(separator: "\n") + "\n\n" }
+        if !r.actionItems.isEmpty { out += "Action items:\n" + r.actionItems.map { "• \($0)" }.joined(separator: "\n") + "\n\n" }
+        out += "Transcript:\n\(r.transcript)"
+        return out
     }
 
     private var activity: some View {

@@ -145,11 +145,13 @@ final class ClaudeClient: @unchecked Sendable {
             "type": "object",
             "additionalProperties": false,
             "properties": [
+                "title": ["type": "string"],
                 "summary": ["type": "string"],
+                "key_points": ["type": "array", "items": ["type": "string"]],
                 "action_items": ["type": "array", "items": ["type": "string"]],
                 "transcript": ["type": "string"]
             ],
-            "required": ["summary", "action_items", "transcript"]
+            "required": ["title", "summary", "key_points", "action_items", "transcript"]
         ]
 
         var outputConfig: [String: Any] = [
@@ -164,9 +166,13 @@ final class ClaudeClient: @unchecked Sendable {
             "messages": [[
                 "role": "user",
                 "content": """
-                Turn this raw dictation into a report. Produce a tight TLDR summary, \
-                a list of concrete action items (empty if none), and a lightly cleaned-up \
-                transcript (fix obvious ASR errors, keep the meaning).
+                Turn this raw dictation into a structured report:
+                - title: a short (3-8 word) headline naming what this note is about.
+                - summary: a tight TLDR (1-3 sentences).
+                - key_points: the main ideas as short bullets (empty if none).
+                - action_items: concrete to-dos as short bullets (empty if none).
+                - transcript: the dictation lightly cleaned up (fix obvious ASR errors, \
+                remove filler, keep the meaning and wording).
 
                 Dictation:
                 \(transcript)

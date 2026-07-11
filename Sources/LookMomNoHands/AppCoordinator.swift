@@ -22,6 +22,14 @@ final class AppCoordinator: ObservableObject {
     @Published var accessibilityTrusted = false
     @Published var hasElevenLabsKey = false
 
+    /// Which STT engine re-transcribes utterances (Apple always does wake/gating).
+    /// Persisted so the choice survives relaunch; defaults to Scribe-for-dictation.
+    @Published var speechEngine: SpeechEngine = .scribeDictation {
+        didSet { UserDefaults.standard.set(speechEngine.rawValue, forKey: Self.engineKey) }
+    }
+    private static let engineKey = "speechEngine"
+    private var elevenLabsKey: String?
+
     /// Wake session open. Derived from `mode` so it can never desync; every mode
     /// change is accompanied by a `phase` write, which publishes the update.
     var isActive: Bool { mode != .standby }
@@ -60,6 +68,10 @@ final class AppCoordinator: ObservableObject {
     nonisolated static let stopPhrases = ["adios mama", "adios mamma", "adios momma", "adios ma ma", "adiós mama"]
 
     init() {
+        if let raw = UserDefaults.standard.string(forKey: Self.engineKey),
+           let saved = SpeechEngine(rawValue: raw) {
+            speechEngine = saved
+        }
         listener.contextualPhrases = ["Hey Mama", "Adios Mama"]
         listener.onPartial = { [weak self] text in self?.handlePartial(text) }
         listener.onInfo = { [weak self] msg in self?.store.log("speech", msg) }
@@ -146,6 +158,7 @@ final class AppCoordinator: ObservableObject {
         }
         if let env = ProcessInfo.processInfo.environment["LMNH_ELEVENLABS_API_KEY"] {
             speaker.elevenLabsKey = env
+            elevenLabsKey = env
             hasElevenLabsKey = true
         }
         let needsAnthropic = claude == nil
@@ -162,6 +175,7 @@ final class AppCoordinator: ObservableObject {
                 }
                 if let eleven, !self.hasElevenLabsKey {
                     self.speaker.elevenLabsKey = eleven
+                    self.elevenLabsKey = eleven
                     self.hasElevenLabsKey = true
                     self.store.log("app", "ElevenLabs key loaded — spoken replies on")
                 }
@@ -179,6 +193,7 @@ final class AppCoordinator: ObservableObject {
         let trimmed = key.trimmingCharacters(in: .whitespacesAndNewlines)
         KeychainStore.save(trimmed, account: Self.elevenLabsAccount)
         speaker.elevenLabsKey = trimmed
+        elevenLabsKey = trimmed.isEmpty ? nil : trimmed
         hasElevenLabsKey = !trimmed.isEmpty
         store.log("app", "ElevenLabs key saved — spoken replies on")
     }
@@ -306,6 +321,7 @@ final class AppCoordinator: ObservableObject {
         freshUtterance()
         sessionIdleSince = Date()
         startTicker()
+        armCaptureForCurrentMode()
     }
 
     private func endSession(reason: String) {
@@ -354,23 +370,26 @@ final class AppCoordinator: ObservableObject {
         // Discard anything heard while we were acting (e.g. our own typing sounds).
         freshUtterance()
         sessionIdleSince = Date()
+        armCaptureForCurrentMode()   // re-arm (clear) capture for the next command
     }
 
     // MARK: Commands
 
     private func finalizeCommand() {
-        let text = Self.strippingPhrases(Self.wakePhrases + Self.stopPhrases, from: utterance)
+        let appleText = Self.strippingPhrases(Self.wakePhrases + Self.stopPhrases, from: utterance)
+        // For the scribeAll option, re-transcribe the command audio too (adds a
+        // round-trip before parsing — the documented latency tradeoff).
+        let wav = scribeForCommand ? listener.takeCapturedWAV() : nil
+        listener.captureAudio = false
         freshUtterance()
         sessionIdleSince = Date()
-        guard !text.isEmpty else { return }
+        guard !appleText.isEmpty else { return }
         guard let claude else { phase = .error("No API key set"); return }
 
-        lastCommand = text
         // A spoken answer clears the on-screen question — from here it's just
         // another turn in the dialogue.
         let answeringClarification = pendingClarification != nil
         pendingClarification = nil
-        store.log("asr", answeringClarification ? "answer: \(text)" : "command: \(text)")
         processing = true
         phase = .thinking
         let startedAt = Date()
@@ -380,6 +399,11 @@ final class AppCoordinator: ObservableObject {
         actionTask = Task {
             defer { self.finishProcessing(gen) }
             do {
+                let raw = await self.transcribed(wav: wav, fallback: appleText)
+                let text = wav != nil ? Self.strippingPhrases(Self.wakePhrases + Self.stopPhrases, from: raw) : raw
+                try Task.checkCancellation()
+                self.lastCommand = text
+                self.store.log("asr", answeringClarification ? "answer: \(text)" : "command: \(text)")
                 let plan = try await claude.parsePlan(text, dialogue: priorDialogue)
                 try Task.checkCancellation()
                 let ms = Int(Date().timeIntervalSince(startedAt) * 1000)
@@ -397,7 +421,7 @@ final class AppCoordinator: ObservableObject {
                 self.dialogue = []
                 self.phase = .error("\(error)")
                 self.store.log("error", "\(error)")
-                self.store.addTranscript(TranscriptRecord(kind: "command", transcript: text, outcome: "error: \(error)"))
+                self.store.addTranscript(TranscriptRecord(kind: "command", transcript: self.lastCommand, outcome: "error: \(error)"))
                 await self.speak("Sorry, that didn't go through.", gen: gen)
             }
         }
@@ -535,35 +559,81 @@ final class AppCoordinator: ObservableObject {
         phase = .dictating
         freshUtterance()
         listener.carryForward = true   // a note may cross a recognition-request cycle
+        armCaptureForCurrentMode()
+    }
+
+    /// Starts a dictation immediately, from the panel button — no wake word needed.
+    /// Requires listening to be on so the mic pipeline exists.
+    func startDictation() {
+        guard isRunning, !processing else { return }
+        if mode == .standby { startTicker() }   // dictation needs the silence-gate ticker
+        beginDictation()
+    }
+
+    // Capture the utterance's raw audio only when Scribe will re-transcribe it, so
+    // Apple stays the sole engine (and no buffering) whenever Scribe isn't in play.
+    private func armCaptureForCurrentMode() {
+        let want: Bool
+        switch mode {
+        case .standby: want = false
+        case .command: want = hasElevenLabsKey && speechEngine.usesScribe(forDictation: false)
+        case .dictation: want = hasElevenLabsKey && speechEngine.usesScribe(forDictation: true)
+        }
+        listener.captureAudio = want   // setting true also clears the prior clip
+    }
+
+    private var scribeForDictation: Bool { hasElevenLabsKey && speechEngine.usesScribe(forDictation: true) }
+    private var scribeForCommand: Bool { hasElevenLabsKey && speechEngine.usesScribe(forDictation: false) }
+
+    /// Re-transcribes the captured clip through Scribe for higher accuracy; returns
+    /// `fallback` (Apple's transcript) when no clip was captured or Scribe fails.
+    /// Never throws.
+    private func transcribed(wav: Data?, fallback: String) async -> String {
+        guard let wav, let key = elevenLabsKey else { return fallback }
+        do {
+            let text = try await ScribeClient(apiKey: key).transcribe(wav: wav)
+            store.log("scribe", "re-transcribed \(wav.count / 1024)KB → \(text.count) chars")
+            return text.isEmpty ? fallback : text
+        } catch {
+            store.log("scribe", "failed, using on-device transcript: \(error)")
+            return fallback
+        }
     }
 
     private func finalizeDictation() {
         listener.carryForward = false
-        let text = utterance.trimmingCharacters(in: .whitespacesAndNewlines)
+        let appleText = utterance.trimmingCharacters(in: .whitespacesAndNewlines)
+        // Grab the captured clip (if any) before freshUtterance/arming touches it.
+        let wav = scribeForDictation ? listener.takeCapturedWAV() : nil
+        listener.captureAudio = false
         freshUtterance()
         mode = .command
-        guard !text.isEmpty, let claude else {
+        guard !appleText.isEmpty, let claude else {
             store.log("dictation", "empty note")
             phase = .capturingCommand
             sessionIdleSince = Date()
             return
         }
-        store.log("dictation", "captured \(text.count) chars — summarizing")
+        store.log("dictation", "captured \(appleText.count) chars\(wav != nil ? " (+audio for Scribe)" : "") — summarizing")
         processing = true
         phase = .thinking
         let gen = runGeneration
 
         actionTask = Task {
             defer { self.finishProcessing(gen) }
+            let text = await self.transcribed(wav: wav, fallback: appleText)
             do {
+                try Task.checkCancellation()
                 let report = try await claude.buildDictationReport(text)
                 try Task.checkCancellation()
                 self.lastReport = report
-                self.store.log("claude", "report ready — \(report.actionItems.count) action items")
+                self.store.log("claude", "report ready — \(report.keyPoints.count) points, \(report.actionItems.count) action items")
                 self.store.addTranscript(TranscriptRecord(
                     kind: "dictation",
-                    transcript: text,
+                    transcript: report.transcript.isEmpty ? text : report.transcript,
+                    title: report.title,
                     summary: report.summary,
+                    keyPoints: report.keyPoints,
                     actionItems: report.actionItems
                 ))
             } catch {

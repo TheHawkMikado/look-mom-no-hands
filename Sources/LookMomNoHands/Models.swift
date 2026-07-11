@@ -124,14 +124,54 @@ enum ScrollDirection: String, Decodable, Sendable {
     case up, down, left, right
 }
 
-/// The Wisprflow-style report produced at the end of a dictation session.
+/// Which speech-to-text engine transcribes captured utterances. Apple on-device
+/// always runs the always-on wake-word + silence gating regardless — this only
+/// controls the higher-quality re-transcription of the actual command/dictation.
+enum SpeechEngine: String, CaseIterable, Sendable {
+    case appleOnly          // on-device for everything (free, private, fastest)
+    case scribeDictation    // Scribe for notes, Apple for commands (default)
+    case scribeAll          // Scribe for commands + notes (max accuracy, +latency)
+
+    var label: String {
+        switch self {
+        case .appleOnly: return "Apple on-device (everywhere)"
+        case .scribeDictation: return "ElevenLabs for dictation"
+        case .scribeAll: return "ElevenLabs for commands + dictation"
+        }
+    }
+
+    func usesScribe(forDictation dictation: Bool) -> Bool {
+        switch self {
+        case .appleOnly: return false
+        case .scribeDictation: return dictation
+        case .scribeAll: return true
+        }
+    }
+}
+
+/// The VoiceDash-style report produced at the end of a dictation session.
 struct DictationReport: Decodable, Sendable {
+    let title: String
     let summary: String
+    let keyPoints: [String]
     let actionItems: [String]
     let transcript: String
 
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        // Tolerant like the other model outputs: a missing field degrades rather
+        // than throwing away the whole report.
+        title = (try? c.decodeIfPresent(String.self, forKey: .title)) ?? ""
+        summary = (try? c.decodeIfPresent(String.self, forKey: .summary)) ?? ""
+        keyPoints = (try? c.decodeIfPresent([String].self, forKey: .keyPoints)) ?? []
+        actionItems = (try? c.decodeIfPresent([String].self, forKey: .actionItems)) ?? []
+        transcript = (try? c.decodeIfPresent(String.self, forKey: .transcript)) ?? ""
+    }
+
     private enum CodingKeys: String, CodingKey {
+        case title
         case summary
+        case keyPoints = "key_points"
         case actionItems = "action_items"
         case transcript
     }

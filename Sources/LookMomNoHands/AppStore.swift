@@ -7,17 +7,22 @@ struct TranscriptRecord: Codable, Identifiable, Sendable {
     let date: Date
     let kind: String            // "command" | "dictation"
     let transcript: String      // raw ASR text
+    var title: String?          // dictation only
     var summary: String?        // dictation only
+    var keyPoints: [String]?    // dictation only
     var actionItems: [String]?  // dictation only
     var outcome: String?        // command: what was executed, or the error
 
     init(kind: String, transcript: String,
-         summary: String? = nil, actionItems: [String]? = nil, outcome: String? = nil) {
+         title: String? = nil, summary: String? = nil,
+         keyPoints: [String]? = nil, actionItems: [String]? = nil, outcome: String? = nil) {
         self.id = UUID().uuidString
         self.date = Date()
         self.kind = kind
         self.transcript = transcript
+        self.title = title
         self.summary = summary
+        self.keyPoints = keyPoints
         self.actionItems = actionItems
         self.outcome = outcome
     }

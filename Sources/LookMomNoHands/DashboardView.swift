@@ -68,7 +68,7 @@ private struct TranscriptDetail: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 12) {
                 HStack {
-                    Text(record.kind.capitalized).font(.headline)
+                    Text(record.title?.isEmpty == false ? record.title! : record.kind.capitalized).font(.headline)
                     Spacer()
                     Text(record.date.formatted(date: .long, time: .standard))
                         .font(.caption).foregroundStyle(.secondary)
@@ -76,6 +76,13 @@ private struct TranscriptDetail: View {
 
                 if let summary = record.summary {
                     section("Summary") { Text(summary) }
+                }
+                if let points = record.keyPoints, !points.isEmpty {
+                    section("Key points") {
+                        VStack(alignment: .leading, spacing: 4) {
+                            ForEach(Array(points.enumerated()), id: \.offset) { _, i in Text("• \(i)") }
+                        }
+                    }
                 }
                 if let items = record.actionItems, !items.isEmpty {
                     section("Action items") {
@@ -103,7 +110,11 @@ private struct TranscriptDetail: View {
 
     private var copyText: String {
         var out = ""
+        if let t = record.title, !t.isEmpty { out += "\(t)\n\n" }
         if let s = record.summary { out += "Summary:\n\(s)\n\n" }
+        if let points = record.keyPoints, !points.isEmpty {
+            out += "Key points:\n" + points.map { "• \($0)" }.joined(separator: "\n") + "\n\n"
+        }
         if let items = record.actionItems, !items.isEmpty {
             out += "Action items:\n" + items.map { "• \($0)" }.joined(separator: "\n") + "\n\n"
         }

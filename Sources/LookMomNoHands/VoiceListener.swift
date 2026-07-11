@@ -56,6 +56,36 @@ final class VoiceListener {
     /// standby and single commands.
     var carryForward = false
 
+    // Raw PCM capture for re-transcription through Scribe. Gated on `captureAudio`
+    // so we only buffer when a higher-quality transcript is actually wanted (never
+    // in always-on standby). Appended on the audio thread under captureLock; read
+    // on main via takeCapturedWAV().
+    private let captureLock = NSLock()
+    private var captureSamples: [Int16] = []
+    private var captureSampleRate: Double = 0
+    private var _captureAudio = false
+    var captureAudio: Bool {
+        get { captureLock.lock(); defer { captureLock.unlock() }; return _captureAudio }
+        set {
+            captureLock.lock()
+            _captureAudio = newValue
+            if newValue { captureSamples.removeAll(keepingCapacity: true) }
+            captureLock.unlock()
+        }
+    }
+
+    /// Returns the captured audio as a 16-bit PCM WAV and clears the buffer, or
+    /// nil if nothing was captured.
+    func takeCapturedWAV() -> Data? {
+        captureLock.lock()
+        let samples = captureSamples
+        let rate = captureSampleRate
+        captureSamples.removeAll(keepingCapacity: true)
+        captureLock.unlock()
+        guard !samples.isEmpty, rate > 0 else { return nil }
+        return Self.wav(from: samples, sampleRate: rate)
+    }
+
     /// Throws instead of soft-failing so the coordinator can't report a healthy
     /// "listening" state over a dead pipeline.
     func start() throws {
@@ -75,6 +105,7 @@ final class VoiceListener {
             self.requestLock.lock()
             self.request?.append(buffer)
             self.requestLock.unlock()
+            self.captureIfNeeded(buffer)
         }
         engine.prepare()
         do {
@@ -93,11 +124,47 @@ final class VoiceListener {
         running = false
         committed = ""
         carryForward = false
+        captureAudio = false
         generation += 1
         task?.cancel(); task = nil
         swapRequest(nil)
         engine.stop()
         engine.inputNode.removeTap(onBus: 0)
+    }
+
+    // Realtime audio thread. Convert the tap's float samples (channel 0) to Int16
+    // and accumulate while capture is on. Native sample rate — Scribe accepts
+    // standard WAV, so no resampling needed.
+    private func captureIfNeeded(_ buffer: AVAudioPCMBuffer) {
+        captureLock.lock()
+        defer { captureLock.unlock() }
+        guard _captureAudio, let channel = buffer.floatChannelData?[0] else { return }
+        captureSampleRate = buffer.format.sampleRate
+        let n = Int(buffer.frameLength)
+        captureSamples.reserveCapacity(captureSamples.count + n)
+        for i in 0..<n {
+            let clamped = max(-1, min(1, channel[i]))
+            captureSamples.append(Int16(clamped * Float(Int16.max)))
+        }
+    }
+
+    /// Builds a canonical 16-bit mono PCM WAV. Pure function — unit-tested.
+    static func wav(from samples: [Int16], sampleRate: Double) -> Data {
+        let rate = UInt32(sampleRate)
+        let bitsPerSample: UInt16 = 16
+        let channels: UInt16 = 1
+        let byteRate = rate * UInt32(channels) * UInt32(bitsPerSample / 8)
+        let blockAlign = channels * (bitsPerSample / 8)
+        let dataBytes = samples.count * 2
+        var d = Data()
+        func str(_ s: String) { d.append(Data(s.utf8)) }
+        func u32(_ v: UInt32) { var x = v.littleEndian; withUnsafeBytes(of: &x) { d.append(contentsOf: $0) } }
+        func u16(_ v: UInt16) { var x = v.littleEndian; withUnsafeBytes(of: &x) { d.append(contentsOf: $0) } }
+        str("RIFF"); u32(UInt32(36 + dataBytes)); str("WAVE")
+        str("fmt "); u32(16); u16(1); u16(channels); u32(rate); u32(byteRate); u16(blockAlign); u16(bitsPerSample)
+        str("data"); u32(UInt32(dataBytes))
+        for s in samples { u16(UInt16(bitPattern: s)) }
+        return d
     }
 
     /// Ends the current utterance and immediately starts a fresh one — a real

@@ -240,6 +240,82 @@ final class PlanDecodingTests: XCTestCase {
     }
 }
 
+final class SpeechEngineTests: XCTestCase {
+    func testScribeRoutingPerMode() {
+        XCTAssertFalse(SpeechEngine.appleOnly.usesScribe(forDictation: true))
+        XCTAssertFalse(SpeechEngine.appleOnly.usesScribe(forDictation: false))
+        XCTAssertTrue(SpeechEngine.scribeDictation.usesScribe(forDictation: true))
+        XCTAssertFalse(SpeechEngine.scribeDictation.usesScribe(forDictation: false))
+        XCTAssertTrue(SpeechEngine.scribeAll.usesScribe(forDictation: true))
+        XCTAssertTrue(SpeechEngine.scribeAll.usesScribe(forDictation: false))
+    }
+
+    func testEngineRawValueRoundTrips() {
+        for e in SpeechEngine.allCases {
+            XCTAssertEqual(SpeechEngine(rawValue: e.rawValue), e)
+        }
+    }
+}
+
+final class ReportDecodingTests: XCTestCase {
+    func testFullReportDecodes() throws {
+        let json = #"""
+        {"title":"Weekly plan","summary":"Ship the feature.",
+         "key_points":["a","b"],"action_items":["do x"],"transcript":"raw text"}
+        """#
+        let r = try JSONDecoder().decode(DictationReport.self, from: Data(json.utf8))
+        XCTAssertEqual(r.title, "Weekly plan")
+        XCTAssertEqual(r.keyPoints, ["a", "b"])
+        XCTAssertEqual(r.actionItems, ["do x"])
+        XCTAssertEqual(r.transcript, "raw text")
+    }
+
+    func testSparseReportDegradesNotThrows() throws {
+        // A report missing newer fields must not throw (tolerant decode).
+        let r = try JSONDecoder().decode(DictationReport.self, from: Data(#"{"summary":"s"}"#.utf8))
+        XCTAssertEqual(r.summary, "s")
+        XCTAssertEqual(r.title, "")
+        XCTAssertTrue(r.keyPoints.isEmpty)
+    }
+
+    func testReportSchemaRequiresAllFields() {
+        let body = ClaudeClient.reportRequestBody(transcript: "x", model: .opus48)
+        let oc = body["output_config"] as? [String: Any]
+        let fmt = oc?["format"] as? [String: Any]
+        let schema = fmt?["schema"] as? [String: Any]
+        let required = schema?["required"] as? [String]
+        for f in ["title", "summary", "key_points", "action_items", "transcript"] {
+            XCTAssertTrue(required?.contains(f) ?? false, "\(f) required")
+        }
+    }
+}
+
+final class WavAndScribeTests: XCTestCase {
+    func testWavHeaderIsCanonical() {
+        let samples: [Int16] = [0, 1000, -1000, 32767, -32768]
+        let wav = VoiceListener.wav(from: samples, sampleRate: 16000)
+        XCTAssertEqual(wav.count, 44 + samples.count * 2, "44-byte header + 16-bit samples")
+        XCTAssertEqual(String(decoding: wav[0..<4], as: UTF8.self), "RIFF")
+        XCTAssertEqual(String(decoding: wav[8..<12], as: UTF8.self), "WAVE")
+        XCTAssertEqual(String(decoding: wav[36..<40], as: UTF8.self), "data")
+        // Sample rate at bytes 24..28, little-endian = 16000.
+        let rate = wav[24..<28].reversed().reduce(0) { ($0 << 8) | UInt32($1) }
+        XCTAssertEqual(rate, 16000)
+        // 16-bit depth at bytes 34..36.
+        XCTAssertEqual(wav[34], 16); XCTAssertEqual(wav[35], 0)
+    }
+
+    func testScribeMultipartContainsModelAndFile() {
+        let wav = VoiceListener.wav(from: [1, 2, 3], sampleRate: 16000)
+        let body = ScribeClient.multipartBody(wav: wav, boundary: "B")
+        let s = String(decoding: body, as: UTF8.self)
+        XCTAssertTrue(s.contains("name=\"model_id\""))
+        XCTAssertTrue(s.contains("scribe_v1"))
+        XCTAssertTrue(s.contains("filename=\"audio.wav\""))
+        XCTAssertTrue(s.contains("--B--"), "closing boundary present")
+    }
+}
+
 final class URLAndKeystrokeTests: XCTestCase {
     func testBareHostGetsHTTPS() {
         XCTAssertEqual(ScreenController.normalizedURL("youtube.com"), "https://youtube.com")
