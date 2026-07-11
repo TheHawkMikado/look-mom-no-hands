@@ -126,9 +126,10 @@ enum ScreenController {
         // wedge the session's command processing, and Stop (cancellation) must
         // be able to abandon the wait. Runs off the main actor, so the sleeps
         // block no UI.
-        let deadline = Date().addingTimeInterval(10)
+        // Monotonic deadline — wall-clock (Date) can step backward under NTP.
+        let deadline = DispatchTime.now() + .seconds(10)
         while proc.isRunning {
-            if Task.isCancelled || Date() > deadline {
+            if Task.isCancelled || DispatchTime.now() > deadline {
                 proc.terminate()
                 throw ControlError.appLaunchFailed(name)
             }
