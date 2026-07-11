@@ -309,6 +309,53 @@ final class SpeechEngineTests: XCTestCase {
     }
 }
 
+final class VocabularyTests: XCTestCase {
+    @MainActor private func store() -> VocabularyStore {
+        VocabularyStore(directory: FileManager.default.temporaryDirectory
+            .appendingPathComponent("lmnh-vocab-\(UUID().uuidString)"))
+    }
+
+    @MainActor func testPromptContextComposesAllKinds() {
+        let v = store()
+        v.add(VocabEntry(kind: .word, spoken: "Styku"))
+        v.add(VocabEntry(kind: .correction, spoken: "stycu", written: "Styku"))
+        v.add(VocabEntry(kind: .snippet, spoken: "my email", written: "me@x.com"))
+        let ctx = v.promptContext
+        XCTAssertTrue(ctx.contains("Styku"))
+        XCTAssertTrue(ctx.contains("When you hear \"stycu\""))
+        XCTAssertTrue(ctx.contains("expand it to: me@x.com"))
+    }
+
+    @MainActor func testEmptyVocabHasEmptyContext() {
+        XCTAssertEqual(store().promptContext, "")
+    }
+
+    @MainActor func testContextualStringsIncludeTermsAndTriggers() {
+        let v = store()
+        v.add(VocabEntry(kind: .word, spoken: "Hawk Mikado"))
+        v.add(VocabEntry(kind: .snippet, spoken: "brb", written: "be right back"))
+        let cs = v.contextualStrings
+        XCTAssertTrue(cs.contains("Hawk Mikado"))
+        XCTAssertTrue(cs.contains("brb"))
+    }
+
+    @MainActor func testLearnCorrectionDedupesOnSpoken() {
+        let v = store()
+        v.learnCorrection(spoken: "chrome", written: "Google Chrome")
+        v.learnCorrection(spoken: "Chrome", written: "Google Chrome Canary")   // updates in place
+        let corrections = v.entries(of: .correction)
+        XCTAssertEqual(corrections.count, 1)
+        XCTAssertEqual(corrections.first?.written, "Google Chrome Canary")
+    }
+
+    @MainActor func testLearnCorrectionIgnoresNoOp() {
+        let v = store()
+        v.learnCorrection(spoken: "same", written: "same")   // no change
+        v.learnCorrection(spoken: "x", written: "")          // empty target
+        XCTAssertTrue(v.entries(of: .correction).isEmpty)
+    }
+}
+
 final class ReportDecodingTests: XCTestCase {
     func testFullReportDecodes() throws {
         let json = #"""

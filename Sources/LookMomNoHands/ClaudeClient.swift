@@ -47,14 +47,17 @@ final class ClaudeClient: @unchecked Sendable {
 
     /// `dialogue` carries a pending clarification exchange: earlier turns as
     /// (role, content) pairs, ending before the current transcript.
-    func parsePlan(_ transcript: String, dialogue: [(role: String, content: String)] = []) async throws -> ActionPlan {
-        let json = try await post(Self.planRequestBody(transcript: transcript, dialogue: dialogue, model: .haiku45), timeout: 20)
+    func parsePlan(_ transcript: String, dialogue: [(role: String, content: String)] = [],
+                   vocabulary: String = "") async throws -> ActionPlan {
+        let json = try await post(Self.planRequestBody(transcript: transcript, dialogue: dialogue,
+                                                        vocabulary: vocabulary, model: .haiku45), timeout: 20)
         try Self.checkRefusal(json)
         return try Self.decodeBlock(json, blockType: "tool_use", payloadKey: "input")
     }
 
     static func planRequestBody(transcript: String,
                                 dialogue: [(role: String, content: String)] = [],
+                                vocabulary: String = "",
                                 model: ClaudeModel) -> [String: Any] {
         let step: [String: Any] = [
             "type": "object",
@@ -123,24 +126,26 @@ final class ClaudeClient: @unchecked Sendable {
         messages.append(["role": "user", "content": "Spoken request: \"\(transcript)\""])
 
         // No effort/thinking on this path regardless of model — latency-critical.
-        return [
+        var body: [String: Any] = [
             "model": model.rawValue,
             "max_tokens": 2048,
             "tools": [tool],
             "tool_choice": ["type": "tool", "name": "emit_plan"],
             "messages": messages
         ]
+        if !vocabulary.isEmpty { body["system"] = vocabulary }
+        return body
     }
 
     // MARK: Dictation report (output_config.format + adaptive thinking where supported)
 
-    func buildDictationReport(_ rawTranscript: String) async throws -> DictationReport {
-        let json = try await post(Self.reportRequestBody(transcript: rawTranscript, model: .opus48))
+    func buildDictationReport(_ rawTranscript: String, vocabulary: String = "") async throws -> DictationReport {
+        let json = try await post(Self.reportRequestBody(transcript: rawTranscript, vocabulary: vocabulary, model: .opus48))
         try Self.checkRefusal(json)
         return try Self.decodeBlock(json, blockType: "text", payloadKey: "text")
     }
 
-    static func reportRequestBody(transcript: String, model: ClaudeModel) -> [String: Any] {
+    static func reportRequestBody(transcript: String, vocabulary: String = "", model: ClaudeModel) -> [String: Any] {
         let schema: [String: Any] = [
             "type": "object",
             "additionalProperties": false,
@@ -180,6 +185,7 @@ final class ClaudeClient: @unchecked Sendable {
             ]]
         ]
         if model.supportsAdaptiveThinking { body["thinking"] = ["type": "adaptive"] }
+        if !vocabulary.isEmpty { body["system"] = vocabulary }
         return body
     }
 
@@ -189,8 +195,8 @@ final class ClaudeClient: @unchecked Sendable {
     /// errors, adds punctuation/capitalization, drops filler — keeps the wording.
     /// Haiku for latency (this sits directly in front of a paste). Returns the
     /// cleaned text, or throws so the caller can paste the raw transcript.
-    func cleanUpDictation(_ raw: String) async throws -> String {
-        let body: [String: Any] = [
+    func cleanUpDictation(_ raw: String, vocabulary: String = "") async throws -> String {
+        var body: [String: Any] = [
             "model": ClaudeModel.haiku45.rawValue,
             "max_tokens": 4000,
             "messages": [[
@@ -206,6 +212,7 @@ final class ClaudeClient: @unchecked Sendable {
                 """
             ]]
         ]
+        if !vocabulary.isEmpty { body["system"] = vocabulary }
         let json = try await post(body, timeout: 15)
         try Self.checkRefusal(json)
         guard let text = Self.firstTextBlock(json), !text.isEmpty else {

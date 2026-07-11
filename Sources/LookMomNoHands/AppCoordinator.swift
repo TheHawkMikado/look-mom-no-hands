@@ -74,12 +74,23 @@ final class AppCoordinator: ObservableObject {
     private let listener = VoiceListener()
     private var claude: ClaudeClient?
     private let speaker = Speaker()
+    let vocabulary: VocabularyStore
 
     // Longer than the old 1.2s: a spoken request can be several action items, so
     // don't cut it off on a mid-sentence breath.
     private let commandSilence: TimeInterval = 2.2
-    private let dictationSilence: TimeInterval = 3.0
-    private let dictationMax: TimeInterval = 180
+    // Seconds of silence that ends a dictation. Editable + persisted: 3s suits
+    // quick paste-at-cursor; crank it up (to 60s) for long-pause / Otter-style
+    // capture, where you end explicitly with the chord or a stop phrase instead.
+    @Published var dictationSilence: TimeInterval = 3.0 {
+        didSet { UserDefaults.standard.set(dictationSilence, forKey: Self.silenceKey) }
+    }
+    private static let silenceKey = "dictationSilence"
+    // Hard-cap backstop on one dictation (the ~3s silence gate is the normal end).
+    // 1 hour. Not higher: with ElevenLabs on, the raw audio is buffered in memory
+    // for the whole note (~340MB/hr), so multi-hour continuous dictation needs
+    // streaming, not buffering — a separate change.
+    private let dictationMax: TimeInterval = 3600
     private let sessionIdleLimit: TimeInterval = 90   // quiet this long → standby
 
     // The misspellings are how the recognizer actually renders the phrases;
@@ -94,6 +105,10 @@ final class AppCoordinator: ObservableObject {
                                                  "mama done dictating", "stop dictating", "you stop dictating"]
 
     init() {
+        vocabulary = VocabularyStore(directory: store.directory)
+        if UserDefaults.standard.object(forKey: Self.silenceKey) != nil {
+            dictationSilence = UserDefaults.standard.double(forKey: Self.silenceKey)
+        }
         if let raw = UserDefaults.standard.string(forKey: Self.engineKey),
            let saved = SpeechEngine(rawValue: raw) {
             speechEngine = saved
@@ -105,7 +120,7 @@ final class AppCoordinator: ObservableObject {
         if UserDefaults.standard.object(forKey: Self.cleanupKey) != nil {
             cleanUpInsertedText = UserDefaults.standard.bool(forKey: Self.cleanupKey)
         }
-        listener.contextualPhrases = ["Hey Mama", "Adios Mama"]
+        refreshContextualPhrases()
         listener.onPartial = { [weak self] text in self?.handlePartial(text) }
         listener.onInfo = { [weak self] msg in self?.store.log("speech", msg) }
         // Push-to-dictate chord works whenever the app is running, even before
@@ -186,6 +201,13 @@ final class AppCoordinator: ObservableObject {
     }
 
     deinit { authPoll?.invalidate() }
+
+    /// Biases the recognizer toward the wake/stop words plus the user's vocabulary
+    /// (names, corrections, snippet triggers). Called on launch; call again after
+    /// vocabulary edits to pick them up on the next recognition request.
+    func refreshContextualPhrases() {
+        listener.contextualPhrases = ["Hey Mama", "Adios Mama"] + vocabulary.contextualStrings
+    }
 
     /// Explicit, user-initiated Accessibility prompt (opens System Settings once).
     /// Never called automatically — only from the panel button, so we don't nag.
@@ -513,7 +535,7 @@ final class AppCoordinator: ObservableObject {
                 try Task.checkCancellation()
                 self.lastCommand = text
                 self.store.log("asr", answeringClarification ? "answer: \(text)" : "command: \(text)")
-                let plan = try await claude.parsePlan(text, dialogue: priorDialogue)
+                let plan = try await claude.parsePlan(text, dialogue: priorDialogue, vocabulary: self.vocabulary.promptContext)
                 try Task.checkCancellation()
                 let ms = Int(Date().timeIntervalSince(startedAt) * 1000)
                 self.store.log("claude", "plan: \(plan.steps.count) step(s)\(plan.clarify != nil ? " + question" : "") conf=\(plan.confidence) (\(ms)ms)")
@@ -842,7 +864,7 @@ final class AppCoordinator: ObservableObject {
                     try await self.insertDictation(text, claude: self.claude, gen: gen)
                 case .report:
                     guard let claude = self.claude else { return }   // guaranteed by needsClaude
-                    let report = try await claude.buildDictationReport(text)
+                    let report = try await claude.buildDictationReport(text, vocabulary: self.vocabulary.promptContext)
                     try Task.checkCancellation()
                     self.lastReport = report
                     self.store.log("claude", "report ready — \(report.keyPoints.count) points, \(report.actionItems.count) action items")
@@ -876,7 +898,7 @@ final class AppCoordinator: ObservableObject {
         let final: String
         if cleanUpInsertedText, let claude {
             // Cleanup is a nicety — a failure just pastes the raw transcript.
-            final = (try? await claude.cleanUpDictation(raw)) ?? raw
+            final = (try? await claude.cleanUpDictation(raw, vocabulary: vocabulary.promptContext)) ?? raw
         } else {
             final = raw
         }

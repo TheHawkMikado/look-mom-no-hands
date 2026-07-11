@@ -4,16 +4,103 @@ import AppKit
 /// The full dashboard window: a searchable copy of every transcript and the
 /// complete activity log. Both are backed by files on disk (see AppStore).
 struct DashboardView: View {
-    @ObservedObject var store: AppStore
+    @ObservedObject var coordinator: AppCoordinator
 
     var body: some View {
         TabView {
-            TranscriptsTab(store: store)
+            TranscriptsTab(store: coordinator.store)
                 .tabItem { Label("Transcripts", systemImage: "text.book.closed") }
-            ActivityTab(store: store)
+            VocabularyTab(vocabulary: coordinator.vocabulary,
+                          onChange: { coordinator.refreshContextualPhrases() })
+                .tabItem { Label("Vocabulary", systemImage: "character.book.closed") }
+            ActivityTab(store: coordinator.store)
                 .tabItem { Label("Activity", systemImage: "list.bullet.rectangle") }
         }
         .frame(minWidth: 720, minHeight: 480)
+    }
+}
+
+/// Unified "dictionary + snippets": names/terms to spell right, corrections for
+/// consistent mishearings, and snippet expansions. The model applies all three.
+private struct VocabularyTab: View {
+    @ObservedObject var vocabulary: VocabularyStore
+    let onChange: () -> Void
+
+    @State private var kind: VocabEntry.Kind = .word
+    @State private var spoken = ""
+    @State private var written = ""
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Teach the app your words. It applies these to every transcription and command.")
+                .font(.caption).foregroundStyle(.secondary)
+
+            addRow
+
+            List {
+                section("Words & names", .word, "Recognized and spelled exactly")
+                section("Corrections", .correction, "A mishearing → what you meant")
+                section("Snippets", .snippet, "A spoken shortcut → its full text")
+            }
+        }
+        .padding()
+    }
+
+    private var addRow: some View {
+        HStack(spacing: 8) {
+            Picker("", selection: $kind) {
+                Text("Word").tag(VocabEntry.Kind.word)
+                Text("Correction").tag(VocabEntry.Kind.correction)
+                Text("Snippet").tag(VocabEntry.Kind.snippet)
+            }
+            .labelsHidden().frame(width: 120)
+
+            TextField(kind == .word ? "Term (e.g. Styku)" : kind == .correction ? "Heard as…" : "When I say…", text: $spoken)
+                .textFieldStyle(.roundedBorder)
+            if kind != .word {
+                Image(systemName: "arrow.right").foregroundStyle(.secondary)
+                TextField(kind == .correction ? "I mean…" : "Expand to…", text: $written)
+                    .textFieldStyle(.roundedBorder)
+            }
+            Button("Add") {
+                vocabulary.add(VocabEntry(kind: kind, spoken: spoken, written: written))
+                spoken = ""; written = ""
+                onChange()
+            }
+            .disabled(spoken.trimmingCharacters(in: .whitespaces).isEmpty
+                      || (kind != .word && written.trimmingCharacters(in: .whitespaces).isEmpty))
+        }
+    }
+
+    @ViewBuilder
+    private func section(_ title: String, _ k: VocabEntry.Kind, _ hint: String) -> some View {
+        let items = vocabulary.entries(of: k)
+        Section {
+            if items.isEmpty {
+                Text("None yet").font(.caption).foregroundStyle(.secondary)
+            }
+            ForEach(items) { entry in
+                HStack {
+                    if entry.written.isEmpty {
+                        Text(entry.spoken)
+                    } else {
+                        Text(entry.spoken).foregroundStyle(.secondary)
+                        Image(systemName: "arrow.right").font(.caption2).foregroundStyle(.secondary)
+                        Text(entry.written)
+                    }
+                    Spacer()
+                    Button {
+                        vocabulary.remove(entry.id); onChange()
+                    } label: { Image(systemName: "trash").foregroundStyle(.red) }
+                        .buttonStyle(.plain)
+                }
+            }
+        } header: {
+            VStack(alignment: .leading) {
+                Text(title).font(.headline)
+                Text(hint).font(.caption2).foregroundStyle(.secondary)
+            }
+        }
     }
 }
 

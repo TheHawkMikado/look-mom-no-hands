@@ -131,6 +131,35 @@ enum DictationOutput: Sendable {
     case insert
 }
 
+/// One entry in the user's vocabulary — the unified store behind "dictionary"
+/// (recognize/spell terms), "corrections" (fix consistent mishearings), and
+/// "snippets" (expand a spoken trigger). All three are the same shape (a spoken
+/// form → a written form) and are applied by the model, not brittle text
+/// replacement, so they compose with the rest of the sentence.
+struct VocabEntry: Codable, Identifiable, Sendable {
+    enum Kind: String, Codable, Sendable, CaseIterable {
+        case word         // a name/term to spell right and bias recognition ("Styku")
+        case correction   // a consistent mishearing to fix ("stycu" → "Styku")
+        case snippet      // a spoken shortcut to expand ("my email" → "me@x.com")
+    }
+    let id: String
+    var kind: Kind
+    var spoken: String    // word text / misheard phrase / trigger phrase
+    var written: String   // "" for a plain word; the correct/expanded text otherwise
+    let date: Date
+
+    init(kind: Kind, spoken: String, written: String = "") {
+        self.id = UUID().uuidString
+        self.kind = kind
+        self.spoken = spoken.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.written = written.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.date = Date()
+    }
+
+    /// The display term (what the recognizer should be biased toward).
+    var biasTerm: String { written.isEmpty ? spoken : written }
+}
+
 /// Which speech-to-text engine transcribes captured utterances. Apple on-device
 /// always runs the always-on wake-word + silence gating regardless — this only
 /// controls the higher-quality re-transcription of the actual command/dictation.

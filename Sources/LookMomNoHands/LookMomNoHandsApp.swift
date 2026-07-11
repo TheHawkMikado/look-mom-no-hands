@@ -16,7 +16,7 @@ struct LookMomNoHandsApp: App {
         .menuBarExtraStyle(.window)
 
         Window("\(AppIdentity.displayName) — Dashboard", id: "dashboard") {
-            DashboardView(store: coordinator.store)
+            DashboardView(coordinator: coordinator)
         }
     }
 }
@@ -136,6 +136,21 @@ struct PanelView: View {
                 Text("Clean up dictated text before pasting").font(.caption2).foregroundStyle(.secondary)
             }
             .toggleStyle(.checkbox)
+            HStack(spacing: 6) {
+                Text("End after pause").font(.caption2).foregroundStyle(.secondary)
+                Spacer()
+                Picker("", selection: Binding(
+                    get: { coordinator.dictationSilence },
+                    set: { coordinator.dictationSilence = $0 }
+                )) {
+                    Text("3s").tag(TimeInterval(3))
+                    Text("5s").tag(TimeInterval(5))
+                    Text("10s").tag(TimeInterval(10))
+                    Text("30s").tag(TimeInterval(30))
+                    Text("60s").tag(TimeInterval(60))
+                }
+                .labelsHidden().frame(width: 90)
+            }
             Text(coordinator.dictationChord == .off
                  ? "Chord off — say “Mama dictate this” to start, “Mama stop dictating” to paste."
                  : "Press the chord (or say “Mama dictate this”) to start; press again or say “Mama stop dictating” to paste at your cursor.")
