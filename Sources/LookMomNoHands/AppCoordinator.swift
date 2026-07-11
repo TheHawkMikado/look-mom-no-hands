@@ -72,7 +72,14 @@ final class AppCoordinator: ObservableObject {
             guard !(self.micAuthorized && self.speechAuthorized) else { return }
             self.requestPermissions { _ in }
         }
-        startAuthPollingIfNeeded()
+        // Returning from System Settings reactivates the app — a free, event-
+        // driven way to notice a just-granted permission with no timer at all.
+        NotificationCenter.default.addObserver(
+            forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in self?.refreshAuthFlags() }
+        }
+        armAuthPoll()   // also catch a grant that lands while the panel sits open
     }
 
     private func refreshAuthFlags() {
@@ -81,15 +88,22 @@ final class AppCoordinator: ObservableObject {
         accessibilityTrusted = ScreenController.isTrusted
     }
 
-    // TCC grants take effect live (no relaunch), but AXIsProcessTrusted() etc. are
-    // only read when we poll — so a permission granted in System Settings while
-    // the app is already running would otherwise never update the panel. Poll at a
-    // low rate until everything is granted, then stop (no always-on timer).
-    private var authPoll: Timer?
+    private var allPermissionsGranted: Bool {
+        micAuthorized && speechAuthorized && accessibilityTrusted
+    }
 
-    private func startAuthPollingIfNeeded() {
+    // TCC grants take effect live (no relaunch), but the status APIs are only read
+    // when we poll. `didBecomeActive` covers returning from Settings; this bounded
+    // poll covers granting while the panel stays open. It is deliberately NOT
+    // open-ended — a user who declines a permission must not leave a timer waking
+    // the run loop forever — so it stops after the window elapses OR all granted.
+    private var authPoll: Timer?
+    private var authPollDeadline = Date()
+
+    private func armAuthPoll() {
+        guard !allPermissionsGranted else { return }
+        authPollDeadline = Date().addingTimeInterval(120)   // re-arming extends the window
         guard authPoll == nil else { return }
-        guard !(micAuthorized && speechAuthorized && accessibilityTrusted) else { return }
         authPoll = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in self?.pollAuth() }
         }
@@ -97,9 +111,9 @@ final class AppCoordinator: ObservableObject {
 
     private func pollAuth() {
         refreshAuthFlags()
-        if micAuthorized && speechAuthorized && accessibilityTrusted {
+        if allPermissionsGranted { store.log("perm", "all permissions granted") }
+        if allPermissionsGranted || Date() > authPollDeadline {
             authPoll?.invalidate(); authPoll = nil
-            store.log("perm", "all permissions granted")
         }
     }
 
@@ -107,9 +121,9 @@ final class AppCoordinator: ObservableObject {
     /// Never called automatically — only from the panel button, so we don't nag.
     func requestAccessibility() {
         ScreenController.requestTrust()
-        // The user is about to grant it — resume polling so the panel flips as
-        // soon as they do, without a relaunch.
-        startAuthPollingIfNeeded()
+        // The user is about to grant it — (re-)arm the bounded poll so the panel
+        // flips as soon as they do, without a relaunch.
+        armAuthPoll()
     }
 
     // MARK: API key
