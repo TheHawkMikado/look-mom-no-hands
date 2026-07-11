@@ -13,6 +13,7 @@ enum ScreenController {
         case elementNotFound(String)
         case noFrontApp
         case missingDirection
+        case appLaunchFailed(String)
 
         var description: String {
             switch self {
@@ -20,6 +21,7 @@ enum ScreenController {
             case .elementNotFound(let t): return "couldn't find “\(t)” on screen"
             case .noFrontApp: return "no frontmost application"
             case .missingDirection: return "scroll command arrived without a direction"
+            case .appLaunchFailed(let n): return "couldn't open “\(n)”"
             }
         }
     }
@@ -116,7 +118,13 @@ enum ScreenController {
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: "/usr/bin/open")
         proc.arguments = ["-a", name]
+        proc.standardError = Pipe()   // keep `open`'s complaint off our stderr
         try proc.run()
+        // run() only proves `open` spawned — an unresolvable app name exits
+        // nonzero afterward. Blocking is fine: this runs off the main actor,
+        // and `open` returns in tens of milliseconds.
+        proc.waitUntilExit()
+        guard proc.terminationStatus == 0 else { throw ControlError.appLaunchFailed(name) }
     }
 
     // MARK: - Accessibility tree search

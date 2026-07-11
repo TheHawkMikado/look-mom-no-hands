@@ -125,6 +125,16 @@ final class ActionDecodingTests: XCTestCase {
         }
     }
 
+    func testUnresolvableAppNameThrows() {
+        // `open -a` exits nonzero for an unknown app with no side effects, so
+        // this exercises the real failure path safely.
+        XCTAssertThrowsError(try ScreenController.openApp(named: "Definitely Not An App 8f3a2c")) { error in
+            guard case ScreenController.ControlError.appLaunchFailed = error else {
+                return XCTFail("expected appLaunchFailed, got \(error)")
+            }
+        }
+    }
+
     func testDecodeBlockUnpacksTextPayload() throws {
         let json: [String: Any] = ["content": [
             ["type": "text", "text": #"{"summary":"s","action_items":["a"],"transcript":"t"}"#]
