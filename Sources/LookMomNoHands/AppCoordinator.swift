@@ -339,8 +339,10 @@ final class AppCoordinator: ObservableObject {
     /// exactly as if they'd spoken it.
     func answerClarification(_ option: String) {
         guard isRunning, mode == .command, !processing else { return }
-        utterance = option
-        finalizeCommand()
+        // A clicked answer is authoritative — discard any buffered mic audio so
+        // scribeAll can't re-transcribe ambient noise over the user's choice.
+        listener.captureAudio = false
+        finalizeCommand(typedAnswer: option)
     }
 
     func dismissClarification() {
@@ -390,11 +392,13 @@ final class AppCoordinator: ObservableObject {
 
     // MARK: Commands
 
-    private func finalizeCommand() {
-        let appleText = Self.strippingPhrases(Self.wakePhrases + Self.stopPhrases, from: utterance)
+    private func finalizeCommand(typedAnswer: String? = nil) {
+        // A typed/clicked answer is authoritative and skips re-transcription.
+        let appleText = typedAnswer ?? Self.strippingPhrases(Self.wakePhrases + Self.stopPhrases, from: utterance)
         // For the scribeAll option, re-transcribe the command audio too (adds a
-        // round-trip before parsing — the documented latency tradeoff).
-        let wav = scribeForCommand ? listener.takeCapturedWAV() : nil
+        // round-trip before parsing — the documented latency tradeoff). Never for
+        // a clicked answer.
+        let wav = (typedAnswer == nil && scribeForCommand) ? listener.takeCapturedWAV() : nil
         listener.captureAudio = false
         freshUtterance()
         sessionIdleSince = Date()
