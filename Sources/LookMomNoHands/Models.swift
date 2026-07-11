@@ -61,6 +61,7 @@ struct ActionPlan: Decodable, Sendable {
     let say: String                     // spoken reply ("" = say nothing)
     let steps: [ScreenAction]
     let clarify: Clarification?         // set ⇒ steps is empty; ask before acting
+    let learn: LearnedFact?             // a durable mapping the user just taught/corrected
     let confidence: Double
     /// A step failed to decode (e.g. unknown kind). Steps are ordered and can
     /// depend on each other, so the coordinator must refuse to run a plan with a
@@ -70,6 +71,7 @@ struct ActionPlan: Decodable, Sendable {
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         say = (try? c.decodeIfPresent(String.self, forKey: .say)) ?? ""
+        learn = try? c.decodeIfPresent(LearnedFact.self, forKey: .learn)
         // Decode element-by-element so one bad step doesn't blank the whole array
         // (which would read as an empty, silently-successful plan) — but record
         // that anything was dropped so execution can fail closed. A `steps` field
@@ -91,12 +93,32 @@ struct ActionPlan: Decodable, Sendable {
         confidence = (try? c.decodeIfPresent(Double.self, forKey: .confidence)) ?? 0
     }
 
-    private enum CodingKeys: String, CodingKey { case say, steps, clarify, confidence }
+    private enum CodingKeys: String, CodingKey { case say, steps, clarify, learn, confidence }
 
     /// Never throws out of an array decode — a bad element becomes nil.
     private struct FailableStep: Decodable {
         let value: ScreenAction?
         init(from decoder: Decoder) throws { value = try? ScreenAction(from: decoder) }
+    }
+}
+
+/// A durable mapping the user taught the assistant ("when I say Chrome I mean
+/// Google Chrome"), captured into their vocabulary so it applies from then on.
+struct LearnedFact: Decodable, Sendable {
+    let spoken: String
+    let written: String
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        spoken = (try? c.decodeIfPresent(String.self, forKey: .spoken)) ?? ""
+        written = (try? c.decodeIfPresent(String.self, forKey: .written)) ?? ""
+    }
+    private enum CodingKeys: String, CodingKey { case spoken, written }
+
+    var isValid: Bool {
+        !spoken.trimmingCharacters(in: .whitespaces).isEmpty
+        && !written.trimmingCharacters(in: .whitespaces).isEmpty
+        && spoken.lowercased() != written.lowercased()
     }
 }
 

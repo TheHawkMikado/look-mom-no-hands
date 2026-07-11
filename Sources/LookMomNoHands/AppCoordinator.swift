@@ -612,6 +612,14 @@ final class AppCoordinator: ObservableObject {
             return
         }
 
+        // The user taught/corrected a durable mapping — remember it, and keep going
+        // to carry out the request in the same plan.
+        if let fact = plan.learn, fact.isValid {
+            vocabulary.learnCorrection(spoken: fact.spoken, written: fact.written)
+            refreshContextualPhrases()
+            store.log("learn", "\(fact.spoken) → \(fact.written)")
+        }
+
         dialogue = []   // request resolved; next utterance starts fresh
         await speak(plan.say, gen: gen)
         guard gen == runGeneration, !Task.isCancelled else { return }

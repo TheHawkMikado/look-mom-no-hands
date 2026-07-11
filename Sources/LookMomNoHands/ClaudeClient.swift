@@ -102,6 +102,11 @@ final class ClaudeClient: @unchecked Sendable {
 
             say: one short spoken sentence confirming what you're doing or reporting; \
             empty for a single obvious action.
+
+            learn: when the user teaches or corrects a durable mapping (e.g. answers a \
+            clarification with what a term means, or says "when I say X I mean Y"), set \
+            learn.spoken and learn.written so it's remembered — AND still carry out the \
+            request in the same plan.
             """,
             // No `strict: true` — forced tool_choice already guarantees the call,
             // and strict adds a server-side schema-compilation latency spike on
@@ -120,6 +125,16 @@ final class ClaudeClient: @unchecked Sendable {
                             "options": ["type": "array", "items": ["type": "string"]]
                         ],
                         "required": ["question", "options"]
+                    ],
+                    "learn": [
+                        "type": "object",
+                        "additionalProperties": false,
+                        "description": "Set ONLY when the user teaches or corrects a durable mapping — \"when I say X I mean Y\", or after a clarification where they told you what a term means (e.g. \"chrome\" → \"Google Chrome\"). Omit otherwise.",
+                        "properties": [
+                            "spoken": ["type": "string", "description": "what the user says"],
+                            "written": ["type": "string", "description": "what they mean / how to write it"]
+                        ],
+                        "required": ["spoken", "written"]
                     ],
                     "confidence": ["type": "number"]
                 ],

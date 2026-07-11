@@ -178,6 +178,30 @@ final class PlanDecodingTests: XCTestCase {
         XCTAssertEqual(plan.steps[1].keys, "cmd+t")
     }
 
+    func testLearnedFactDecodesAndValidates() throws {
+        let json = #"""
+        {"say":"Opening Google Chrome, and I'll remember that.","confidence":0.9,
+         "learn":{"spoken":"chrome","written":"Google Chrome"},
+         "steps":[{"kind":"open_app","target":"Google Chrome","text":"","url":"","keys":"","direction":"down"}]}
+        """#
+        let plan = try JSONDecoder().decode(ActionPlan.self, from: Data(json.utf8))
+        XCTAssertEqual(plan.learn?.spoken, "chrome")
+        XCTAssertEqual(plan.learn?.written, "Google Chrome")
+        XCTAssertTrue(plan.learn?.isValid ?? false)
+        XCTAssertEqual(plan.steps.count, 1)
+    }
+
+    func testPlanWithoutLearnHasNilLearn() throws {
+        let plan = try JSONDecoder().decode(ActionPlan.self, from: Data(#"{"say":"","steps":[],"confidence":1}"#.utf8))
+        XCTAssertNil(plan.learn)
+    }
+
+    func testLearnedFactNoOpIsInvalid() throws {
+        let json = #"{"say":"","confidence":1,"steps":[],"learn":{"spoken":"same","written":"Same"}}"#
+        let plan = try JSONDecoder().decode(ActionPlan.self, from: Data(json.utf8))
+        XCTAssertFalse(plan.learn?.isValid ?? true)   // same word (case-insensitive) → not learned
+    }
+
     func testClarificationPlanDecodes() throws {
         let json = #"""
         {"say":"","confidence":0.4,"steps":[],
