@@ -4,9 +4,8 @@
 # Native arch only (fast). Use package_release.sh for the universal, notarizable DMG.
 set -euo pipefail
 cd "$(dirname "$0")/.."
+source Scripts/common.sh
 
-NAME="LookMomNoHands"
-DISPLAY="Look Ma, No Hands"
 APP="build/${NAME}.app"
 DEST="/Applications/${DISPLAY}.app"
 
@@ -16,7 +15,7 @@ DEST="/Applications/${DISPLAY}.app"
 if security find-identity -v -p codesigning 2>/dev/null | grep -q "Developer ID Application"; then
     IDENTITY="$(security find-identity -v -p codesigning | grep -o '"Developer ID Application[^"]*"' | head -1 | tr -d '"')"
 else
-    IDENTITY="Look Ma Dev"
+    IDENTITY="${DEV_IDENTITY}"
 fi
 
 echo "▸ swift build -c release"
@@ -26,29 +25,22 @@ BIN=".build/release/${NAME}"
 [ -f "${BIN}" ] || { echo "build product missing"; exit 1; }
 
 echo "▸ assembling ${APP}"
-rm -rf "${APP}"
-mkdir -p "${APP}/Contents/MacOS"
-cp "${BIN}" "${APP}/Contents/MacOS/${NAME}"
-cp App/Info.plist "${APP}/Contents/Info.plist"
+assemble_app "${BIN}" "${APP}"
 
-# Assemble/sign in /tmp — iCloud re-attaches xattrs inside ~/Documents that
-# Developer ID signing rejects (same workaround as package_release.sh).
+# Sign in /tmp — iCloud re-attaches xattrs inside ~/Documents faster than we can
+# strip them (same workaround as package_release.sh).
 WORK="$(mktemp -d /tmp/lmnh-dev.XXXXXX)"
 trap 'rm -rf "${WORK}"' EXIT
 SIGNAPP="${WORK}/${DISPLAY}.app"
 cp -R "${APP}" "${SIGNAPP}"
-xattr -cr "${SIGNAPP}" 2>/dev/null || true
 
 if security find-certificate -c "${IDENTITY%% (*}" >/dev/null 2>&1 || security find-identity -v -p codesigning 2>/dev/null | grep -qF "${IDENTITY}"; then
     echo "▸ signing with stable identity '${IDENTITY}' (permissions will persist)"
-    codesign --force --options runtime \
-        --entitlements App/LookMomNoHands.entitlements \
-        --sign "${IDENTITY}" "${SIGNAPP}"
+    sign_app "${SIGNAPP}" "${IDENTITY}"
 else
     echo "▸ '${IDENTITY}' not found — run Scripts/dev_signing_setup.sh first to stop"
     echo "  permissions resetting. Falling back to ad-hoc for now."
-    codesign --force --options runtime \
-        --entitlements App/LookMomNoHands.entitlements --sign - "${SIGNAPP}"
+    sign_app "${SIGNAPP}" "-"
 fi
 
 echo "▸ installing to ${DEST}"

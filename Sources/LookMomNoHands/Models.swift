@@ -2,6 +2,18 @@ import Foundation
 
 // Shared value types across the app. Kept free of framework imports so any module can use them.
 
+/// Single home for the app's identity strings. The public face says "Ma" while
+/// the binary/bundle says "Mom"; that split already shipped (storage folder,
+/// keychain service, manual keychain items), so these values are frozen —
+/// changing any of them strands existing users' data or TCC grants.
+enum AppIdentity {
+    static let displayName = "Look Ma, No Hands"
+    static let storageFolder = "LookMaNoHands"              // under ~/Library/Application Support/
+    static let keychainService = "com.lookmomnohands.anthropic"
+    static let manualKeychainNames = ["Look Ma No Hands", "Look Mom No Hands"]
+    static let storeQueueLabel = "com.lookmomnohands.store.io"
+}
+
 /// One screen action decoded from the model's forced `emit_action` tool call.
 /// `kind` doubles as the intent router: control kinds drive ScreenController,
 /// `dictateStart` flips the coordinator into note-taking mode.
@@ -16,15 +28,13 @@ struct ScreenAction: Decodable, Sendable {
     }
 
     let kind: Kind
-    let target: String      // element description or app name ("" when unused)
-    let text: String        // text to type ("" when unused)
+    let target: String                  // element description or app name ("" when unused)
+    let text: String                    // text to type ("" when unused)
+    let direction: ScrollDirection?     // scroll only; the tool schema requests it for scroll
     let confidence: Double
-
-    // The API returns snake_case-free enum strings; map "dictate_start" etc.
-    private enum CodingKeys: String, CodingKey { case kind, target, text, confidence }
 }
 
-enum ScrollDirection: String, Sendable {
+enum ScrollDirection: String, Decodable, Sendable {
     case up, down, left, right
 }
 

@@ -3,11 +3,9 @@ import SwiftUI
 import Speech
 import AVFoundation
 
-/// The brain: interprets the single always-on speech stream according to mode,
-/// routes commands through Claude, executes screen actions, and records
-/// everything to the store.
-///
-/// Modes over one continuous pipeline (the mic is never released while on):
+/// The brain: interprets the single always-on speech stream according to mode
+/// (the mic is never released while on), routes commands through Claude,
+/// executes screen actions, and records everything to the store. Modes:
 ///   • STANDBY  — watching the stream for "Hey Mama". Nothing else happens.
 ///   • COMMAND  — active session: each pause-delimited utterance is parsed and
 ///     executed, then it keeps listening. "Adios Mama" returns to standby.
@@ -18,10 +16,13 @@ final class AppCoordinator: ObservableObject {
     @Published var lastCommand: String = ""
     @Published var lastReport: DictationReport?
     @Published var isRunning = false          // app-level on/off (Start/Stop button)
-    @Published var isActive = false           // wake session open
     @Published var micAuthorized = false
     @Published var speechAuthorized = false
     @Published var accessibilityTrusted = false
+
+    /// Wake session open. Derived from `mode` so it can never desync; every mode
+    /// change is accompanied by a `phase` write, which publishes the update.
+    var isActive: Bool { mode != .standby }
 
     let store = AppStore()
 
@@ -33,6 +34,8 @@ final class AppCoordinator: ObservableObject {
     private var sessionIdleSince = Date()
     private var dictationStartAt = Date()
     private var ticker: Timer?
+    private var actionTask: Task<Void, Never>?   // in-flight parse/act; cancelled by stop()
+    private var runGeneration = 0                // stale task completions must not touch newer state
 
     private let listener = VoiceListener()
     private var claude: ClaudeClient?
@@ -42,10 +45,13 @@ final class AppCoordinator: ObservableObject {
     private let dictationMax: TimeInterval = 180
     private let sessionIdleLimit: TimeInterval = 90   // quiet this long → standby
 
-    private let wakePhrases = ["hey mama", "hey mamma", "hey momma", "hey ma ma"]
-    private let stopPhrases = ["adios mama", "adios mamma", "adios momma", "adios ma ma", "adiós mama"]
+    // The misspellings are how the recognizer actually renders the phrases;
+    // contextualStrings biasing (set in init) reduces but doesn't eliminate them.
+    nonisolated static let wakePhrases = ["hey mama", "hey mamma", "hey momma", "hey ma ma"]
+    nonisolated static let stopPhrases = ["adios mama", "adios mamma", "adios momma", "adios ma ma", "adiós mama"]
 
     init() {
+        listener.contextualPhrases = ["Hey Mama", "Adios Mama"]
         listener.onPartial = { [weak self] text in self?.handlePartial(text) }
         listener.onInfo = { [weak self] msg in self?.store.log("speech", msg) }
         store.log("app", "launched")
@@ -112,32 +118,46 @@ final class AppCoordinator: ObservableObject {
                 self.store.log("perm", "denied — cannot start")
                 return
             }
+            do {
+                try self.listener.start()
+            } catch {
+                // Don't claim to be listening over a dead pipeline.
+                self.phase = .error("\(error)")
+                self.store.log("error", "listener failed to start: \(error)")
+                return
+            }
+            self.runGeneration += 1
             self.isRunning = true
             self.mode = .standby
-            self.isActive = false
             self.phase = .listeningWake
             self.utterance = ""
-            self.listener.start()
-            self.startTicker()
             self.store.log("app", "listening enabled (standby)")
         }
     }
 
     func stop() {
+        runGeneration += 1
+        actionTask?.cancel(); actionTask = nil
+        processing = false
         isRunning = false
-        isActive = false
         mode = .standby
-        ticker?.invalidate(); ticker = nil
+        stopTicker()
         listener.stop()
         phase = .idle
         store.log("app", "listening disabled")
     }
 
+    // The ticker only exists inside a session — silence gates are meaningless in
+    // standby, and an always-on 4 Hz timer would wake the main thread all day.
     private func startTicker() {
         ticker?.invalidate()
         ticker = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in self?.tick() }
         }
+    }
+
+    private func stopTicker() {
+        ticker?.invalidate(); ticker = nil
     }
 
     // MARK: Stream interpretation
@@ -148,18 +168,28 @@ final class AppCoordinator: ObservableObject {
         lastHeardAt = Date()
         guard !processing else { return }
 
-        let lowered = text.lowercased()
+        // Phrases only ever arrive at the tail of new speech; scanning the whole
+        // growing utterance every partial is O(n²) over a long session. Normalizing
+        // strips the recognizer's unpredictable punctuation ("Hey, Mama.").
+        let tail = Self.normalizedForMatching(String(text.suffix(64)))
         switch mode {
         case .standby:
-            if wakePhrases.contains(where: lowered.contains) { beginSession() }
+            if Self.wakePhrases.contains(where: tail.contains) { beginSession() }
         case .command:
-            if stopPhrases.contains(where: lowered.contains) { endSession(reason: "\"Adios Mama\"") }
+            if Self.stopPhrases.contains(where: tail.contains) { endSession(reason: "\"Adios Mama\"") }
         case .dictation:
             break // a long pause ends the note; "adios" could be part of it
         }
     }
 
-    /// Runs 4×/second; applies silence gates without ever touching the mic.
+    /// Lowercase, reduced to space-separated alphanumeric runs.
+    nonisolated static func normalizedForMatching(_ text: String) -> String {
+        let mapped = String(text.lowercased().map { $0.isLetter || $0.isNumber ? $0 : " " })
+        return mapped.split(separator: " ").joined(separator: " ")
+    }
+
+    /// Runs 4×/second while a session is open; applies silence gates without ever
+    /// touching the mic.
     private func tick() {
         guard isRunning, !processing else { return }
         let quiet = Date().timeIntervalSince(lastHeardAt)
@@ -187,18 +217,18 @@ final class AppCoordinator: ObservableObject {
     private func beginSession() {
         store.log("wake", "\"Hey Mama\" — session active")
         mode = .command
-        isActive = true
         phase = .capturingCommand
         freshUtterance()
         sessionIdleSince = Date()
+        startTicker()
     }
 
     private func endSession(reason: String) {
         store.log("wake", "session ended (\(reason)) — back to standby")
         mode = .standby
-        isActive = false
         phase = .listeningWake
         freshUtterance()
+        stopTicker()
     }
 
     private func freshUtterance() {
@@ -206,10 +236,24 @@ final class AppCoordinator: ObservableObject {
         listener.resetUtterance()
     }
 
+    /// Post-flight cleanup shared by the command and dictation tasks. A task that
+    /// outlived its run (Stop was pressed, maybe Start again) must not touch newer
+    /// state; an error phase set in the catch stays visible instead of being
+    /// clobbered back to "listening".
+    private func finishProcessing(_ gen: Int) {
+        guard gen == runGeneration else { return }
+        processing = false
+        guard isRunning, mode == .command else { return }
+        if case .error = phase {} else { phase = .capturingCommand }
+        // Discard anything heard while we were acting (e.g. our own typing sounds).
+        freshUtterance()
+        sessionIdleSince = Date()
+    }
+
     // MARK: Commands
 
     private func finalizeCommand() {
-        let text = Self.strippingPhrases(wakePhrases + stopPhrases, from: utterance)
+        let text = Self.strippingPhrases(Self.wakePhrases + Self.stopPhrases, from: utterance)
         freshUtterance()
         sessionIdleSince = Date()
         guard !text.isEmpty else { return }
@@ -220,21 +264,15 @@ final class AppCoordinator: ObservableObject {
         processing = true
         phase = .thinking
         let startedAt = Date()
+        let gen = runGeneration
 
-        Task {
-            defer {
-                self.processing = false
-                if self.isRunning, self.mode == .command {
-                    self.phase = .capturingCommand
-                    // Discard anything heard while we were acting (e.g. our own typing sounds).
-                    self.freshUtterance()
-                    self.sessionIdleSince = Date()
-                }
-            }
+        actionTask = Task {
+            defer { self.finishProcessing(gen) }
             do {
                 let action = try await claude.parseCommand(text)
+                try Task.checkCancellation()
                 let ms = Int(Date().timeIntervalSince(startedAt) * 1000)
-                store.log("claude", "action=\(action.kind.rawValue) target=\"\(action.target)\" conf=\(action.confidence) (\(ms)ms)")
+                self.store.log("claude", "action=\(action.kind.rawValue) target=\"\(action.target)\" conf=\(action.confidence) (\(ms)ms)")
                 switch action.kind {
                 case .dictateStart:
                     self.beginDictation()
@@ -242,12 +280,24 @@ final class AppCoordinator: ObservableObject {
                     self.store.log("action", "nothing actionable — still listening")
                 default:
                     self.phase = .acting
-                    try ScreenController.perform(action)
+                    // The AX tree walk + CGEvent posting is synchronous and can be
+                    // slow on a complex UI — run it off the main actor so it never
+                    // stalls the event loop. AX/CGEvent APIs are thread-safe.
+                    try await Task.detached(priority: .userInitiated) {
+                        try ScreenController.perform(action)
+                    }.value
+                    try Task.checkCancellation()
                     let outcome = "\(action.kind.rawValue) \(action.target)".trimmingCharacters(in: .whitespaces)
                     self.store.log("action", "performed: \(outcome)")
                     self.store.addTranscript(TranscriptRecord(kind: "command", transcript: text, outcome: outcome))
                 }
             } catch {
+                // Cancellation isn't a failure: Stop was pressed while the call was
+                // in flight, and acting now would defy the user's explicit off.
+                guard !Task.isCancelled, gen == self.runGeneration else {
+                    self.store.log("action", "abandoned — stopped mid-command")
+                    return
+                }
                 self.phase = .error("\(error)")
                 self.store.log("error", "\(error)")
                 self.store.addTranscript(TranscriptRecord(kind: "command", transcript: text, outcome: "error: \(error)"))
@@ -255,10 +305,12 @@ final class AppCoordinator: ObservableObject {
         }
     }
 
-    private static func strippingPhrases(_ phrases: [String], from text: String) -> String {
+    nonisolated static func strippingPhrases(_ phrases: [String], from text: String) -> String {
         var out = text.trimmingCharacters(in: .whitespacesAndNewlines)
         for phrase in phrases {
-            while let range = out.lowercased().range(of: phrase) {
+            // .caseInsensitive matches on `out` directly, so the returned range's
+            // indices are valid on `out` (unlike range(of:) on a lowercased copy).
+            while let range = out.range(of: phrase, options: .caseInsensitive) {
                 out.removeSubrange(range)
             }
         }
@@ -273,9 +325,11 @@ final class AppCoordinator: ObservableObject {
         dictationStartAt = Date()
         phase = .dictating
         freshUtterance()
+        listener.carryForward = true   // a note may cross a recognition-request cycle
     }
 
     private func finalizeDictation() {
+        listener.carryForward = false
         let text = utterance.trimmingCharacters(in: .whitespacesAndNewlines)
         freshUtterance()
         mode = .command
@@ -288,17 +342,13 @@ final class AppCoordinator: ObservableObject {
         store.log("dictation", "captured \(text.count) chars — summarizing")
         processing = true
         phase = .thinking
-        Task {
-            defer {
-                self.processing = false
-                if self.isRunning, self.mode == .command {
-                    self.phase = .capturingCommand
-                    self.freshUtterance()
-                    self.sessionIdleSince = Date()
-                }
-            }
+        let gen = runGeneration
+
+        actionTask = Task {
+            defer { self.finishProcessing(gen) }
             do {
                 let report = try await claude.buildDictationReport(text)
+                try Task.checkCancellation()
                 self.lastReport = report
                 self.store.log("claude", "report ready — \(report.actionItems.count) action items")
                 self.store.addTranscript(TranscriptRecord(
@@ -308,6 +358,14 @@ final class AppCoordinator: ObservableObject {
                     actionItems: report.actionItems
                 ))
             } catch {
+                // Whatever went wrong, never lose the note — the raw text is already
+                // gone from the live buffer, so this record is its only copy.
+                let outcome = Task.isCancelled ? "cancelled" : "error: \(error)"
+                self.store.addTranscript(TranscriptRecord(kind: "dictation", transcript: text, outcome: outcome))
+                guard !Task.isCancelled, gen == self.runGeneration else {
+                    self.store.log("dictation", "stopped mid-summarize — raw note saved")
+                    return
+                }
                 self.phase = .error("\(error)")
                 self.store.log("error", "\(error)")
             }
@@ -334,6 +392,8 @@ final class AppCoordinator: ObservableObject {
         store.log("perm", "accessibility trusted: \(ScreenController.isTrusted)")
     }
 
+    // These two switches look mergeable but aren't: the enums assign different raw
+    // values to denied/restricted, so a shared raw-value table would mislabel.
     private static func speechName(_ s: SFSpeechRecognizerAuthorizationStatus) -> String {
         switch s {
         case .notDetermined: return "notDetermined"

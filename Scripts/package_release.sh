@@ -18,11 +18,10 @@
 #   NOTARY_PROFILE   name of a stored notarytool keychain profile     — enables notarization
 set -euo pipefail
 cd "$(dirname "$0")/.."
+source Scripts/common.sh
 
-NAME="LookMomNoHands"                 # internal target/binary name (bundle id stays stable)
-DISPLAY="Look Ma, No Hands"
 VERSION="$(/usr/libexec/PlistBuddy -c 'Print CFBundleShortVersionString' App/Info.plist)"
-DMG_NAME="LookMaNoHands-${VERSION}.dmg"
+DMG_NAME="${DMG_BASENAME}-${VERSION}.dmg"
 
 echo "▸ building arm64"
 swift build -c release --arch arm64 >/dev/null
@@ -39,22 +38,18 @@ APP="${WORK}/${DISPLAY}.app"
 DMG="${WORK}/${DMG_NAME}"
 
 echo "▸ assembling universal app in ${WORK} (outside iCloud)"
-mkdir -p "${APP}/Contents/MacOS"
-lipo -create "${ARM}" "${X86}" -output "${APP}/Contents/MacOS/${NAME}"
-cp App/Info.plist "${APP}/Contents/Info.plist"
-xattr -cr "${APP}" 2>/dev/null || true
+UNIBIN="${WORK}/${NAME}"
+lipo -create "${ARM}" "${X86}" -output "${UNIBIN}"
+assemble_app "${UNIBIN}" "${APP}"
 echo "  archs: $(lipo -archs "${APP}/Contents/MacOS/${NAME}")"
 
 if [ -n "${SIGN_ID:-}" ]; then
     echo "▸ signing with Developer ID: ${SIGN_ID}"
-    codesign --force --timestamp --options runtime \
-        --entitlements App/LookMomNoHands.entitlements \
-        --sign "${SIGN_ID}" "${APP}"
+    sign_app "${APP}" "${SIGN_ID}" --timestamp
     codesign --verify --strict --verbose=2 "${APP}"
 else
     echo "▸ no SIGN_ID set — ad-hoc signing (recipients will see a Gatekeeper warning)"
-    codesign --force --options runtime \
-        --entitlements App/LookMomNoHands.entitlements --sign - "${APP}"
+    sign_app "${APP}" "-"
 fi
 
 echo "▸ building ${DMG_NAME}"

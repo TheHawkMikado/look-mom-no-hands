@@ -22,13 +22,12 @@ through the **Anthropic Messages API** (Claude).
 |---|---|
 | [LookMomNoHandsApp.swift](Sources/LookMomNoHands/LookMomNoHandsApp.swift) | `@main` menu-bar app + panel UI |
 | [AppCoordinator.swift](Sources/LookMomNoHands/AppCoordinator.swift) | Orchestrates wake → transcribe → Claude → act |
-| [WakeWordListener.swift](Sources/LookMomNoHands/WakeWordListener.swift) | On-device wake-word spotting |
-| [SpeechTranscriber.swift](Sources/LookMomNoHands/SpeechTranscriber.swift) | On-device, silence-gated transcription |
+| [VoiceListener.swift](Sources/LookMomNoHands/VoiceListener.swift) | Single always-on speech pipeline (wake word + transcription) |
 | [ClaudeClient.swift](Sources/LookMomNoHands/ClaudeClient.swift) | Messages API: forced-tool routing + json_schema report |
 | [ScreenController.swift](Sources/LookMomNoHands/ScreenController.swift) | Accessibility tree search + CGEvent click/type/scroll |
-| [ScreenCapture.swift](Sources/LookMomNoHands/ScreenCapture.swift) | ScreenCaptureKit screenshot (for future vision commands) |
 | [AppStore.swift](Sources/LookMomNoHands/AppStore.swift) | Disk-backed transcript store + activity log |
 | [DashboardView.swift](Sources/LookMomNoHands/DashboardView.swift) | Dashboard window: transcripts + activity tabs |
+| [Models.swift](Sources/LookMomNoHands/Models.swift) | Shared value types + frozen app-identity strings |
 | [KeychainStore.swift](Sources/LookMomNoHands/KeychainStore.swift) | API key storage |
 
 ## Data & dashboard
@@ -52,7 +51,9 @@ open build/LookMomNoHands.app
 ```
 
 `swift build` alone compiles/typechecks but the permission prompts and TCC grants
-need the real `.app` bundle the script produces.
+need the real `.app` bundle the script produces. `swift test` runs the pure-logic
+suite in `Tests/` — it needs a full Xcode toolchain (Command Line Tools alone
+ship no XCTest).
 
 ### First-run setup
 
@@ -61,7 +62,6 @@ need the real `.app` bundle the script produces.
 2. Grant permissions in **System Settings → Privacy & Security**:
    - **Microphone** and **Speech Recognition** — prompted on first launch.
    - **Accessibility** — add the app manually; required to click and type.
-   - **Screen Recording** — add the app manually; required for screenshots.
 3. Click **Start listening**, say the wake word, then speak a command.
 
 ## Model choices
@@ -77,6 +77,7 @@ Swap models in [ClaudeClient.swift](Sources/LookMomNoHands/ClaudeClient.swift).
 
 Working skeleton, compiles and bundles clean. Natural extensions:
 - Vision fallback: when the Accessibility search misses, send a screenshot to
-  Claude and click by returned coordinates ([ScreenCapture.swift](Sources/LookMomNoHands/ScreenCapture.swift) is ready).
+  Claude and click by returned coordinates (ScreenCaptureKit + Screen Recording
+  permission — deliberately not shipped until it's wired up).
 - Streaming transcription display in the panel.
 - Custom/trainable wake word (Porcupine) if the Apple phrase match is too loose.

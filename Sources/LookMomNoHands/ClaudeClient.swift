@@ -4,12 +4,16 @@ import Foundation
 // Two structured-output paths:
 //   1. parseCommand(...)        → forced tool use, fast, thinking off  (screen control + intent routing)
 //   2. buildDictationReport(...) → output_config.format json_schema, thinking on  (Wisprflow-style report)
+// Model choice: Haiku 4.5 on the command hot path (latency), Opus 4.8 for reports (quality).
 
 enum ClaudeModel: String, Sendable {
     case opus48 = "claude-opus-4-8"      // default brain: planning, summaries
-    case fable5 = "claude-fable-5"       // most capable tier
-    case sonnet5 = "claude-sonnet-5"
     case haiku45 = "claude-haiku-4-5"    // fast path: command parsing
+
+    // Request shape is gated on these instead of comments at call sites, so a
+    // model swap can't reintroduce the "Haiku rejects `effort` with a 400" bug.
+    var supportsAdaptiveThinking: Bool { self == .opus48 }
+    var supportsEffort: Bool { self == .opus48 }
 }
 
 enum ClaudeError: Error, CustomStringConvertible {
@@ -39,10 +43,15 @@ final class ClaudeClient: @unchecked Sendable {
         self.session = session
     }
 
-    // MARK: Screen-action parsing + intent routing (forced tool use, strict schema)
+    // MARK: Screen-action parsing + intent routing (forced tool use)
 
-    func parseCommand(_ transcript: String,
-                      model: ClaudeModel = .haiku45) async throws -> ScreenAction {
+    func parseCommand(_ transcript: String) async throws -> ScreenAction {
+        let json = try await post(Self.commandRequestBody(transcript: transcript, model: .haiku45), timeout: 15)
+        try Self.checkRefusal(json)
+        return try Self.decodeBlock(json, blockType: "tool_use", payloadKey: "input")
+    }
+
+    static func commandRequestBody(transcript: String, model: ClaudeModel) -> [String: Any] {
         let tool: [String: Any] = [
             "name": "emit_action",
             "description": """
@@ -61,38 +70,33 @@ final class ClaudeClient: @unchecked Sendable {
                              "enum": ["click", "type", "scroll", "open_app", "dictate_start", "none"]],
                     "target": ["type": "string", "description": "UI element or app name; empty if unused"],
                     "text": ["type": "string", "description": "text to type; empty if unused"],
+                    "direction": ["type": "string", "enum": ["up", "down", "left", "right"],
+                                  "description": "REQUIRED when kind is \"scroll\": which way to scroll"],
                     "confidence": ["type": "number"]
                 ],
                 "required": ["kind", "target", "text", "confidence"]
             ]
         ]
 
-        // No effort/thinking params: Haiku 4.5 rejects `effort` with a 400, and
-        // omitting thinking keeps this hot path fast.
-        let body: [String: Any] = [
+        // No effort/thinking on this path regardless of model — latency-critical.
+        return [
             "model": model.rawValue,
             "max_tokens": 1024,
             "tools": [tool],
             "tool_choice": ["type": "tool", "name": "emit_action"],
             "messages": [["role": "user", "content": "Spoken command: \"\(transcript)\""]]
         ]
-
-        let json = try await post(body, timeout: 15)
-        try Self.checkRefusal(json)
-
-        guard let content = json["content"] as? [[String: Any]],
-              let toolUse = content.first(where: { $0["type"] as? String == "tool_use" }),
-              let input = toolUse["input"] as? [String: Any] else {
-            throw ClaudeError.noToolUse
-        }
-        let data = try JSONSerialization.data(withJSONObject: input)
-        return try JSONDecoder().decode(ScreenAction.self, from: data)
     }
 
-    // MARK: Dictation report (output_config.format + adaptive thinking)
+    // MARK: Dictation report (output_config.format + adaptive thinking where supported)
 
-    func buildDictationReport(_ rawTranscript: String,
-                              model: ClaudeModel = .opus48) async throws -> DictationReport {
+    func buildDictationReport(_ rawTranscript: String) async throws -> DictationReport {
+        let json = try await post(Self.reportRequestBody(transcript: rawTranscript, model: .opus48))
+        try Self.checkRefusal(json)
+        return try Self.decodeBlock(json, blockType: "text", payloadKey: "text")
+    }
+
+    static func reportRequestBody(transcript: String, model: ClaudeModel) -> [String: Any] {
         let schema: [String: Any] = [
             "type": "object",
             "additionalProperties": false,
@@ -104,14 +108,15 @@ final class ClaudeClient: @unchecked Sendable {
             "required": ["summary", "action_items", "transcript"]
         ]
 
-        let body: [String: Any] = [
+        var outputConfig: [String: Any] = [
+            "format": ["type": "json_schema", "schema": schema]
+        ]
+        if model.supportsEffort { outputConfig["effort"] = "medium" }
+
+        var body: [String: Any] = [
             "model": model.rawValue,
             "max_tokens": 16000,
-            "thinking": ["type": "adaptive"],
-            "output_config": [
-                "effort": "medium",
-                "format": ["type": "json_schema", "schema": schema]
-            ],
+            "output_config": outputConfig,
             "messages": [[
                 "role": "user",
                 "content": """
@@ -120,21 +125,32 @@ final class ClaudeClient: @unchecked Sendable {
                 transcript (fix obvious ASR errors, keep the meaning).
 
                 Dictation:
-                \(rawTranscript)
+                \(transcript)
                 """
             ]]
         ]
+        if model.supportsAdaptiveThinking { body["thinking"] = ["type": "adaptive"] }
+        return body
+    }
 
-        let json = try await post(body)
-        try Self.checkRefusal(json)
+    // MARK: - Response unpacking
 
+    // Both endpoints unpack "first block of a type → decode its payload" — one
+    // implementation so response-shape fixes land everywhere at once.
+    static func decodeBlock<T: Decodable>(_ json: [String: Any], blockType: String, payloadKey: String) throws -> T {
         guard let content = json["content"] as? [[String: Any]],
-              let textBlock = content.first(where: { $0["type"] as? String == "text" }),
-              let text = textBlock["text"] as? String,
-              let data = text.data(using: .utf8) else {
-            throw ClaudeError.decoding("no text block")
+              let block = content.first(where: { $0["type"] as? String == blockType }),
+              let payload = block[payloadKey] else {
+            if blockType == "tool_use" { throw ClaudeError.noToolUse }
+            throw ClaudeError.decoding("no \(blockType) block")
         }
-        return try JSONDecoder().decode(DictationReport.self, from: data)
+        let data: Data
+        if let text = payload as? String {
+            data = Data(text.utf8)
+        } else {
+            data = try JSONSerialization.data(withJSONObject: payload)
+        }
+        return try JSONDecoder().decode(T.self, from: data)
     }
 
     // MARK: - Transport

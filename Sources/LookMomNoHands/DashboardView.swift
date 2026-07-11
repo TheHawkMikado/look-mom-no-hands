@@ -133,15 +133,15 @@ private struct ActivityTab: View {
                 } label: { Label("Reveal data folder", systemImage: "folder") }
                 Button {
                     NSPasteboard.general.clearContents()
-                    NSPasteboard.general.setString(store.activity.reversed().joined(separator: "\n"), forType: .string)
+                    NSPasteboard.general.setString(store.activity.reversed().map(\.line).joined(separator: "\n"), forType: .string)
                 } label: { Label("Copy log", systemImage: "doc.on.doc") }
             }
             .padding(8)
             Divider()
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 2) {
-                    ForEach(Array(store.activity.enumerated()), id: \.offset) { _, line in
-                        Text(line)
+                    ForEach(store.activity) { entry in
+                        Text(entry.line)
                             .font(.caption.monospaced())
                             .textSelection(.enabled)
                             .frame(maxWidth: .infinity, alignment: .leading)

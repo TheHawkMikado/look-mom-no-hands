@@ -23,18 +23,25 @@ struct TranscriptRecord: Codable, Identifiable, Sendable {
     }
 }
 
+/// One activity-log line with a stable identity, so SwiftUI list rows don't all
+/// re-identify (and rebuild) every time a new line is inserted at the front.
+struct ActivityEntry: Identifiable, Sendable {
+    let id = UUID()
+    let line: String
+}
+
 /// Disk-backed store: a JSONL copy of every transcript and a VoiceDash-style
 /// activity log of everything the app does. Both live under
 /// ~/Library/Application Support/LookMaNoHands/ and are also published for the UI.
 @MainActor
 final class AppStore: ObservableObject {
     @Published private(set) var transcripts: [TranscriptRecord] = []   // newest first
-    @Published private(set) var activity: [String] = []                // newest first (display)
+    @Published private(set) var activity: [ActivityEntry] = []         // newest first (display)
 
     let directory: URL
     private let transcriptsURL: URL
     private let activityURL: URL
-    private let io = DispatchQueue(label: "com.lookmomnohands.store.io")
+    private let io = DispatchQueue(label: AppIdentity.storeQueueLabel)
 
     private let iso: ISO8601DateFormatter = {
         let f = ISO8601DateFormatter()
@@ -42,20 +49,53 @@ final class AppStore: ObservableObject {
         return f
     }()
 
+    /// How many records/lines to keep in memory for the UI. The files on disk keep
+    /// the full history; these caps just bound RAM as they grow without limit.
+    private static let memoryCap = 1000
+
     init() {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-        directory = base.appendingPathComponent("LookMaNoHands", isDirectory: true)
+        directory = base.appendingPathComponent(AppIdentity.storageFolder, isDirectory: true)
         transcriptsURL = directory.appendingPathComponent("transcripts.jsonl")
         activityURL = directory.appendingPathComponent("activity.log")
         try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        loadTranscripts()
-        loadActivityTail()
+        loadFromDisk()
+    }
+
+    /// Reads and decodes both files off the main thread (they grow unbounded), then
+    /// publishes the most-recent slice on main.
+    private func loadFromDisk() {
+        let transcriptsURL = self.transcriptsURL
+        let activityURL = self.activityURL
+        let cap = Self.memoryCap
+        io.async {
+            var records: [TranscriptRecord] = []
+            if let text = try? String(contentsOf: transcriptsURL, encoding: .utf8) {
+                records = Array(text.split(separator: "\n").suffix(cap).compactMap {
+                    try? Self.decoder.decode(TranscriptRecord.self, from: Data($0.utf8))
+                }.reversed())
+            }
+            var entries: [ActivityEntry] = []
+            if let text = try? String(contentsOf: activityURL, encoding: .utf8) {
+                entries = text.split(separator: "\n").suffix(cap).reversed()
+                    .map { ActivityEntry(line: String($0)) }
+            }
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                // Append, don't assign: anything logged/recorded while the read ran
+                // (e.g. the launch log lines) is newer than the file snapshot and
+                // already sits at the front.
+                self.transcripts += records
+                self.activity += entries
+            }
+        }
     }
 
     // MARK: Transcripts
 
     func addTranscript(_ record: TranscriptRecord) {
         transcripts.insert(record, at: 0)
+        if transcripts.count > Self.memoryCap { transcripts.removeLast() }
         io.async { [transcriptsURL, record] in
             guard let line = try? Self.encoder.encode(record) else { return }
             var data = line
@@ -64,28 +104,15 @@ final class AppStore: ObservableObject {
         }
     }
 
-    private func loadTranscripts() {
-        guard let text = try? String(contentsOf: transcriptsURL, encoding: .utf8) else { return }
-        let decoded = text.split(separator: "\n").compactMap { line -> TranscriptRecord? in
-            try? Self.decoder.decode(TranscriptRecord.self, from: Data(line.utf8))
-        }
-        transcripts = decoded.reversed() // file is oldest-first; show newest-first
-    }
-
     // MARK: Activity log — "ISO8601: [subsystem] message"
 
     func log(_ subsystem: String, _ message: String) {
         let line = "\(iso.string(from: Date())): [\(subsystem)] \(message)"
-        activity.insert(line, at: 0)
-        if activity.count > 1000 { activity.removeLast() }
+        activity.insert(ActivityEntry(line: line), at: 0)
+        if activity.count > Self.memoryCap { activity.removeLast() }
         io.async { [activityURL] in
             Self.append(Data((line + "\n").utf8), to: activityURL)
         }
-    }
-
-    private func loadActivityTail() {
-        guard let text = try? String(contentsOf: activityURL, encoding: .utf8) else { return }
-        activity = text.split(separator: "\n").suffix(1000).reversed().map(String.init)
     }
 
     // MARK: Files

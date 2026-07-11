@@ -4,7 +4,7 @@ import Security
 /// Minimal Keychain wrapper for the Anthropic API key. Never store the key in
 /// UserDefaults or the app bundle — it would ship in plaintext.
 enum KeychainStore {
-    private static let service = "com.lookmomnohands.anthropic"
+    private static let service = AppIdentity.keychainService
     private static let account = "api-key"
 
     static func save(_ key: String) {
@@ -27,7 +27,7 @@ enum KeychainStore {
         // 2. Fallback: an item added by hand in Keychain Access. When you create a
         //    password item there, the "Keychain Item Name" becomes the service and
         //    the "Account Name" becomes the account — both "Look Ma No Hands" here.
-        for name in ["Look Ma No Hands", "Look Mom No Hands"] {
+        for name in AppIdentity.manualKeychainNames {
             if let key = read(service: name, account: name) { return key }
             if let key = read(label: name) { return key }
         }

@@ -15,7 +15,7 @@ struct LookMomNoHandsApp: App {
         }
         .menuBarExtraStyle(.window)
 
-        Window("Look Ma, No Hands — Dashboard", id: "dashboard") {
+        Window("\(AppIdentity.displayName) — Dashboard", id: "dashboard") {
             DashboardView(store: coordinator.store)
         }
     }
@@ -57,7 +57,7 @@ struct PanelView: View {
     private var header: some View {
         HStack {
             Image(systemName: "hand.raised.slash")
-            Text("Look Ma, No Hands").font(.headline)
+            Text(AppIdentity.displayName).font(.headline)
             Spacer()
             Text(coordinator.phase.label)
                 .font(.caption)
@@ -140,8 +140,8 @@ struct PanelView: View {
             }
             ScrollView {
                 VStack(alignment: .leading, spacing: 2) {
-                    ForEach(Array(store.activity.prefix(12).enumerated()), id: \.offset) { _, line in
-                        Text(line).font(.caption2).foregroundStyle(.secondary)
+                    ForEach(store.activity.prefix(12)) { entry in
+                        Text(entry.line).font(.caption2).foregroundStyle(.secondary)
                             .lineLimit(1)
                             .frame(maxWidth: .infinity, alignment: .leading)
                     }

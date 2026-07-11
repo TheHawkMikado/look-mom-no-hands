@@ -12,12 +12,14 @@ enum ScreenController {
         case notTrusted
         case elementNotFound(String)
         case noFrontApp
+        case missingDirection
 
         var description: String {
             switch self {
             case .notTrusted: return "Accessibility permission not granted"
             case .elementNotFound(let t): return "couldn't find “\(t)” on screen"
             case .noFrontApp: return "no frontmost application"
+            case .missingDirection: return "scroll command arrived without a direction"
             }
         }
     }
@@ -35,16 +37,27 @@ enum ScreenController {
 
     static func perform(_ action: ScreenAction) throws {
         switch action.kind {
+        case .click, .type, .scroll:
+            // macOS silently discards synthetic events from untrusted processes —
+            // fail loudly instead of logging a success that never happened.
+            guard isTrusted else { throw ControlError.notTrusted }
+        case .openApp, .dictateStart, .none:
+            break
+        }
+        switch action.kind {
         case .click:  try click(target: action.target)
         case .type:   type(text: action.text)
-        case .scroll: scroll(direction: ScrollDirection(rawValue: action.target.lowercased()) ?? .down)
+        case .scroll:
+            // The direction is a typed schema field; guessing (e.g. defaulting to
+            // .down) would scroll the wrong way and report success.
+            guard let direction = action.direction else { throw ControlError.missingDirection }
+            scroll(direction: direction)
         case .openApp: openApp(named: action.target)
         case .dictateStart, .none: break // handled by the coordinator, not here
         }
     }
 
     static func click(target: String) throws {
-        guard isTrusted else { throw ControlError.notTrusted }
         guard let app = NSWorkspace.shared.frontmostApplication else { throw ControlError.noFrontApp }
 
         let root = AXUIElementCreateApplication(app.processIdentifier)
@@ -59,14 +72,17 @@ enum ScreenController {
     static func type(text: String) {
         guard !text.isEmpty else { return }
         let source = CGEventSource(stateID: .combinedSessionState)
-        for scalar in text.unicodeScalars {
-            var unit = UniChar(scalar.value & 0xFFFF)
+        // One event pair per character, in UTF-16 units — a character above the
+        // BMP (emoji, astral CJK) is a surrogate pair that must be posted whole;
+        // truncating to a single unit types a garbage glyph.
+        for character in text {
+            var units = Array(String(character).utf16)
             if let down = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: true) {
-                down.keyboardSetUnicodeString(stringLength: 1, unicodeString: &unit)
+                down.keyboardSetUnicodeString(stringLength: units.count, unicodeString: &units)
                 down.post(tap: .cghidEventTap)
             }
             if let up = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: false) {
-                up.keyboardSetUnicodeString(stringLength: 1, unicodeString: &unit)
+                up.keyboardSetUnicodeString(stringLength: units.count, unicodeString: &units)
                 up.post(tap: .cghidEventTap)
             }
         }
