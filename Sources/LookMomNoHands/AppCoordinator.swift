@@ -649,7 +649,18 @@ final class AppCoordinator: ObservableObject {
             defer { self.finishProcessing(gen) }
             let text = await self.transcribed(wav: wav, fallback: appleText)
             guard !text.isEmpty else {
-                self.store.log("dictation", "empty note (no transcript)")
+                // Empty here ⟹ Apple heard nothing AND (Scribe returned nothing or
+                // failed). If we captured audio, that's a transcription failure on a
+                // real note, not silence — persist the clip so it's recoverable and
+                // surface it rather than pretending success.
+                if let wav, let url = self.store.saveAudio(wav) {
+                    self.store.log("dictation", "transcription failed — audio saved to \(url.lastPathComponent)")
+                    guard gen == self.runGeneration else { return }
+                    self.phase = .error("couldn't transcribe that note")
+                    await self.speak("Sorry, I couldn't make out that note.", gen: gen)
+                } else {
+                    self.store.log("dictation", "empty note (no transcript)")
+                }
                 return
             }
             do {

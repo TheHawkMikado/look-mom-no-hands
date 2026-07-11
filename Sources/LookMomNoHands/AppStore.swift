@@ -109,6 +109,13 @@ final class AppStore: ObservableObject {
         }
     }
 
+    /// Persists a captured clip when transcription failed, so a spoken note is
+    /// recoverable instead of silently lost. Returns the file URL.
+    func saveAudio(_ data: Data) -> URL? {
+        let url = directory.appendingPathComponent("note-\(UUID().uuidString).wav")
+        do { try data.write(to: url); return url } catch { return nil }
+    }
+
     // MARK: Activity log — "ISO8601: [subsystem] message"
 
     func log(_ subsystem: String, _ message: String) {
