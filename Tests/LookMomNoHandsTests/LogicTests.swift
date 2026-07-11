@@ -196,8 +196,10 @@ final class PlanDecodingTests: XCTestCase {
         XCTAssertNil(plan.clarify)
     }
 
-    func testOneBadStepDoesNotEraseValidSteps() throws {
-        // A single unknown `kind` must drop only itself, not the whole plan.
+    func testMalformedStepFlagsPlanForFailClosed() throws {
+        // A bad step must not silently blank the array, but it also must not be
+        // dropped and the rest run — ordered steps depend on each other. The
+        // `malformed` flag lets the coordinator refuse partial execution.
         let json = #"""
         {"say":"","confidence":0.9,"steps":[
           {"kind":"open_app","target":"Safari","text":"","url":"","keys":"","direction":"down"},
@@ -206,8 +208,18 @@ final class PlanDecodingTests: XCTestCase {
         ]}
         """#
         let plan = try JSONDecoder().decode(ActionPlan.self, from: Data(json.utf8))
-        XCTAssertEqual(plan.steps.count, 2, "the bad middle step drops, the two valid ones survive")
-        XCTAssertEqual(plan.steps.map(\.kind), [.openApp, .keystroke])
+        XCTAssertTrue(plan.malformed, "a dropped step must be flagged")
+        XCTAssertEqual(plan.steps.count, 2, "valid steps still decode (not blanked)")
+    }
+
+    func testWellFormedPlanIsNotMalformed() throws {
+        let json = #"""
+        {"say":"","confidence":0.9,"steps":[
+          {"kind":"open_app","target":"Safari","text":"","url":"","keys":"","direction":"down"}
+        ]}
+        """#
+        let plan = try JSONDecoder().decode(ActionPlan.self, from: Data(json.utf8))
+        XCTAssertFalse(plan.malformed)
     }
 }
 

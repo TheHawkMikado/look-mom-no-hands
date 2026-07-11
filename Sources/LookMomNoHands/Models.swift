@@ -61,14 +61,20 @@ struct ActionPlan: Decodable, Sendable {
     let steps: [ScreenAction]
     let clarify: Clarification?         // set ⇒ steps is empty; ask before acting
     let confidence: Double
+    /// A step failed to decode (e.g. unknown kind). Steps are ordered and can
+    /// depend on each other, so the coordinator must refuse to run a plan with a
+    /// hole rather than execute the survivors against the wrong context.
+    let malformed: Bool
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         say = (try? c.decodeIfPresent(String.self, forKey: .say)) ?? ""
-        // Decode steps element-by-element: one malformed step (e.g. an unknown
-        // kind) drops only itself instead of erasing the whole plan.
+        // Decode element-by-element so one bad step doesn't blank the whole array
+        // (which would read as an empty, silently-successful plan) — but record
+        // that a drop happened so execution can fail closed.
         let raw = (try? c.decodeIfPresent([FailableStep].self, forKey: .steps)) ?? []
         steps = raw.compactMap(\.value)
+        malformed = steps.count != raw.count
         clarify = try? c.decodeIfPresent(Clarification.self, forKey: .clarify)
         confidence = (try? c.decodeIfPresent(Double.self, forKey: .confidence)) ?? 0
     }

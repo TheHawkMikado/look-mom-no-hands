@@ -381,6 +381,17 @@ final class AppCoordinator: ObservableObject {
             return
         }
 
+        // A step failed to decode: the plan has a hole, and steps are ordered and
+        // interdependent, so running the survivors could act against the wrong
+        // context. Fail closed and ask the user to rephrase.
+        if plan.malformed {
+            dialogue = []
+            phase = .error("didn't understand part of that")
+            store.log("error", "plan had an undecodable step — refusing partial execution")
+            await speak("I didn't catch part of that — could you say it again?", gen: gen)
+            return
+        }
+
         dialogue = []   // request resolved; next utterance starts fresh
         await speak(plan.say, gen: gen)
         guard gen == runGeneration, !Task.isCancelled else { return }

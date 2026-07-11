@@ -19,6 +19,7 @@ final class Speaker: NSObject, AVAudioPlayerDelegate, AVSpeechSynthesizerDelegat
 
     private let synth = AVSpeechSynthesizer()
     private var player: AVAudioPlayer?
+    private var utterance: AVSpeechUtterance?   // the one currently speaking
     private var continuation: CheckedContinuation<Void, Never>?
 
     // Overridable so a different voice is a env-var change, not a rebuild.
@@ -70,17 +71,23 @@ final class Speaker: NSObject, AVAudioPlayerDelegate, AVSpeechSynthesizerDelegat
     }
 
     private func speakLocal(_ text: String) async {
+        let u = AVSpeechUtterance(string: text)
         await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in
             continuation = c
-            synth.speak(AVSpeechUtterance(string: text))
+            utterance = u
+            synth.speak(u)
         }
+        utterance = nil
     }
 
-    /// Cuts off whatever is playing (Stop pressed). The delegate callbacks that
-    /// follow find `continuation` already nil, so nothing double-resumes.
+    /// Cuts off whatever is playing (Stop pressed). Clearing the identities first
+    /// means the delegate callbacks that follow from stop()/stopSpeaking() don't
+    /// match and so can't resume a later utterance's continuation.
     func cancel() {
         player?.stop()
         synth.stopSpeaking(at: .immediate)
+        player = nil
+        utterance = nil
         finish()
     }
 
@@ -93,19 +100,21 @@ final class Speaker: NSObject, AVAudioPlayerDelegate, AVSpeechSynthesizerDelegat
     // MARK: Delegates
     //
     // AVFoundation calls these on the playback-start thread (main, since we start
-    // on the main actor). They're nonisolated to satisfy the protocols; each just
-    // hops to the main actor to touch `continuation` through finish().
+    // on the main actor). They're nonisolated to satisfy the protocols; each hops
+    // to the main actor and finishes ONLY if the callback belongs to the utterance
+    // still playing — a stale callback from a cancelled utterance must not resume
+    // a newer one's continuation (which would un-mute recognition mid-speech).
 
     nonisolated func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {
-        Task { @MainActor in self.finish() }
+        Task { @MainActor in if player === self.player { self.finish() } }
     }
     nonisolated func audioPlayerDecodeErrorDidOccur(_ player: AVAudioPlayer, error: Error?) {
-        Task { @MainActor in self.finish() }
+        Task { @MainActor in if player === self.player { self.finish() } }
     }
     nonisolated func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didFinish utterance: AVSpeechUtterance) {
-        Task { @MainActor in self.finish() }
+        Task { @MainActor in if utterance === self.utterance { self.finish() } }
     }
     nonisolated func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didCancel utterance: AVSpeechUtterance) {
-        Task { @MainActor in self.finish() }
+        Task { @MainActor in if utterance === self.utterance { self.finish() } }
     }
 }
