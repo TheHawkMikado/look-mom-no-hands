@@ -64,6 +64,7 @@ struct ActionPlan: Decodable, Sendable {
     let steps: [ScreenAction]
     let clarify: Clarification?         // set ⇒ steps is empty; ask before acting
     let learn: LearnedFact?             // a durable mapping the user just taught/corrected
+    let teach: TaughtProcedure?         // a task the user just taught how to do
     let confidence: Double
     /// The act-observe loop's stop signal: the model sets this true once the user's
     /// goal is fully achieved. While false (and steps ran), the coordinator re-reads
@@ -79,6 +80,7 @@ struct ActionPlan: Decodable, Sendable {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         say = (try? c.decodeIfPresent(String.self, forKey: .say)) ?? ""
         learn = try? c.decodeIfPresent(LearnedFact.self, forKey: .learn)
+        teach = try? c.decodeIfPresent(TaughtProcedure.self, forKey: .teach)
         // Decode element-by-element so one bad step doesn't blank the whole array
         // (which would read as an empty, silently-successful plan) — but record
         // that anything was dropped so execution can fail closed. A `steps` field
@@ -104,7 +106,7 @@ struct ActionPlan: Decodable, Sendable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case say, steps, clarify, learn, confidence
+        case say, steps, clarify, learn, teach, confidence
         case goalComplete = "goal_complete"
     }
 
@@ -176,6 +178,45 @@ enum RecorderOutput: Sendable, Equatable {
         case .note: return "Save as note"
         case .both: return "Insert + note"
         }
+    }
+}
+
+/// A task the user has taught the assistant how to do ("here's how I create a new
+/// Claude Code session: …"). Stored and, when a command matches its triggers, fed
+/// to the planner as the authoritative recipe so it follows the user's process.
+/// An ever-growing, editable library of actions.
+struct Procedure: Codable, Identifiable, Sendable, Equatable {
+    let id: String
+    var name: String
+    var triggers: [String]   // phrases that should invoke it
+    var steps: String        // the narrated process, in order
+    let createdAt: Date
+
+    init(id: String = UUID().uuidString, name: String, triggers: [String] = [], steps: String, createdAt: Date = Date()) {
+        self.id = id
+        self.name = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.triggers = triggers.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
+        self.steps = steps.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.createdAt = createdAt
+    }
+}
+
+/// A procedure the user just taught, decoded from the planner's `teach` output.
+struct TaughtProcedure: Decodable, Sendable {
+    let name: String
+    let triggers: [String]
+    let steps: String
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        name = (try? c.decodeIfPresent(String.self, forKey: .name)) ?? ""
+        triggers = (try? c.decodeIfPresent([String].self, forKey: .triggers)) ?? []
+        steps = (try? c.decodeIfPresent(String.self, forKey: .steps)) ?? ""
+    }
+    private enum CodingKeys: String, CodingKey { case name, triggers, steps }
+
+    var isValid: Bool {
+        !name.trimmingCharacters(in: .whitespaces).isEmpty && !steps.trimmingCharacters(in: .whitespaces).isEmpty
     }
 }
 

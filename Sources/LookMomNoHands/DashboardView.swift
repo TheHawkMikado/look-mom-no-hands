@@ -19,6 +19,8 @@ struct DashboardView: View {
                 .tabItem { Label("Vocabulary", systemImage: "character.book.closed") }
             ProfilesTab(profiles: coordinator.profiles)
                 .tabItem { Label("Profiles", systemImage: "slider.horizontal.3") }
+            ProceduresTab(procedures: coordinator.procedures)
+                .tabItem { Label("Procedures", systemImage: "list.number") }
             ActivityTab(store: coordinator.store)
                 .tabItem { Label("Activity", systemImage: "list.bullet.rectangle") }
             SettingsTab(coordinator: coordinator)
@@ -189,6 +191,87 @@ private struct LiveTab: View {
         let q = question.trimmingCharacters(in: .whitespaces)
         guard !q.isEmpty else { return }
         coordinator.askLiveTranscript(q)
+    }
+}
+
+/// Taught procedures: the growing library of "here's how I do X." You teach them
+/// by voice ("here's how to create a new Claude Code session: …") or edit here; a
+/// matching command follows the steps.
+private struct ProceduresTab: View {
+    @ObservedObject var procedures: ProcedureStore
+    @State private var selection: String?
+    @State private var name = ""
+    @State private var triggers = ""
+    @State private var steps = ""
+
+    var body: some View {
+        HSplitView {
+            VStack(spacing: 0) {
+                List(selection: $selection) {
+                    ForEach(procedures.procedures) { p in
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text(p.name.isEmpty ? "(unnamed)" : p.name)
+                            if !p.triggers.isEmpty {
+                                Text(p.triggers.joined(separator: ", ")).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
+                            }
+                        }
+                        .tag(p.id)
+                        .contextMenu { Button("Delete", role: .destructive) { procedures.remove(p.id) } }
+                    }
+                }
+                Divider()
+                Button { newProcedure() } label: { Label("New procedure", systemImage: "plus") }
+                    .buttonStyle(.borderless).padding(6)
+            }
+            .frame(minWidth: 200)
+
+            editor.frame(minWidth: 340).padding()
+        }
+        .onChange(of: selection) { _ in loadDraft() }
+    }
+
+    @ViewBuilder private var editor: some View {
+        if selection != nil {
+            VStack(alignment: .leading, spacing: 10) {
+                Text("Teach it by voice too — say “here's how to …” while using the app.")
+                    .font(.caption).foregroundStyle(.secondary)
+                TextField("Name (e.g. create a new Claude Code session)", text: $name)
+                    .textFieldStyle(.roundedBorder)
+                TextField("Trigger phrases, comma-separated", text: $triggers)
+                    .textFieldStyle(.roundedBorder)
+                Text("Steps").font(.caption).foregroundStyle(.secondary)
+                TextEditor(text: $steps)
+                    .font(.body).frame(minHeight: 140)
+                    .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.secondary.opacity(0.3)))
+                HStack {
+                    Spacer()
+                    Button("Save") { save() }.disabled(name.trimmingCharacters(in: .whitespaces).isEmpty || steps.trimmingCharacters(in: .whitespaces).isEmpty)
+                }
+            }
+        } else {
+            Text("Select or add a procedure").foregroundStyle(.secondary)
+        }
+    }
+
+    private func loadDraft() {
+        guard let id = selection, let p = procedures.procedures.first(where: { $0.id == id }) else {
+            name = ""; triggers = ""; steps = ""   // no selection / stale id → clear, never show a stale draft
+            return
+        }
+        name = p.name; triggers = p.triggers.joined(separator: ", "); steps = p.steps
+    }
+
+    private func newProcedure() {
+        let p = Procedure(name: "New procedure", steps: "")
+        procedures.upsert(p)
+        selection = p.id
+        loadDraft()
+    }
+
+    private func save() {
+        guard let id = selection else { return }
+        let trig = triggers.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+        procedures.upsert(Procedure(id: id, name: name, triggers: trig, steps: steps))
     }
 }
 

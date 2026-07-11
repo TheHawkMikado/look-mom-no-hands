@@ -436,6 +436,55 @@ final class SpeechEngineTests: XCTestCase {
     }
 }
 
+final class ProcedureTests: XCTestCase {
+    @MainActor private func store() -> ProcedureStore {
+        ProcedureStore(directory: FileManager.default.temporaryDirectory
+            .appendingPathComponent("lmnh-proc-\(UUID().uuidString)"))
+    }
+
+    @MainActor func testLearnDedupesOnNameAndMatchesCommand() {
+        let s = store()
+        s.learn(decodeTeach(name: "create a new Claude Code session",
+                            triggers: ["new claude code session", "claude session"],
+                            steps: "cmd+shift+P, type Claude Code, enter"))
+        XCTAssertEqual(s.procedures.count, 1)
+        // Re-teaching the same name updates in place, not duplicates.
+        s.learn(decodeTeach(name: "Create a New Claude Code Session", triggers: [], steps: "open palette, choose Claude Code"))
+        XCTAssertEqual(s.procedures.count, 1)
+        XCTAssertEqual(s.procedures.first?.steps, "open palette, choose Claude Code")
+
+        // A matching command surfaces it; an unrelated one doesn't.
+        XCTAssertFalse(s.relevant(to: "start a new claude code session please").isEmpty)
+        XCTAssertTrue(s.relevant(to: "what's the weather").isEmpty)
+        XCTAssertTrue(s.promptContext(for: "new claude code session").contains("Claude Code"))
+        XCTAssertEqual(s.promptContext(for: "unrelated"), "")
+    }
+
+    @MainActor func testInvalidTeachIgnored() {
+        let s = store()
+        s.learn(decodeTeach(name: "", triggers: [], steps: "steps"))
+        s.learn(decodeTeach(name: "name", triggers: [], steps: ""))
+        XCTAssertTrue(s.procedures.isEmpty)
+    }
+
+    // Builds a TaughtProcedure via JSON (its init is decoder-only).
+    private func decodeTeach(name: String, triggers: [String], steps: String) -> TaughtProcedure {
+        let obj: [String: Any] = ["name": name, "triggers": triggers, "steps": steps]
+        let data = try! JSONSerialization.data(withJSONObject: obj)
+        return try! JSONDecoder().decode(TaughtProcedure.self, from: data)
+    }
+}
+
+extension PlanDecodingTests {
+    func testPlanDecodesTeach() throws {
+        let json = #"{"say":"Got it","steps":[],"confidence":1.0,"goal_complete":true,"teach":{"name":"new session","triggers":["new session"],"steps":"press cmd+n"}}"#
+        let plan = try JSONDecoder().decode(ActionPlan.self, from: Data(json.utf8))
+        XCTAssertEqual(plan.teach?.name, "new session")
+        XCTAssertEqual(plan.teach?.steps, "press cmd+n")
+        XCTAssertTrue(plan.goalComplete)
+    }
+}
+
 final class ProfileTests: XCTestCase {
     @MainActor private func store() -> ProfileStore {
         ProfileStore(directory: FileManager.default.temporaryDirectory

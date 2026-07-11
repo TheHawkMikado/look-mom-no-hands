@@ -125,6 +125,12 @@ final class ClaudeClient: @unchecked Sendable {
             say: one short spoken sentence confirming what you're doing or reporting; \
             empty for a single obvious action.
 
+            teach: set when the user is teaching you HOW to do a task (not doing it) — \
+            "here's how to X", "I'll show you how to X", "remember how to X: …". Capture \
+            a short name, trigger phrases, and the ordered steps. Don't perform it in \
+            the same turn unless they say to do it now. If a taught procedure is listed \
+            in the context and matches the request, follow its steps.
+
             learn: set ONLY when the user EXPLICITLY teaches or corrects you — they use \
             corrective/teaching language ("no, I meant…", "when I say X I mean Y", \
             "remember that…"), or they just answered a clarification telling you what a \
@@ -161,6 +167,17 @@ final class ClaudeClient: @unchecked Sendable {
                             "written": ["type": "string", "description": "what they mean / how to write it"]
                         ],
                         "required": ["spoken", "written"]
+                    ],
+                    "teach": [
+                        "type": "object",
+                        "additionalProperties": false,
+                        "description": "Set ONLY when the user is teaching you HOW to do a task (\"here's how to…\", \"I'll show you how to…\", \"remember how to…\", \"the way I do X is…\"). Capture it as a reusable procedure. Do NOT also perform it unless they say to do it now.",
+                        "properties": [
+                            "name": ["type": "string", "description": "short name for the task, e.g. \"create a new Claude Code session\""],
+                            "triggers": ["type": "array", "items": ["type": "string"], "description": "phrases that should invoke this procedure later"],
+                            "steps": ["type": "string", "description": "the process in order, as the user described it"]
+                        ],
+                        "required": ["name", "triggers", "steps"]
                     ],
                     "confidence": ["type": "number"],
                     "goal_complete": ["type": "boolean", "description": "true ONLY when the user's whole goal is fully achieved and no further action is needed. false if more steps remain (e.g. you just opened a panel/dialog and must still act inside it)."]

@@ -112,6 +112,7 @@ final class AppCoordinator: ObservableObject {
     private let speaker = Speaker()
     let vocabulary: VocabularyStore
     let profiles: ProfileStore
+    let procedures: ProcedureStore
 
     // Longer than the old 1.2s: a spoken request can be several action items, so
     // don't cut it off on a mid-sentence breath.
@@ -156,6 +157,7 @@ final class AppCoordinator: ObservableObject {
     init() {
         vocabulary = VocabularyStore(directory: store.directory)
         profiles = ProfileStore(directory: store.directory)
+        procedures = ProcedureStore(directory: store.directory)
         if UserDefaults.standard.object(forKey: Self.silenceKey) != nil {
             recorderEndPause = UserDefaults.standard.double(forKey: Self.silenceKey)
         }
@@ -882,7 +884,7 @@ final class AppCoordinator: ObservableObject {
             try Task.checkCancellation()
             phase = .thinking
             let screen = try await gatherScreen(for: text, round: round)
-            let context = buildPlannerContext(taskProgress: performedAll)
+            let context = buildPlannerContext(command: text, taskProgress: performedAll)
             let plan = try await claude.parsePlan(text, dialogue: dialogue,
                                                   vocabulary: vocabulary.promptContext,
                                                   screen: screen, context: context)
@@ -894,6 +896,18 @@ final class AppCoordinator: ObservableObject {
                 vocabulary.learnCorrection(spoken: fact.spoken, written: fact.written)
                 refreshContextualPhrases()
                 store.log("learn", "\(fact.spoken) → \(fact.written)")
+            }
+            // The user taught a procedure — save it (only round 0, so a "teach and do
+            // it now" task doesn't re-learn a drifting name every round).
+            if round == 0, let taught = plan.teach, taught.isValid, gen == runGeneration {
+                procedures.learn(taught)
+                store.log("teach", "learned procedure: \(taught.name)")
+                // Pure teaching with nothing to do (and no question) — confirm and stop.
+                if plan.steps.isEmpty, plan.clarify == nil {
+                    dialogue = []
+                    await speak(plan.say.isEmpty ? "Got it — I'll remember how to \(taught.name)." : plan.say, gen: gen)
+                    return
+                }
             }
 
             if let clarify = plan.clarify {
@@ -1016,8 +1030,11 @@ final class AppCoordinator: ObservableObject {
         return snap.promptText
     }
 
-    private func buildPlannerContext(taskProgress: [String]) -> String {
-        var parts = [workingContext.promptText, environment.snapshot.promptText, recentActionsBlock()]
+    private func buildPlannerContext(command: String, taskProgress: [String]) -> String {
+        var parts = [workingContext.promptText,
+                     procedures.promptContext(for: command),
+                     environment.snapshot.promptText,
+                     recentActionsBlock()]
         if !taskProgress.isEmpty {
             parts.append("This task so far (already done — don't repeat):\n" + taskProgress.map { "- \($0)" }.joined(separator: "\n"))
         }
