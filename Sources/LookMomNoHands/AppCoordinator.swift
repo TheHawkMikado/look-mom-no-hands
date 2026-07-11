@@ -63,6 +63,14 @@ final class AppCoordinator: ObservableObject {
 
     let store = AppStore()
 
+    // Always-on awareness of what's open, and the sticky focus the user is working
+    // in. Both feed the planner so commands stay on-context across turns instead of
+    // re-deriving intent every time.
+    let environment = EnvironmentTracker()
+    @Published var workingContext = WorkingContext()
+    @Published private(set) var recentActions: [String] = []   // rolling command→outcome memory for the planner
+    private static let recentActionsMax = 8
+
     private enum Mode { case standby, command, dictation, live }
     private var mode: Mode = .standby
 
@@ -183,6 +191,7 @@ final class AppCoordinator: ObservableObject {
             Task { @MainActor in self?.lastExternalApp = app }
         }
         store.log("app", "launched")
+        environment.start()   // track open apps/windows/tabs continuously, even before listening
         loadKey()
         refreshAuthFlags()
         store.log("app", "auth at launch: mic=\(micAuthorized) speech=\(speechAuthorized)")
@@ -725,6 +734,21 @@ final class AppCoordinator: ObservableObject {
                 // Stop interrupts the walk); a failure falls back to no context.
                 var screen = ""
                 if Self.needsScreenContext(text) {
+                    // Sticky focus: bring the working-context window forward first, so
+                    // the snapshot is read from it and actions land there — "everything
+                    // relates to that window until I switch." But if that window is gone
+                    // (closed since), clear it rather than raise a dead window forever.
+                    if let win = self.workingContext.window {
+                        let labels = self.environment.snapshot.apps.flatMap { a in a.windows.map { "\(a.name) \($0.title)" } }
+                        if ScreenController.bestWindowIndex(labels, query: win) != nil {
+                            try? await withThrowingTaskGroup(of: Void.self) { group in
+                                group.addTask { try? ScreenController.focusWindow(matching: win) }
+                                try await group.waitForAll()
+                            }
+                        } else {
+                            self.workingContext.window = nil
+                        }
+                    }
                     let snap = try await withThrowingTaskGroup(of: ScreenController.Snapshot?.self) { group in
                         group.addTask { try? ScreenController.focusedWindowSnapshot() }
                         return try await group.next() ?? nil
@@ -734,8 +758,14 @@ final class AppCoordinator: ObservableObject {
                         self.store.log("screen", "read \(snap.elements.count) elements from \(snap.app)")
                     }
                 }
+                // Everything the planner needs to stay on-track across turns: the
+                // sticky focus, what's open, and what we just did.
+                let context = [self.workingContext.promptText,
+                               self.environment.snapshot.promptText,
+                               self.recentActionsBlock()].filter { !$0.isEmpty }.joined(separator: "\n\n")
                 let plan = try await claude.parsePlan(text, dialogue: priorDialogue,
-                                                      vocabulary: self.vocabulary.promptContext, screen: screen)
+                                                      vocabulary: self.vocabulary.promptContext,
+                                                      screen: screen, context: context)
                 try Task.checkCancellation()
                 let ms = Int(Date().timeIntervalSince(startedAt) * 1000)
                 self.store.log("claude", "plan: \(plan.steps.count) step(s)\(plan.clarify != nil ? " + question" : "") conf=\(plan.confidence) (\(ms)ms)")
@@ -840,12 +870,14 @@ final class AppCoordinator: ObservableObject {
                         }
                     }
                     performed.append(Self.describe(step))
+                    self.updateContext(for: step)   // move the sticky focus if this step changed it
                     self.store.log("action", "performed: \(Self.describe(step))")
                 }
             }
             if !performed.isEmpty {
                 self.store.addTranscript(TranscriptRecord(kind: "command", transcript: transcript,
                                                           outcome: performed.joined(separator: " → ")))
+                self.recordRecentAction("\"\(transcript)\" → \(performed.joined(separator: " → "))")
             }
         } catch {
             if Task.isCancelled || gen != runGeneration { throw error }
@@ -855,11 +887,55 @@ final class AppCoordinator: ObservableObject {
             let done = performed.isEmpty ? "" : performed.joined(separator: " → ") + " → "
             self.store.addTranscript(TranscriptRecord(kind: "command", transcript: transcript,
                                                       outcome: "\(done)FAILED: \(error)"))
+            self.recordRecentAction("\"\(transcript)\" → \(done)FAILED")
             self.phase = .error("\(error)")
             self.store.log("error", "step failed after \(performed.count) done: \(error)")
             await self.speak(performed.isEmpty ? "That didn't work." : "I did the first part, then hit a problem.", gen: gen)
         }
     }
+
+    // MARK: Working context + memory
+
+    private func recentActionsBlock() -> String {
+        guard !recentActions.isEmpty else { return "" }
+        return "Recent actions (oldest first):\n" + recentActions.map { "- \($0)" }.joined(separator: "\n")
+    }
+
+    private func recordRecentAction(_ line: String) {
+        recentActions.append(String(line.prefix(200)))
+        if recentActions.count > Self.recentActionsMax {
+            recentActions.removeFirst(recentActions.count - Self.recentActionsMax)
+        }
+    }
+
+    /// Moves the sticky working context when a step changes the focused target, so
+    /// the next command inherits it without the user re-naming the window.
+    private func updateContext(for step: ScreenAction) {
+        switch step.kind {
+        case .openApp:
+            workingContext = WorkingContext(app: step.target)
+        case .openURL:
+            // The site opened in the named browser (or the current app if unnamed) —
+            // keep the app focus, drop the old window/tab. Never blank the context.
+            if !step.target.isEmpty { workingContext = WorkingContext(app: step.target) }
+            else if workingContext.app != nil { workingContext = WorkingContext(app: workingContext.app) }
+        case .focusWindow:
+            var ctx = WorkingContext(window: step.target)
+            // Resolve the owning app from the live environment when we can.
+            let labels = environment.snapshot.apps.flatMap { app in app.windows.map { (app.name, $0.title) } }
+            if let idx = ScreenController.bestWindowIndex(labels.map { "\($0.0) \($0.1)" }, query: step.target) {
+                ctx.app = labels[idx].0
+            }
+            workingContext = ctx
+        case .switchTab:
+            workingContext.tab = step.target
+        default:
+            break
+        }
+    }
+
+    /// Clears the sticky focus (dashboard control / "work anywhere").
+    func clearWorkingContext() { workingContext = WorkingContext() }
 
     /// Clicks `target`, first via the Accessibility tree; if that finds nothing and
     /// vision is enabled, screenshots the screen and lets Claude locate it by pixel.

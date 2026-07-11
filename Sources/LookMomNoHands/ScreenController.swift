@@ -42,7 +42,7 @@ enum ScreenController {
 
     static func perform(_ action: ScreenAction) throws {
         switch action.kind {
-        case .click, .type, .scroll, .keystroke, .focusWindow:
+        case .click, .type, .scroll, .keystroke, .focusWindow, .switchTab:
             // macOS silently discards synthetic events from untrusted processes,
             // and window enumeration needs AX — fail loudly instead of logging a
             // success that never happened.
@@ -61,6 +61,7 @@ enum ScreenController {
         case .openApp: try openApp(named: action.target)
         case .openURL: try openURL(action.url, inApp: action.target)
         case .focusWindow: try focusWindow(matching: action.target)
+        case .switchTab: try switchTab(to: action.target)
         case .keystroke: try keystroke(action.keys)
         case .dictateStart, .describeScreen, .none: break // handled by the coordinator, not here
         }
@@ -89,6 +90,110 @@ enum ScreenController {
             }
         }
         return out
+    }
+
+    /// Switches the frontmost browser to the tab whose title best matches. Presses
+    /// the tab's AXRadioButton (more reliable than a geometric click on the tab bar).
+    static func switchTab(to needle: String) throws {
+        guard let app = NSWorkspace.shared.frontmostApplication else { throw ControlError.noFrontApp }
+        let axApp = AXUIElementCreateApplication(app.processIdentifier)
+        var winRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(axApp, kAXFocusedWindowAttribute as CFString, &winRef) == .success,
+              let window = winRef as! AXUIElement?,
+              let group = firstDescendant(of: window, role: "AXTabGroup", depth: 0) else {
+            throw ControlError.elementNotFound(needle)
+        }
+        let n = needle.lowercased()
+        var best: (el: AXUIElement, score: Int)?
+        for tab in children(of: group) where string(tab, kAXRoleAttribute) == "AXRadioButton" {
+            guard let title = string(tab, kAXTitleAttribute)?.lowercased(), !title.isEmpty else { continue }
+            let s = elementMatchScore(label: title, needle: n, depth: 0, isTextInput: false)
+            if s > 0, best == nil || s > best!.score { best = (tab, s) }
+        }
+        guard let hit = best?.el else { throw ControlError.elementNotFound(needle) }
+        try Task.checkCancellation()
+        AXUIElementPerformAction(hit, kAXPressAction as CFString)
+    }
+
+    /// Groups the flat window list into the app→window hierarchy, flags the
+    /// frontmost app and each app's focused window, and (for browsers) fills in
+    /// tab titles. Cancellable/bounded like `openWindows`. Runs off the main actor.
+    static func environmentSnapshot(includeTabs: Bool = true) throws -> EnvSnapshot {
+        let front = NSWorkspace.shared.frontmostApplication
+        var byApp: [String: EnvApp] = [:]
+        var order: [String] = []
+        for app in NSWorkspace.shared.runningApplications where app.activationPolicy == .regular {
+            try Task.checkCancellation()
+            guard let name = app.localizedName else { continue }
+            let axApp = AXUIElementCreateApplication(app.processIdentifier)
+            // Bound every AX call to this app so one wedged process can't stall the
+            // whole poll (AX has no default timeout; this poller runs unattended).
+            AXUIElementSetMessagingTimeout(axApp, 0.4)
+            var value: CFTypeRef?
+            guard AXUIElementCopyAttributeValue(axApp, kAXWindowsAttribute as CFString, &value) == .success,
+                  let windows = value as? [AXUIElement] else { continue }
+            // The app's focused window (to mark it in the hierarchy). Status-checked
+            // + conditional cast: a backgrounded app can return kCFNull here, and a
+            // force-cast of that would crash.
+            // Type-ID check, not `as?`: a conditional CF downcast "always succeeds",
+            // so kCFNull would slip through and later CFEqual would misbehave.
+            var focusedRef: CFTypeRef?
+            AXUIElementCopyAttributeValue(axApp, kAXFocusedWindowAttribute as CFString, &focusedRef)
+            let focused: AXUIElement? = focusedRef.flatMap {
+                CFGetTypeID($0) == AXUIElementGetTypeID() ? ($0 as! AXUIElement) : nil
+            }
+
+            let browser = includeTabs ? browserTabber(for: app.bundleIdentifier) : nil
+            var envWindows: [EnvWindow] = []
+            for w in windows {
+                let title = string(w, kAXTitleAttribute) ?? ""
+                let isFocused = focused.map { CFEqual($0, w) } ?? false
+                let (tabs, active) = browser?(w) ?? ([], nil)
+                envWindows.append(EnvWindow(app: name, title: title, focused: isFocused, tabs: tabs, activeTab: active))
+            }
+            if byApp[name] == nil { order.append(name) }
+            byApp[name] = EnvApp(name: name, bundleID: app.bundleIdentifier,
+                                 active: app.processIdentifier == front?.processIdentifier,
+                                 windows: envWindows)
+        }
+        // Frontmost app first, then the rest in discovery order (stable partition —
+        // sorted(by:) isn't stable, which would scramble the inactive tail).
+        let list = order.compactMap { byApp[$0] }
+        return EnvSnapshot(apps: list.filter { $0.active } + list.filter { !$0.active })
+    }
+
+    /// Browser tab reader for a bundle id, or nil for non-browsers. Reads the
+    /// window's AXTabGroup children (titles) — no Automation permission needed,
+    /// unlike AppleScript. Best-effort: a browser that doesn't expose an AXTabGroup
+    /// just yields no tabs.
+    private static let browserBundleIDs: Set<String> = [
+        "com.google.Chrome", "com.google.Chrome.canary", "com.brave.Browser",
+        "com.microsoft.edgemac", "company.thebrowser.Browser", "org.mozilla.firefox",
+        "com.apple.Safari"
+    ]
+    private static func browserTabber(for bundleID: String?) -> ((AXUIElement) -> ([String], String?))? {
+        guard let bundleID, browserBundleIDs.contains(bundleID) else { return nil }
+        return { window in
+            guard let group = firstDescendant(of: window, role: "AXTabGroup", depth: 0) else { return ([], nil) }
+            var titles: [String] = []
+            var active: String? = nil
+            for tab in children(of: group) where string(tab, kAXRoleAttribute) == "AXRadioButton" {
+                guard let t = string(tab, kAXTitleAttribute), !t.isEmpty else { continue }
+                titles.append(t)
+                // AXValue == 1 marks the selected tab on most browsers.
+                if let v = string(tab, kAXValueAttribute), v == "1" { active = t }
+            }
+            return (titles, active)
+        }
+    }
+
+    private static func firstDescendant(of element: AXUIElement, role: String, depth: Int) -> AXUIElement? {
+        if depth > 12 { return nil }
+        for child in children(of: element) {
+            if string(child, kAXRoleAttribute) == role { return child }
+            if let hit = firstDescendant(of: child, role: role, depth: depth + 1) { return hit }
+        }
+        return nil
     }
 
     /// Raises the open window that best matches a spoken description ("the Look

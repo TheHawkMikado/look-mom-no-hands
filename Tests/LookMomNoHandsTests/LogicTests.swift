@@ -132,6 +132,44 @@ final class ActionDecodingTests: XCTestCase {
         XCTAssertFalse(AppCoordinator.isRepeatPhrase(""))
     }
 
+    func testSwitchTabKindDecodes() throws {
+        let json = #"{"kind":"switch_tab","target":"Pull Requests","text":"","confidence":1.0}"#
+        let action = try JSONDecoder().decode(ScreenAction.self, from: Data(json.utf8))
+        XCTAssertEqual(action.kind, .switchTab)
+        XCTAssertEqual(action.target, "Pull Requests")
+    }
+
+    func testWorkingContextPromptAndLabel() {
+        XCTAssertTrue(WorkingContext().isEmpty)
+        XCTAssertEqual(WorkingContext().promptText, "")
+        XCTAssertEqual(WorkingContext().label, "No focus set")
+        var ctx = WorkingContext(app: "Google Chrome", window: "GitHub", tab: "Pull Requests")
+        XCTAssertFalse(ctx.isEmpty)
+        XCTAssertEqual(ctx.label, "Google Chrome › GitHub › Pull Requests")
+        XCTAssertTrue(ctx.promptText.contains("app “Google Chrome”"))
+        XCTAssertTrue(ctx.promptText.contains("tab “Pull Requests”"))
+        ctx.tab = nil
+        XCTAssertFalse(ctx.promptText.contains("tab"))
+    }
+
+    func testEnvSnapshotPromptText() {
+        XCTAssertEqual(EnvSnapshot().promptText, "")
+        let snap = EnvSnapshot(apps: [
+            EnvApp(name: "Google Chrome", bundleID: "com.google.Chrome", active: true, windows: [
+                EnvWindow(app: "Google Chrome", title: "GitHub", focused: true,
+                          tabs: ["Issues", "Pull Requests"], activeTab: "Pull Requests")
+            ]),
+            EnvApp(name: "Xcode", bundleID: nil, active: false, windows: [
+                EnvWindow(app: "Xcode", title: "look-mom-no-hands", focused: false)
+            ])
+        ])
+        let s = snap.promptText
+        XCTAssertTrue(s.contains("Google Chrome (frontmost)"))
+        XCTAssertTrue(s.contains("GitHub (focused)"))
+        XCTAssertTrue(s.contains("tabs: Issues | Pull Requests"))
+        XCTAssertTrue(s.contains("Xcode"))
+    }
+
     func testDescribeScreenKindDecodes() throws {
         // The question rides in `target`; empty means "just describe the screen".
         let json = #"{"kind":"describe_screen","target":"what does this error say","text":"","confidence":1.0}"#

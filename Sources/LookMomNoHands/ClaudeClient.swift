@@ -48,9 +48,9 @@ final class ClaudeClient: @unchecked Sendable {
     /// `dialogue` carries a pending clarification exchange: earlier turns as
     /// (role, content) pairs, ending before the current transcript.
     func parsePlan(_ transcript: String, dialogue: [(role: String, content: String)] = [],
-                   vocabulary: String = "", screen: String = "") async throws -> ActionPlan {
+                   vocabulary: String = "", screen: String = "", context: String = "") async throws -> ActionPlan {
         let json = try await post(Self.planRequestBody(transcript: transcript, dialogue: dialogue,
-                                                        vocabulary: vocabulary, screen: screen, model: .haiku45), timeout: 20)
+                                                        vocabulary: vocabulary, screen: screen, context: context, model: .haiku45), timeout: 20)
         try Self.checkRefusal(json)
         return try Self.decodeBlock(json, blockType: "tool_use", payloadKey: "input")
     }
@@ -59,14 +59,15 @@ final class ClaudeClient: @unchecked Sendable {
                                 dialogue: [(role: String, content: String)] = [],
                                 vocabulary: String = "",
                                 screen: String = "",
+                                context: String = "",
                                 model: ClaudeModel) -> [String: Any] {
         let step: [String: Any] = [
             "type": "object",
             "additionalProperties": false,
             "properties": [
                 "kind": ["type": "string",
-                         "enum": ["click", "type", "scroll", "open_app", "open_url", "focus_window", "keystroke", "dictate_start", "describe_screen", "none"]],
-                "target": ["type": "string", "description": "UI element / app name; for open_url optionally the browser; for focus_window the window description to match (e.g. \"the look-mom-no-hands VS Code\"); for describe_screen the question to answer about the screen (empty = just describe what's shown); empty if unused"],
+                         "enum": ["click", "type", "scroll", "open_app", "open_url", "focus_window", "switch_tab", "keystroke", "dictate_start", "describe_screen", "none"]],
+                "target": ["type": "string", "description": "UI element / app name; for open_url optionally the browser; for focus_window the window description to match (e.g. \"the look-mom-no-hands VS Code\"); for switch_tab the browser tab title to switch to; for describe_screen the question to answer about the screen (empty = just describe what's shown); empty if unused"],
                 "text": ["type": "string", "description": "text to type; empty if unused"],
                 "url": ["type": "string", "description": "open_url only: the website, e.g. \"youtube.com\"; empty if unused"],
                 "keys": ["type": "string", "description": "keystroke only: shortcut like \"cmd+t\", \"cmd+shift+t\", \"enter\"; empty if unused"],
@@ -99,6 +100,17 @@ final class ClaudeClient: @unchecked Sendable {
             answer options — do not guess. When the user's latest message answers a \
             previous clarification question, act on it; if they decline, emit no steps \
             and a brief acknowledging say.
+
+            You may be given a working context (the app/window/tab the user is \
+            operating in), the list of everything currently open, and a log of recent \
+            actions. Treat the working context as the ACTIVE target: apply commands to \
+            it without re-asking which window, unless the user names a different app/ \
+            window/tab. Resolve vague references ("that window", "the editor", "it") \
+            against the working context and the open-windows list. When the user says \
+            to go to / switch to / open an app, window, or site, emit the matching \
+            open_app / open_url / focus_window step (that also moves the working \
+            context there). Only ask for clarification when the target is genuinely \
+            unresolvable from the context and the open windows.
 
             say: one short spoken sentence confirming what you're doing or reporting; \
             empty for a single obvious action.
@@ -157,7 +169,7 @@ final class ClaudeClient: @unchecked Sendable {
             "tool_choice": ["type": "tool", "name": "emit_plan"],
             "messages": messages
         ]
-        let system = [vocabulary, screen].filter { !$0.isEmpty }.joined(separator: "\n\n")
+        let system = [vocabulary, context, screen].filter { !$0.isEmpty }.joined(separator: "\n\n")
         if !system.isEmpty { body["system"] = system }
         return body
     }

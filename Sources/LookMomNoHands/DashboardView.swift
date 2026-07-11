@@ -8,6 +8,8 @@ struct DashboardView: View {
 
     var body: some View {
         TabView {
+            MemoryTab(coordinator: coordinator, environment: coordinator.environment)
+                .tabItem { Label("Memory", systemImage: "brain") }
             LiveTab(coordinator: coordinator)
                 .tabItem { Label("Live", systemImage: "waveform") }
             TranscriptsTab(store: coordinator.store)
@@ -21,6 +23,88 @@ struct DashboardView: View {
                 .tabItem { Label("Settings", systemImage: "gearshape") }
         }
         .frame(minWidth: 720, minHeight: 480)
+    }
+}
+
+/// What the assistant knows right now: the sticky focus it's working in, a live
+/// tree of everything open (apps → windows → tabs), and the recent-action memory
+/// that keeps commands on-track across turns.
+private struct MemoryTab: View {
+    @ObservedObject var coordinator: AppCoordinator
+    @ObservedObject var environment: EnvironmentTracker
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 8) {
+                Image(systemName: "scope").foregroundStyle(coordinator.workingContext.isEmpty ? Color.secondary : Color.blue)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("Working focus").font(.caption2).foregroundStyle(.secondary)
+                    Text(coordinator.workingContext.label)
+                        .font(.callout.weight(.medium))
+                        .foregroundStyle(coordinator.workingContext.isEmpty ? .secondary : .primary)
+                }
+                Spacer()
+                if !coordinator.workingContext.isEmpty {
+                    Button("Clear focus") { coordinator.clearWorkingContext() }
+                }
+            }
+            .padding(10)
+            Divider()
+
+            List {
+                Section {
+                    if environment.snapshot.apps.isEmpty {
+                        Text(ScreenController.isTrusted
+                             ? "Scanning…"
+                             : "Grant Accessibility to track open windows.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                    ForEach(environment.snapshot.apps) { app in
+                        DisclosureGroup {
+                            ForEach(app.windows) { win in
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(win.title.isEmpty ? "(untitled window)" : win.title)
+                                        .font(.callout)
+                                    if !win.tabs.isEmpty {
+                                        Text(win.tabs.map { $0 == win.activeTab ? "▸ \($0)" : $0 }.joined(separator: "  ·  "))
+                                            .font(.caption2).foregroundStyle(.secondary).lineLimit(2)
+                                    }
+                                }
+                            }
+                            if app.windows.isEmpty {
+                                Text("No windows").font(.caption2).foregroundStyle(.secondary)
+                            }
+                        } label: {
+                            HStack {
+                                Image(systemName: app.active ? "app.badge.checkmark" : "app")
+                                    .foregroundStyle(app.active ? Color.blue : Color.secondary)
+                                Text(app.name).font(.callout.weight(app.active ? .semibold : .regular))
+                                Spacer()
+                                Text("\(app.windows.count)").font(.caption2).foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                } header: {
+                    HStack {
+                        Text("Open now").font(.headline)
+                        Spacer()
+                        if let t = environment.lastRefresh {
+                            Text("updated \(t.formatted(date: .omitted, time: .standard))")
+                                .font(.caption2).foregroundStyle(.secondary)
+                        }
+                    }
+                }
+
+                Section("Recent actions (memory)") {
+                    if coordinator.recentActions.isEmpty {
+                        Text("Nothing yet").font(.caption).foregroundStyle(.secondary)
+                    }
+                    ForEach(Array(coordinator.recentActions.enumerated().reversed()), id: \.offset) { _, line in
+                        Text(line).font(.caption).textSelection(.enabled)
+                    }
+                }
+            }
+        }
     }
 }
 

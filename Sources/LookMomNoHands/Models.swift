@@ -25,6 +25,7 @@ struct ScreenAction: Decodable, Sendable {
         case openApp = "open_app"             // launch/activate an app by name
         case openURL = "open_url"             // open a website (optionally in a named browser)
         case focusWindow = "focus_window"     // raise a specific open window by its title/app
+        case switchTab = "switch_tab"         // switch to a browser tab by its title
         case keystroke                        // press a shortcut like "cmd+t"
         case dictateStart = "dictate_start"   // begin a Wisprflow-style dictation session
         case describeScreen = "describe_screen" // read/answer about what's on screen (vision)
@@ -234,6 +235,77 @@ struct DictationReport: Decodable, Sendable {
         case keyPoints = "key_points"
         case actionItems = "action_items"
         case transcript
+    }
+}
+
+// MARK: - Environment awareness
+
+/// A single open window (with its browser tabs, when the app exposes them).
+struct EnvWindow: Sendable, Equatable, Identifiable {
+    let app: String
+    let title: String
+    let focused: Bool          // the app's focused/main window
+    var tabs: [String] = []    // browser tabs, empty otherwise
+    var activeTab: String? = nil
+    var id: String { "\(app)›\(title)" }
+}
+
+/// One running app and its windows. Grouped from the flat window list so the
+/// planner and dashboard see the screen→app→window→tab hierarchy the user wants.
+struct EnvApp: Sendable, Equatable, Identifiable {
+    let name: String
+    let bundleID: String?
+    let active: Bool           // frontmost app
+    var windows: [EnvWindow]
+    var id: String { name }
+}
+
+/// A point-in-time picture of everything open. Rebuilt on a timer so the app
+/// "knows" what's available even when it isn't actively listening.
+struct EnvSnapshot: Sendable, Equatable {
+    var apps: [EnvApp] = []
+
+    /// Compact rendering for the planner. Capped — this rides on the latency-
+    /// critical command path, so a machine with 30 apps open can't bloat the prompt.
+    var promptText: String {
+        guard !apps.isEmpty else { return "" }
+        var s = "Open apps and windows right now:"
+        for app in apps.prefix(14) {
+            s += "\n- \(app.name)\(app.active ? " (frontmost)" : "")"
+            for w in app.windows.prefix(8) where !w.title.isEmpty {
+                s += "\n    • \(w.title.prefix(100))\(w.focused ? " (focused)" : "")"
+                if !w.tabs.isEmpty {
+                    let shown = w.tabs.prefix(12).map { $0.prefix(60) }.joined(separator: " | ")
+                    s += "\n        tabs: \(shown)\(w.tabs.count > 12 ? " …+\(w.tabs.count - 12)" : "")"
+                }
+            }
+        }
+        if apps.count > 14 { s += "\n- …and \(apps.count - 14) more apps" }
+        return s
+    }
+}
+
+/// The sticky focus the user is working in: once set ("go to the X window"),
+/// every command applies here until they switch. Screen→app→window→tab.
+struct WorkingContext: Sendable, Equatable {
+    var app: String? = nil
+    var window: String? = nil
+    var tab: String? = nil
+
+    var isEmpty: Bool { app == nil && window == nil && tab == nil }
+
+    var promptText: String {
+        guard !isEmpty else { return "" }
+        var parts: [String] = []
+        if let app { parts.append("app “\(app)”") }
+        if let window { parts.append("window “\(window)”") }
+        if let tab { parts.append("tab “\(tab)”") }
+        return "Working context (act here unless I name a different target): " + parts.joined(separator: ", ") + "."
+    }
+
+    var label: String {
+        guard !isEmpty else { return "No focus set" }
+        return [app, window, tab].compactMap { $0 }.joined(separator: " › ")
     }
 }
 
