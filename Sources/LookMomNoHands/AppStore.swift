@@ -109,11 +109,36 @@ final class AppStore: ObservableObject {
         }
     }
 
+    /// Recovered-audio retention: raw mic clips are sensitive and each can be
+    /// several MB, so only the most recent few are kept.
+    private static let maxRecoveredNotes = 20
+
     /// Persists a captured clip when transcription failed, so a spoken note is
-    /// recoverable instead of silently lost. Returns the file URL.
-    func saveAudio(_ data: Data) -> URL? {
+    /// recoverable instead of silently lost. The write (potentially several MB)
+    /// runs on the io queue, not the main actor; old clips are pruned after.
+    func saveAudio(_ data: Data) {
         let url = directory.appendingPathComponent("note-\(UUID().uuidString).wav")
-        do { try data.write(to: url); return url } catch { return nil }
+        let dir = directory
+        io.async { [weak self] in
+            let ok = (try? data.write(to: url)) != nil
+            DispatchQueue.main.async { self?.log("dictation", ok ? "audio saved: \(url.lastPathComponent)" : "audio save FAILED") }
+            Self.pruneRecoveredAudio(in: dir)
+        }
+    }
+
+    nonisolated private static func pruneRecoveredAudio(in directory: URL) {
+        let fm = FileManager.default
+        guard let files = try? fm.contentsOfDirectory(
+            at: directory, includingPropertiesForKeys: [.contentModificationDateKey]) else { return }
+        let dated: [(url: URL, date: Date)] = files
+            .filter { $0.lastPathComponent.hasPrefix("note-") && $0.pathExtension == "wav" }
+            .map { ($0, (try? $0.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast) }
+        for url in recoveredNotesToPrune(dated, keep: maxRecoveredNotes) { try? fm.removeItem(at: url) }
+    }
+
+    /// Pure selection: newest `keep` are retained, the rest returned for deletion.
+    static func recoveredNotesToPrune(_ dated: [(url: URL, date: Date)], keep: Int) -> [URL] {
+        dated.sorted { $0.date > $1.date }.dropFirst(keep).map(\.url)
     }
 
     // MARK: Activity log — "ISO8601: [subsystem] message"

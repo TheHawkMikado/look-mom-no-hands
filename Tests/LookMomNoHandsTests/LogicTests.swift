@@ -290,6 +290,24 @@ final class ReportDecodingTests: XCTestCase {
     }
 }
 
+final class RecoveredAudioRetentionTests: XCTestCase {
+    private func url(_ n: Int) -> URL { URL(fileURLWithPath: "/tmp/note-\(n).wav") }
+
+    func testKeepsNewestAndPrunesRest() {
+        let base = Date(timeIntervalSince1970: 1_000_000)
+        let dated = (0..<5).map { (url($0), base.addingTimeInterval(Double($0))) } // 4 is newest
+        let prune = AppStore.recoveredNotesToPrune(dated, keep: 2)
+        // Keep the 2 newest (4, 3); prune 2, 1, 0.
+        XCTAssertEqual(Set(prune), Set([url(2), url(1), url(0)]))
+    }
+
+    func testNothingPrunedUnderCap() {
+        let base = Date(timeIntervalSince1970: 1_000_000)
+        let dated = (0..<3).map { (url($0), base.addingTimeInterval(Double($0))) }
+        XCTAssertTrue(AppStore.recoveredNotesToPrune(dated, keep: 20).isEmpty)
+    }
+}
+
 final class WavAndScribeTests: XCTestCase {
     func testWavHeaderIsCanonical() {
         let samples: [Int16] = [0, 1000, -1000, 32767, -32768]

@@ -649,18 +649,17 @@ final class AppCoordinator: ObservableObject {
             defer { self.finishProcessing(gen) }
             let text = await self.transcribed(wav: wav, fallback: appleText)
             guard !text.isEmpty else {
-                // Empty here ⟹ Apple heard nothing AND (Scribe returned nothing or
-                // failed). If we captured audio, that's a transcription failure on a
-                // real note, not silence — persist the clip so it's recoverable and
-                // surface it rather than pretending success.
-                if let wav, let url = self.store.saveAudio(wav) {
-                    self.store.log("dictation", "transcription failed — audio saved to \(url.lastPathComponent)")
-                    guard gen == self.runGeneration else { return }
-                    self.phase = .error("couldn't transcribe that note")
-                    await self.speak("Sorry, I couldn't make out that note.", gen: gen)
-                } else {
-                    self.store.log("dictation", "empty note (no transcript)")
-                }
+                // Reaching here means Apple heard nothing AND Scribe returned
+                // nothing/failed — and the outer guard guarantees a captured clip
+                // exists (empty appleText only passes with wav != nil). That's a
+                // transcription failure on a real note, so persist the clip
+                // (best-effort, recoverable) and ALWAYS surface it — never pretend
+                // success, even if the save itself fails.
+                if let wav { self.store.saveAudio(wav) }
+                guard gen == self.runGeneration else { return }
+                self.phase = .error("couldn't transcribe that note")
+                self.store.log("dictation", "transcription failed on captured audio")
+                await self.speak("Sorry, I couldn't make out that note.", gen: gen)
                 return
             }
             do {
