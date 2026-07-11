@@ -655,7 +655,7 @@ final class AppCoordinator: ObservableObject {
                 // transcription failure on a real note, so persist the clip
                 // (best-effort, recoverable) and ALWAYS surface it — never pretend
                 // success, even if the save itself fails.
-                if let wav { self.store.saveAudio(wav) }
+                if let wav { await self.store.saveAudioAndWait(wav) }
                 guard gen == self.runGeneration else { return }
                 self.phase = .error("couldn't transcribe that note")
                 self.store.log("dictation", "transcription failed on captured audio")

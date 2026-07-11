@@ -114,16 +114,18 @@ final class AppStore: ObservableObject {
     private static let maxRecoveredNotes = 20
 
     /// Persists a captured clip when transcription failed, so a spoken note is
-    /// recoverable instead of silently lost. The write (potentially several MB)
-    /// runs on the io queue, not the main actor; old clips are pruned after.
-    func saveAudio(_ data: Data) {
+    /// recoverable instead of silently lost. Awaited (so the note is durable
+    /// before the flow surfaces the error — a fire-and-forget write could be
+    /// dropped on quit) but run off the main actor (the WAV can be several MB).
+    /// Atomic so a disk-full failure leaves no partial file, and pruning runs
+    /// ONLY after a complete write so a failed/partial clip can never evict a
+    /// valid older one.
+    func saveAudioAndWait(_ data: Data) async {
         let url = directory.appendingPathComponent("note-\(UUID().uuidString).wav")
         let dir = directory
-        io.async { [weak self] in
-            let ok = (try? data.write(to: url)) != nil
-            DispatchQueue.main.async { self?.log("dictation", ok ? "audio saved: \(url.lastPathComponent)" : "audio save FAILED") }
-            Self.pruneRecoveredAudio(in: dir)
-        }
+        let ok = await Task.detached { (try? data.write(to: url, options: .atomic)) != nil }.value
+        log("dictation", ok ? "audio saved: \(url.lastPathComponent)" : "audio save FAILED")
+        if ok { await Task.detached { Self.pruneRecoveredAudio(in: dir) }.value }
     }
 
     nonisolated private static func pruneRecoveredAudio(in directory: URL) {
