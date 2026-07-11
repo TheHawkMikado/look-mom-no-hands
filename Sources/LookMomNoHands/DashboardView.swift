@@ -17,6 +17,8 @@ struct DashboardView: View {
                 .tabItem { Label("Vocabulary", systemImage: "character.book.closed") }
             ActivityTab(store: coordinator.store)
                 .tabItem { Label("Activity", systemImage: "list.bullet.rectangle") }
+            SettingsTab(coordinator: coordinator)
+                .tabItem { Label("Settings", systemImage: "gearshape") }
         }
         .frame(minWidth: 720, minHeight: 480)
     }
@@ -185,6 +187,62 @@ private struct VocabularyTab: View {
                 Text(hint).font(.caption2).foregroundStyle(.secondary)
             }
         }
+    }
+}
+
+/// All tunable behavior in one place (the menu-bar panel is space-constrained).
+/// Every control binds to a coordinator property that persists itself on change.
+private struct SettingsTab: View {
+    @ObservedObject var coordinator: AppCoordinator
+
+    private let pauseOptions: [(String, TimeInterval)] =
+        [("3 seconds", 3), ("5 seconds", 5), ("10 seconds", 10), ("30 seconds", 30), ("1 minute", 60)]
+
+    var body: some View {
+        Form {
+            Section("Speech recognition") {
+                Picker("Engine", selection: $coordinator.speechEngine) {
+                    ForEach(SpeechEngine.allCases, id: \.self) { Text($0.label).tag($0) }
+                }
+                LabeledContent("Anthropic key") { statusPill(coordinator.hasKey) }
+                LabeledContent("ElevenLabs key") { statusPill(coordinator.hasElevenLabsKey) }
+                Text("Add or change keys from the menu-bar icon.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+
+            Section("Dictation") {
+                Picker("End after pause", selection: $coordinator.dictationSilence) {
+                    ForEach(pauseOptions, id: \.1) { Text($0.0).tag($0.1) }
+                }
+                Toggle("Clean up dictated text before pasting", isOn: $coordinator.cleanUpInsertedText)
+                Picker("Push-to-dictate chord", selection: $coordinator.dictationChord) {
+                    ForEach(DictationChord.allCases, id: \.self) { Text($0.label).tag($0) }
+                }
+            }
+
+            Section("Live transcript") {
+                Text("Captures continuously and adds to the transcript about every \(Int(AppCoordinator.liveChunkSecondsForTest)) seconds, at the next natural pause.")
+                    .font(.caption).foregroundStyle(.secondary)
+                Text("Say “Mama, take notes” to start and “Mama, stop transcribing” to end — or use the Live tab.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+
+            Section("Voice control") {
+                Text("Say “Hey Mama” to start a command, “Adios Mama” to end the session.")
+                    .font(.caption).foregroundStyle(.secondary)
+                LabeledContent("Accessibility (mouse/keyboard)") { statusPill(coordinator.accessibilityTrusted) }
+                if !coordinator.accessibilityTrusted {
+                    Button("Grant Accessibility…") { coordinator.requestAccessibility() }
+                }
+            }
+        }
+        .formStyle(.grouped)
+    }
+
+    private func statusPill(_ ok: Bool) -> some View {
+        Label(ok ? "Connected" : "Not set", systemImage: ok ? "checkmark.circle.fill" : "xmark.circle")
+            .foregroundStyle(ok ? .green : .secondary)
+            .font(.caption)
     }
 }
 
