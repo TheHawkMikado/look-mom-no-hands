@@ -156,15 +156,21 @@ enum ScreenController {
         NSHomeDirectory() + "/Applications"
     ]
 
-    /// Full path to an installed .app matching a spoken name, or nil.
+    /// Full path to an installed .app matching a spoken name, or nil. Candidates
+    /// are gathered across ALL directories first so a global exact-name match wins
+    /// over a substring match that merely sits in an earlier directory (e.g. a
+    /// query for "Safari" must not pick "/Applications/Safari Technology Preview"
+    /// over the exact "/System/Applications/Safari.app").
     static func resolveAppPath(_ name: String) -> String? {
+        var candidates: [(name: String, path: String)] = []
         for dir in appDirectories {
             guard let items = try? FileManager.default.contentsOfDirectory(atPath: dir) else { continue }
-            if let match = bestAppMatch(items, query: name) {
-                return dir + "/" + match
+            for item in items where item.hasSuffix(".app") {
+                candidates.append((item, dir + "/" + item))
             }
         }
-        return nil
+        guard let match = bestAppMatch(candidates.map(\.name), query: name) else { return nil }
+        return candidates.first { $0.name == match }?.path
     }
 
     /// Picks the best ".app" filename for a query: exact stem match first, then a

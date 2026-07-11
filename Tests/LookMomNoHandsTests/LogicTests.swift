@@ -377,6 +377,15 @@ final class URLAndKeystrokeTests: XCTestCase {
         XCTAssertNil(ScreenController.bestAppMatch(apps, query: ""))
     }
 
+    func testExactMatchBeatsSubstringGlobally() {
+        // Simulates candidates gathered ACROSS directories (Safari Technology
+        // Preview from /Applications listed before exact Safari from /System).
+        // Exact stem must win regardless of list order.
+        let mixed = ["Safari Technology Preview.app", "Airmail.app", "Safari.app", "Mail.app"]
+        XCTAssertEqual(ScreenController.bestAppMatch(mixed, query: "Safari"), "Safari.app")
+        XCTAssertEqual(ScreenController.bestAppMatch(mixed, query: "Mail"), "Mail.app")
+    }
+
     func testZoomShortcutsParse() throws {
         // "zoom in/out" idioms the model is likely to emit.
         XCTAssertEqual(try XCTUnwrap(ScreenController.parseKeystroke("cmd+=")).key, 24)
