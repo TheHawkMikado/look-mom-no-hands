@@ -46,12 +46,12 @@ enum ScreenController {
         }
         switch action.kind {
         case .click:  try click(target: action.target)
-        case .type:   type(text: action.text)
+        case .type:   try type(text: action.text)
         case .scroll:
             // The direction is a typed schema field; guessing (e.g. defaulting to
             // .down) would scroll the wrong way and report success.
             guard let direction = action.direction else { throw ControlError.missingDirection }
-            scroll(direction: direction)
+            try scroll(direction: direction)
         case .openApp: openApp(named: action.target)
         case .dictateStart, .none: break // handled by the coordinator, not here
         }
@@ -62,20 +62,25 @@ enum ScreenController {
 
         let root = AXUIElementCreateApplication(app.processIdentifier)
         let needle = target.lowercased()
-        guard let element = findElement(in: root, matching: needle, depth: 0),
+        guard let element = try findElement(in: root, matching: needle, depth: 0),
               let center = center(of: element) else {
             throw ControlError.elementNotFound(target)
         }
+        // Last gate before the irreversible part: Stop mid-walk must not click.
+        try Task.checkCancellation()
         clickMouse(at: center)
     }
 
-    static func type(text: String) {
+    static func type(text: String) throws {
         guard !text.isEmpty else { return }
         let source = CGEventSource(stateID: .combinedSessionState)
         // One event pair per character, in UTF-16 units — a character above the
         // BMP (emoji, astral CJK) is a surrogate pair that must be posted whole;
         // truncating to a single unit types a garbage glyph.
         for character in text {
+            // Per-character so Stop interrupts a long paste mid-string instead of
+            // finishing it into whatever window is now focused.
+            try Task.checkCancellation()
             var units = Array(String(character).utf16)
             if let down = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: true) {
                 down.keyboardSetUnicodeString(stringLength: units.count, unicodeString: &units)
@@ -88,7 +93,8 @@ enum ScreenController {
         }
     }
 
-    static func scroll(direction: ScrollDirection) {
+    static func scroll(direction: ScrollDirection) throws {
+        try Task.checkCancellation()
         let source = CGEventSource(stateID: .combinedSessionState)
         let step: Int32 = 6
         let (dy, dx): (Int32, Int32)
@@ -112,15 +118,18 @@ enum ScreenController {
 
     // MARK: - Accessibility tree search
 
-    private static func findElement(in element: AXUIElement, matching needle: String, depth: Int) -> AXUIElement? {
+    private static func findElement(in element: AXUIElement, matching needle: String, depth: Int) throws -> AXUIElement? {
         if depth > 40 { return nil } // guard against pathological trees
+        // The walk can grind for seconds on big AX trees (browsers, Electron);
+        // checking per node is what lets Stop abandon it promptly.
+        try Task.checkCancellation()
 
         if let label = descriptiveText(of: element)?.lowercased(), label.contains(needle),
            isClickable(element) {
             return element
         }
         for child in children(of: element) {
-            if let hit = findElement(in: child, matching: needle, depth: depth + 1) { return hit }
+            if let hit = try findElement(in: child, matching: needle, depth: depth + 1) { return hit }
         }
         return nil
     }

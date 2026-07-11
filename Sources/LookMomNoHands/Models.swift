@@ -30,8 +30,24 @@ struct ScreenAction: Decodable, Sendable {
     let kind: Kind
     let target: String                  // element description or app name ("" when unused)
     let text: String                    // text to type ("" when unused)
-    let direction: ScrollDirection?     // scroll only; the tool schema requests it for scroll
+    let direction: ScrollDirection?     // scroll only; the tool schema requires it
     let confidence: Double
+
+    // Tolerant decoding: tool-use inputs aren't strictly schema-enforced server
+    // side, so a junk or empty `direction` (or a missing optional-ish field)
+    // must degrade to nil/defaults instead of failing the whole command. Only
+    // `kind` is load-bearing enough to hard-fail on.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        kind = try c.decode(Kind.self, forKey: .kind)
+        target = (try? c.decodeIfPresent(String.self, forKey: .target)) ?? ""
+        text = (try? c.decodeIfPresent(String.self, forKey: .text)) ?? ""
+        confidence = (try? c.decodeIfPresent(Double.self, forKey: .confidence)) ?? 0
+        let raw = (try? c.decodeIfPresent(String.self, forKey: .direction)) ?? nil
+        direction = raw.flatMap { ScrollDirection(rawValue: $0.lowercased()) }
+    }
+
+    private enum CodingKeys: String, CodingKey { case kind, target, text, direction, confidence }
 }
 
 enum ScrollDirection: String, Decodable, Sendable {

@@ -60,12 +60,16 @@ final class RequestShapeTests: XCTestCase {
         XCTAssertNotNil(body["tool_choice"])
     }
 
-    func testCommandSchemaRequestsScrollDirection() throws {
+    func testCommandSchemaRequiresScrollDirection() throws {
         let body = ClaudeClient.commandRequestBody(transcript: "x", model: .haiku45)
         let tools = body["tools"] as? [[String: Any]]
         let schema = tools?.first?["input_schema"] as? [String: Any]
         let properties = schema?["properties"] as? [String: Any]
         XCTAssertNotNil(properties?["direction"], "scroll direction must be a typed schema field")
+        // Without strict mode the model may omit non-required fields, and a
+        // scroll without a direction hard-fails at execution.
+        let required = schema?["required"] as? [String]
+        XCTAssertTrue(required?.contains("direction") ?? false, "direction must be required")
     }
 }
 
@@ -81,6 +85,19 @@ final class ActionDecodingTests: XCTestCase {
         let json = #"{"kind":"scroll","target":"","text":"","confidence":0.9}"#
         let action = try JSONDecoder().decode(ScreenAction.self, from: Data(json.utf8))
         XCTAssertNil(action.direction)
+    }
+
+    func testJunkDirectionDoesNotFailTheAction() throws {
+        // Tool-use inputs aren't strictly enforced server-side; a "" or garbage
+        // direction on a click must not throw the whole command into .error.
+        let empty = #"{"kind":"click","target":"send","text":"","direction":"","confidence":1.0}"#
+        let a = try JSONDecoder().decode(ScreenAction.self, from: Data(empty.utf8))
+        XCTAssertEqual(a.kind, .click)
+        XCTAssertNil(a.direction)
+
+        let mixedCase = #"{"kind":"scroll","target":"","text":"","direction":"Up","confidence":1.0}"#
+        let b = try JSONDecoder().decode(ScreenAction.self, from: Data(mixedCase.utf8))
+        XCTAssertEqual(b.direction, .up)
     }
 
     func testSnakeCaseKindsDecode() throws {

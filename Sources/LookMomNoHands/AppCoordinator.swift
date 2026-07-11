@@ -282,11 +282,14 @@ final class AppCoordinator: ObservableObject {
                     self.phase = .acting
                     // The AX tree walk + CGEvent posting is synchronous and can be
                     // slow on a complex UI — run it off the main actor so it never
-                    // stalls the event loop. AX/CGEvent APIs are thread-safe.
-                    try await Task.detached(priority: .userInitiated) {
-                        try ScreenController.perform(action)
-                    }.value
-                    try Task.checkCancellation()
+                    // stalls the event loop (a task-group child leaves the actor).
+                    // Structured, not detached: cancelling actionTask propagates
+                    // into the child, and perform() checks cancellation before
+                    // every irreversible event, so Stop halts mid-walk/mid-typing.
+                    try await withThrowingTaskGroup(of: Void.self) { group in
+                        group.addTask { try ScreenController.perform(action) }
+                        try await group.waitForAll()
+                    }
                     let outcome = "\(action.kind.rawValue) \(action.target)".trimmingCharacters(in: .whitespaces)
                     self.store.log("action", "performed: \(outcome)")
                     self.store.addTranscript(TranscriptRecord(kind: "command", transcript: text, outcome: outcome))

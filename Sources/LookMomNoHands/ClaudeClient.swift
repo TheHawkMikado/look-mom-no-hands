@@ -71,10 +71,13 @@ final class ClaudeClient: @unchecked Sendable {
                     "target": ["type": "string", "description": "UI element or app name; empty if unused"],
                     "text": ["type": "string", "description": "text to type; empty if unused"],
                     "direction": ["type": "string", "enum": ["up", "down", "left", "right"],
-                                  "description": "REQUIRED when kind is \"scroll\": which way to scroll"],
+                                  "description": "Scroll direction. For scroll this controls the action; for every other kind emit \"down\" (ignored)."],
                     "confidence": ["type": "number"]
                 ],
-                "required": ["kind", "target", "text", "confidence"]
+                // `direction` is required unconditionally: without strict mode the
+                // model may omit non-required fields, and a scroll without a
+                // direction hard-fails at execution.
+                "required": ["kind", "target", "text", "direction", "confidence"]
             ]
         ]
 

@@ -47,6 +47,10 @@ final class VoiceListener {
     // each request is independent, so ambient speech can't pile up across cycles.
     // All fields except `request` are read/written on the main queue only.
     private var committed = ""
+    // Best text seen from the CURRENT request — committed when a request dies
+    // with an error (no isFinal arrives), so a mid-dictation recognition failure
+    // doesn't drop speech the user already saw transcribed.
+    private var lastPartial = ""
 
     /// Set by the coordinator for long continuous capture (dictation). Off for
     /// standby and single commands.
@@ -66,10 +70,11 @@ final class VoiceListener {
         let format = input.outputFormat(forBus: 0)
         input.installTap(onBus: 0, bufferSize: 1024, format: format) { [weak self] buffer, _ in
             guard let self else { return }
+            // Append INSIDE the lock: swapRequest calls endAudio() under the same
+            // lock, so a buffer can never land on a request that already ended.
             self.requestLock.lock()
-            let request = self.request
+            self.request?.append(buffer)
             self.requestLock.unlock()
-            request?.append(buffer)
         }
         engine.prepare()
         do {
@@ -90,7 +95,7 @@ final class VoiceListener {
         carryForward = false
         generation += 1
         task?.cancel(); task = nil
-        swapRequest(nil)?.endAudio()
+        swapRequest(nil)
         engine.stop()
         engine.inputNode.removeTap(onBus: 0)
     }
@@ -104,12 +109,15 @@ final class VoiceListener {
         beginRequest()
     }
 
-    private func swapRequest(_ new: SFSpeechAudioBufferRecognitionRequest?) -> SFSpeechAudioBufferRecognitionRequest? {
+    /// Replaces the live request and ends the old one atomically with respect to
+    /// the tap's append — both under requestLock, so append-after-endAudio can't
+    /// interleave.
+    private func swapRequest(_ new: SFSpeechAudioBufferRecognitionRequest?) {
         requestLock.lock()
-        defer { requestLock.unlock() }
         let old = request
         request = new
-        return old
+        old?.endAudio()
+        requestLock.unlock()
     }
 
     /// Always invoked on the main queue (from start/resetUtterance, or the callback
@@ -117,13 +125,14 @@ final class VoiceListener {
     private func beginRequest() {
         generation += 1
         let gen = generation
+        lastPartial = ""
         task?.cancel(); task = nil
 
         let request = SFSpeechAudioBufferRecognitionRequest()
         request.shouldReportPartialResults = true
         request.requiresOnDeviceRecognition = true
         if !contextualPhrases.isEmpty { request.contextualStrings = contextualPhrases }
-        swapRequest(request)?.endAudio()
+        swapRequest(request)
 
         task = recognizer?.recognitionTask(with: request) { [weak self] result, error in
             // Snapshot the values off the recognition thread, then do ALL state
@@ -139,16 +148,22 @@ final class VoiceListener {
 
                 if let text {
                     self.restartDelay = 0.1
+                    self.lastPartial = text
                     self.onPartial?(self.committed + text)
                 }
 
                 // A request ends on error or when the recognizer finalizes (a pause
-                // or the ~1-minute cap). Carry a natural final result forward, then
-                // roll into a fresh request with backoff so a hard failure can't spin.
+                // or the ~1-minute cap). Carry the best text forward — the final
+                // result when there is one, the last partial when the request died
+                // with an error — then roll into a fresh request with backoff so a
+                // hard failure can't spin. Clearing lastPartial makes a stray
+                // second end-callback for the same request commit nothing.
                 if failed || isFinal {
-                    if self.carryForward, isFinal, let text, !text.isEmpty {
-                        self.committed += text + " "
+                    if self.carryForward {
+                        let segment = isFinal ? (text ?? self.lastPartial) : self.lastPartial
+                        if !segment.isEmpty { self.committed += segment + " " }
                     }
+                    self.lastPartial = ""
                     let delay = self.restartDelay
                     self.restartDelay = min(self.restartDelay * 2, 2.0)
                     DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in

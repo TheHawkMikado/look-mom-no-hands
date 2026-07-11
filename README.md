@@ -52,8 +52,9 @@ open build/LookMomNoHands.app
 
 `swift build` alone compiles/typechecks but the permission prompts and TCC grants
 need the real `.app` bundle the script produces. `swift test` runs the pure-logic
-suite in `Tests/` — it needs a full Xcode toolchain (Command Line Tools alone
-ship no XCTest).
+suite in `Tests/` — it needs the full Xcode toolchain (Command Line Tools alone
+ship no XCTest); if `xcode-select` points at the CLT, run
+`env DEVELOPER_DIR=/Applications/Xcode.app swift test`.
 
 ### First-run setup
 
