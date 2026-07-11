@@ -362,6 +362,21 @@ final class URLAndKeystrokeTests: XCTestCase {
         XCTAssertNil(ScreenController.parseKeystroke("cmd+f13")) // unmapped key
     }
 
+    func testAppNameResolvesShorthand() {
+        // Mirrors the reporter's real /Applications, incl. a longer decoy that
+        // also contains "chrome".
+        let apps = ["Google Chrome.app", "Chrome Remote Desktop Host Uninstaller.app",
+                    "Google Chrome Canary.app", "Safari.app", "Notes.app"]
+        // "chrome" → the shortest containing match (Google Chrome), not the decoy.
+        XCTAssertEqual(ScreenController.bestAppMatch(apps, query: "chrome"), "Google Chrome.app")
+        // Exact stem wins.
+        XCTAssertEqual(ScreenController.bestAppMatch(apps, query: "Safari"), "Safari.app")
+        XCTAssertEqual(ScreenController.bestAppMatch(apps, query: "SAFARI"), "Safari.app")
+        // No match → nil (caller falls back to `open -a`).
+        XCTAssertNil(ScreenController.bestAppMatch(apps, query: "Firefox"))
+        XCTAssertNil(ScreenController.bestAppMatch(apps, query: ""))
+    }
+
     func testZoomShortcutsParse() throws {
         // "zoom in/out" idioms the model is likely to emit.
         XCTAssertEqual(try XCTUnwrap(ScreenController.parseKeystroke("cmd+=")).key, 24)

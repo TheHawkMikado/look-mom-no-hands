@@ -115,8 +115,15 @@ enum ScreenController {
     }
 
     static func openApp(named name: String) throws {
-        // `open -a` resolves fuzzy app names the way Spotlight does.
-        try runOpen(["-a", name], failureName: name)
+        // `open -a` only matches the app's real name, so a spoken shorthand like
+        // "Chrome" (the app is "Google Chrome") fails. Resolve to the actual
+        // bundle by scanning the Applications folders first; fall back to letting
+        // `open -a` try if we can't find it.
+        if let path = resolveAppPath(name) {
+            try runOpen([path], failureName: name)
+        } else {
+            try runOpen(["-a", name], failureName: name)
+        }
     }
 
     static func openURL(_ raw: String, inApp app: String) throws {
@@ -131,8 +138,46 @@ enum ScreenController {
         }
         let url = normalizedURL(site)
         guard !url.isEmpty else { throw ControlError.appLaunchFailed(raw) }
-        // A named browser routes the URL there; otherwise the system default.
-        try runOpen(browser.isEmpty ? [url] : ["-a", browser, url], failureName: url)
+        // Resolve the browser name the same way ("Chrome" → "Google Chrome").
+        if browser.isEmpty {
+            try runOpen([url], failureName: url)                    // system default
+        } else if let path = resolveAppPath(browser) {
+            try runOpen(["-a", path, url], failureName: url)
+        } else {
+            try runOpen(["-a", browser, url], failureName: url)
+        }
+    }
+
+    // MARK: - App-name resolution
+
+    private static let appDirectories = [
+        "/Applications", "/Applications/Utilities",
+        "/System/Applications", "/System/Applications/Utilities",
+        NSHomeDirectory() + "/Applications"
+    ]
+
+    /// Full path to an installed .app matching a spoken name, or nil.
+    static func resolveAppPath(_ name: String) -> String? {
+        for dir in appDirectories {
+            guard let items = try? FileManager.default.contentsOfDirectory(atPath: dir) else { continue }
+            if let match = bestAppMatch(items, query: name) {
+                return dir + "/" + match
+            }
+        }
+        return nil
+    }
+
+    /// Picks the best ".app" filename for a query: exact stem match first, then a
+    /// name that contains the query ("chrome" → "Google Chrome.app"). Pure.
+    static func bestAppMatch(_ files: [String], query: String) -> String? {
+        let q = query.trimmingCharacters(in: .whitespaces).lowercased()
+        guard !q.isEmpty else { return nil }
+        let apps = files.filter { $0.hasSuffix(".app") }
+        if let exact = apps.first(where: { $0.dropLast(4).lowercased() == q }) { return exact }
+        // Prefer the shortest containing match so "Google Chrome" wins over
+        // "Google Chrome Canary" for "chrome".
+        return apps.filter { $0.dropLast(4).lowercased().contains(q) }
+                   .min { $0.count < $1.count }
     }
 
     /// Bare hostnames ("youtube.com") become https URLs; anything with a scheme
