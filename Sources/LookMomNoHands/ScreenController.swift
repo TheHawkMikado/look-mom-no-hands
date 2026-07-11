@@ -47,7 +47,7 @@ enum ScreenController {
             // and window enumeration needs AX — fail loudly instead of logging a
             // success that never happened.
             guard isTrusted else { throw ControlError.notTrusted }
-        case .openApp, .openURL, .dictateStart, .none:
+        case .openApp, .openURL, .dictateStart, .describeScreen, .none:
             break
         }
         switch action.kind {
@@ -62,7 +62,7 @@ enum ScreenController {
         case .openURL: try openURL(action.url, inApp: action.target)
         case .focusWindow: try focusWindow(matching: action.target)
         case .keystroke: try keystroke(action.keys)
-        case .dictateStart, .none: break // handled by the coordinator, not here
+        case .dictateStart, .describeScreen, .none: break // handled by the coordinator, not here
         }
     }
 

@@ -27,6 +27,7 @@ struct ScreenAction: Decodable, Sendable {
         case focusWindow = "focus_window"     // raise a specific open window by its title/app
         case keystroke                        // press a shortcut like "cmd+t"
         case dictateStart = "dictate_start"   // begin a Wisprflow-style dictation session
+        case describeScreen = "describe_screen" // read/answer about what's on screen (vision)
         case none                             // nothing actionable
     }
 

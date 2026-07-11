@@ -65,8 +65,8 @@ final class ClaudeClient: @unchecked Sendable {
             "additionalProperties": false,
             "properties": [
                 "kind": ["type": "string",
-                         "enum": ["click", "type", "scroll", "open_app", "open_url", "focus_window", "keystroke", "dictate_start", "none"]],
-                "target": ["type": "string", "description": "UI element / app name; for open_url optionally the browser; for focus_window the window description to match (e.g. \"the look-mom-no-hands VS Code\"); empty if unused"],
+                         "enum": ["click", "type", "scroll", "open_app", "open_url", "focus_window", "keystroke", "dictate_start", "describe_screen", "none"]],
+                "target": ["type": "string", "description": "UI element / app name; for open_url optionally the browser; for focus_window the window description to match (e.g. \"the look-mom-no-hands VS Code\"); for describe_screen the question to answer about the screen (empty = just describe what's shown); empty if unused"],
                 "text": ["type": "string", "description": "text to type; empty if unused"],
                 "url": ["type": "string", "description": "open_url only: the website, e.g. \"youtube.com\"; empty if unused"],
                 "keys": ["type": "string", "description": "keystroke only: shortcut like \"cmd+t\", \"cmd+shift+t\", \"enter\"; empty if unused"],
@@ -318,6 +318,30 @@ final class ClaudeClient: @unchecked Sendable {
         // which would click the display's top-left corner.
         guard hit.found, let x = hit.x, let y = hit.y else { return nil }
         return (min(max(x, 0), 1), min(max(y, 0), 1))
+    }
+
+    /// Describes or answers a question about a screenshot, phrased for text-to-speech.
+    /// This is the "read my screen" path — richer than the AX text snapshot because
+    /// it sees rendered text, images, and layout the Accessibility tree omits.
+    func describeScreen(question: String, pngBase64: String) async throws -> String {
+        let prompt = question.isEmpty
+            ? "Describe what's on this screen for someone who can't see it: the app, the main content, and anything they'd act on. Two to four sentences, conversational, for text-to-speech."
+            : "Based only on this screenshot, answer briefly and conversationally (for text-to-speech): \(question)"
+        let body: [String: Any] = [
+            "model": ClaudeModel.opus48.rawValue,
+            "max_tokens": 600,
+            "messages": [[
+                "role": "user",
+                "content": [
+                    ["type": "image", "source": ["type": "base64", "media_type": "image/png", "data": pngBase64]],
+                    ["type": "text", "text": prompt]
+                ]
+            ]]
+        ]
+        let json = try await post(body, timeout: 30)
+        try Self.checkRefusal(json)
+        guard let text = Self.firstTextBlock(json), !text.isEmpty else { throw ClaudeError.decoding("no text") }
+        return text.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private struct VisionHit: Decodable {

@@ -785,6 +785,10 @@ final class AppCoordinator: ObservableObject {
                 case .dictateStart:
                     self.beginDictation(returnTo: .command, output: .report)
                     return   // dictation owns the session now; remaining steps don't apply
+                case .describeScreen:
+                    // Writes its own transcript record (the spoken answer), so it's
+                    // not added to `performed` — that would double-log a thin record.
+                    try await self.describeScreen(question: step.target, gen: gen)
                 case .none:
                     continue
                 default:
@@ -858,6 +862,25 @@ final class AppCoordinator: ObservableObject {
             ScreenController.clickAt(point)
             store.log("vision", "clicked \"\(target)\" via screenshot at \(Int(point.x)),\(Int(point.y))")
         }
+    }
+
+    /// Screenshots the screen and speaks Claude's description/answer. Reuses the
+    /// vision capture from the click fallback; needs Screen Recording, not AX.
+    private func describeScreen(question: String, gen: Int) async throws {
+        guard let claude else { return }
+        phase = .thinking
+        guard let shot = await ScreenController.captureDisplayForFrontWindow() else {
+            await speak("I couldn't capture the screen — check Screen Recording permission.", gen: gen)
+            return
+        }
+        guard gen == runGeneration, !Task.isCancelled else { throw CancellationError() }
+        let answer = try await claude.describeScreen(question: question, pngBase64: shot.pngBase64)
+        guard gen == runGeneration, !Task.isCancelled else { throw CancellationError() }
+        store.addTranscript(TranscriptRecord(kind: "command",
+                                             transcript: question.isEmpty ? "describe screen" : question,
+                                             outcome: answer))
+        store.log("vision", "described screen (\(answer.count) chars)")
+        await speak(answer, gen: gen)
     }
 
     private static func describe(_ step: ScreenAction) -> String {

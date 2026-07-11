@@ -121,6 +121,14 @@ final class ActionDecodingTests: XCTestCase {
         XCTAssertEqual(action.kind, .dictateStart)
     }
 
+    func testDescribeScreenKindDecodes() throws {
+        // The question rides in `target`; empty means "just describe the screen".
+        let json = #"{"kind":"describe_screen","target":"what does this error say","text":"","confidence":1.0}"#
+        let action = try JSONDecoder().decode(ScreenAction.self, from: Data(json.utf8))
+        XCTAssertEqual(action.kind, .describeScreen)
+        XCTAssertEqual(action.target, "what does this error say")
+    }
+
     func testDecodeBlockUnpacksToolUse() throws {
         let json: [String: Any] = ["content": [
             ["type": "text", "text": "thinking aloud"],
