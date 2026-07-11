@@ -146,6 +146,75 @@ enum ScreenController {
         clickMouse(at: center)
     }
 
+    // MARK: - Reading the screen
+
+    struct Snapshot {
+        let app: String
+        let title: String
+        let url: String
+        let elements: [(role: String, label: String)]
+
+        /// Compact rendering for the model: what's on screen and what's clickable
+        /// (by exact label, which the click executor then resolves precisely).
+        var promptText: String {
+            var s = "On screen now: \(app)"
+            if !title.isEmpty { s += " — \(title)" }
+            if !url.isEmpty { s += " (\(url))" }
+            guard !elements.isEmpty else { return s }
+            s += "\nClickable/visible elements (to click one, emit a click step with its exact label):"
+            for e in elements {
+                let role = e.role.replacingOccurrences(of: "AX", with: "").lowercased()
+                s += "\n- \(role): \(e.label)"
+            }
+            return s
+        }
+    }
+
+    private static let interactiveRoles: Set<String> = [
+        "AXButton", "AXLink", "AXMenuItem", "AXMenuButton", "AXCheckBox", "AXRadioButton",
+        "AXTextField", "AXTextArea", "AXPopUpButton", "AXComboBox", "AXTab", "AXDisclosureTriangle"
+    ]
+
+    /// A bounded, cancellable read of the frontmost app's focused window: its
+    /// title, URL (for browsers), and the interactive elements actually present —
+    /// so the model clicks what's really there instead of guessing.
+    static func focusedWindowSnapshot(maxElements: Int = 60) throws -> Snapshot? {
+        guard isTrusted, let app = NSWorkspace.shared.frontmostApplication,
+              let name = app.localizedName else { return nil }
+        let axApp = AXUIElementCreateApplication(app.processIdentifier)
+        var winRef: CFTypeRef?
+        var window: AXUIElement?
+        if AXUIElementCopyAttributeValue(axApp, kAXFocusedWindowAttribute as CFString, &winRef) == .success {
+            window = (winRef as! AXUIElement?)
+        }
+        if window == nil, AXUIElementCopyAttributeValue(axApp, kAXMainWindowAttribute as CFString, &winRef) == .success {
+            window = (winRef as! AXUIElement?)
+        }
+        guard let window else { return Snapshot(app: name, title: "", url: "", elements: []) }
+
+        var elements: [(role: String, label: String)] = []
+        var url = ""
+        try collectElements(window, depth: 0, cap: maxElements, into: &elements, url: &url)
+        return Snapshot(app: name, title: string(window, kAXTitleAttribute) ?? "", url: url, elements: elements)
+    }
+
+    private static func collectElements(_ element: AXUIElement, depth: Int, cap: Int,
+                                        into elements: inout [(role: String, label: String)],
+                                        url: inout String) throws {
+        if elements.count >= cap || depth > 30 { return }
+        try Task.checkCancellation()
+        if let role = string(element, kAXRoleAttribute) {
+            if role == "AXWebArea", url.isEmpty, let u = string(element, kAXURLAttribute as String) { url = u }
+            if interactiveRoles.contains(role), let label = descriptiveText(of: element), !label.isEmpty {
+                elements.append((role, String(label.prefix(80))))
+            }
+        }
+        for child in children(of: element) {
+            if elements.count >= cap { return }
+            try collectElements(child, depth: depth + 1, cap: cap, into: &elements, url: &url)
+        }
+    }
+
     static func type(text: String) throws {
         guard !text.isEmpty else { return }
         let source = CGEventSource(stateID: .combinedSessionState)

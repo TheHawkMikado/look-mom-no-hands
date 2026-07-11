@@ -535,7 +535,18 @@ final class AppCoordinator: ObservableObject {
                 try Task.checkCancellation()
                 self.lastCommand = text
                 self.store.log("asr", answeringClarification ? "answer: \(text)" : "command: \(text)")
-                let plan = try await claude.parsePlan(text, dialogue: priorDialogue, vocabulary: self.vocabulary.promptContext)
+                // Read the actual screen only when the command likely acts on it —
+                // simple "open X" commands skip the (slower) AX walk. Off the main
+                // actor; a failure just falls back to no screen context.
+                var screen = ""
+                if Self.needsScreenContext(text) {
+                    screen = (try? await Task.detached(priority: .userInitiated) {
+                        try ScreenController.focusedWindowSnapshot()?.promptText
+                    }.value) ?? ""
+                    if !screen.isEmpty { self.store.log("screen", "read \(screen.split(separator: "\n").count - 1) elements") }
+                }
+                let plan = try await claude.parsePlan(text, dialogue: priorDialogue,
+                                                      vocabulary: self.vocabulary.promptContext, screen: screen)
                 try Task.checkCancellation()
                 let ms = Int(Date().timeIntervalSince(startedAt) * 1000)
                 self.store.log("claude", "plan: \(plan.steps.count) step(s)\(plan.clarify != nil ? " + question" : "") conf=\(plan.confidence) (\(ms)ms)")
@@ -668,6 +679,19 @@ final class AppCoordinator: ObservableObject {
         speaking = false
         freshUtterance()   // drop anything heard while talking
         lastHeardAt = Date()
+    }
+
+    // Verbs/deictics that mean "act on what's on screen" — gate the AX snapshot
+    // on these so "open YouTube" stays fast but "click the compose button" reads
+    // the page first.
+    nonisolated static let screenIntentWords = [
+        "click", "press", "tap", "select", "choose", "read", "what", "which",
+        "this", "that", "here", "page", "screen", "button", "link", "field",
+        "check", "toggle", "close the", "scroll", "fill", "submit", "on the",
+    ]
+    nonisolated static func needsScreenContext(_ text: String) -> Bool {
+        let t = text.lowercased()
+        return screenIntentWords.contains { t.contains($0) }
     }
 
     nonisolated static func strippingPhrases(_ phrases: [String], from text: String) -> String {

@@ -48,9 +48,9 @@ final class ClaudeClient: @unchecked Sendable {
     /// `dialogue` carries a pending clarification exchange: earlier turns as
     /// (role, content) pairs, ending before the current transcript.
     func parsePlan(_ transcript: String, dialogue: [(role: String, content: String)] = [],
-                   vocabulary: String = "") async throws -> ActionPlan {
+                   vocabulary: String = "", screen: String = "") async throws -> ActionPlan {
         let json = try await post(Self.planRequestBody(transcript: transcript, dialogue: dialogue,
-                                                        vocabulary: vocabulary, model: .haiku45), timeout: 20)
+                                                        vocabulary: vocabulary, screen: screen, model: .haiku45), timeout: 20)
         try Self.checkRefusal(json)
         return try Self.decodeBlock(json, blockType: "tool_use", payloadKey: "input")
     }
@@ -58,6 +58,7 @@ final class ClaudeClient: @unchecked Sendable {
     static func planRequestBody(transcript: String,
                                 dialogue: [(role: String, content: String)] = [],
                                 vocabulary: String = "",
+                                screen: String = "",
                                 model: ClaudeModel) -> [String: Any] {
         let step: [String: Any] = [
             "type": "object",
@@ -137,7 +138,8 @@ final class ClaudeClient: @unchecked Sendable {
             "tool_choice": ["type": "tool", "name": "emit_plan"],
             "messages": messages
         ]
-        if !vocabulary.isEmpty { body["system"] = vocabulary }
+        let system = [vocabulary, screen].filter { !$0.isEmpty }.joined(separator: "\n\n")
+        if !system.isEmpty { body["system"] = system }
         return body
     }
 

@@ -461,6 +461,30 @@ final class URLAndKeystrokeTests: XCTestCase {
         XCTAssertNil(ScreenController.parseKeystroke("cmd+f13")) // unmapped key
     }
 
+    func testSnapshotPromptText() {
+        let snap = ScreenController.Snapshot(
+            app: "Google Chrome", title: "YouTube", url: "https://youtube.com",
+            elements: [("AXButton", "Search"), ("AXLink", "Home")])
+        let s = snap.promptText
+        XCTAssertTrue(s.contains("Google Chrome — YouTube (https://youtube.com)"))
+        XCTAssertTrue(s.contains("button: Search"))
+        XCTAssertTrue(s.contains("link: Home"))
+    }
+
+    func testSnapshotWithNoElements() {
+        let snap = ScreenController.Snapshot(app: "Finder", title: "Downloads", url: "", elements: [])
+        XCTAssertEqual(snap.promptText, "On screen now: Finder — Downloads")
+    }
+
+    func testScreenIntentHeuristic() {
+        XCTAssertTrue(AppCoordinator.needsScreenContext("click the compose button"))
+        XCTAssertTrue(AppCoordinator.needsScreenContext("what's on this page"))
+        XCTAssertTrue(AppCoordinator.needsScreenContext("scroll down and press send"))
+        // Simple app/url commands skip the AX walk.
+        XCTAssertFalse(AppCoordinator.needsScreenContext("open YouTube in Chrome"))
+        XCTAssertFalse(AppCoordinator.needsScreenContext("go to google.com"))
+    }
+
     func testWindowMatchPicksBestByTitle() {
         // The reporter's real scenario: several VS Code windows, target one by name.
         let labels = [
