@@ -729,6 +729,27 @@ enum ScreenController {
         return (png, CGDisplayBounds(display.displayID))
     }
 
+    /// The focused window frame of a given app (or the frontmost app), in AX/Quartz
+    /// global coordinates (top-left origin). Used to anchor the recorder pill to the
+    /// window the user is working in. nil if the app has no readable focused window.
+    static func windowFrame(for app: NSRunningApplication?) -> CGRect? {
+        guard let app else { return nil }
+        let axApp = AXUIElementCreateApplication(app.processIdentifier)
+        var winRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(axApp, kAXFocusedWindowAttribute as CFString, &winRef) == .success,
+              let ref = winRef, CFGetTypeID(ref) == AXUIElementGetTypeID() else { return nil }
+        let window = ref as! AXUIElement
+        var posRef: CFTypeRef?
+        var sizeRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(window, kAXPositionAttribute as CFString, &posRef) == .success,
+              AXUIElementCopyAttributeValue(window, kAXSizeAttribute as CFString, &sizeRef) == .success else { return nil }
+        var pos = CGPoint.zero, size = CGSize.zero
+        AXValueGetValue(posRef as! AXValue, .cgPoint, &pos)
+        AXValueGetValue(sizeRef as! AXValue, .cgSize, &size)
+        guard size.width > 1, size.height > 1 else { return nil }
+        return CGRect(origin: pos, size: size)
+    }
+
     /// Global-coordinate center of the frontmost app's focused window, for choosing
     /// which display to screenshot. AX positions are already in Quartz global space.
     private static func frontWindowCenter() -> CGPoint? {

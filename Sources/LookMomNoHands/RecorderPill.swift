@@ -15,12 +15,14 @@ final class RecorderMeter: ObservableObject {
 @MainActor
 final class RecorderPill {
     private var panel: NSPanel?
-    private static let originKey = "recorderPillOrigin"
 
-    func show(coordinator: AppCoordinator) {
+    /// Anchors to the top-right of `windowFrameAX` (AX/top-left coords) — the window
+    /// the user is working in — then stays draggable. Falls back to the screen's
+    /// top-right if no window frame is available.
+    func show(coordinator: AppCoordinator, near windowFrameAX: CGRect?) {
         if panel == nil { panel = makePanel(coordinator: coordinator) }
         guard let panel else { return }
-        positionIfNeeded(panel)
+        panel.setFrameOrigin(topRightOrigin(pillSize: panel.frame.size, windowAX: windowFrameAX))
         panel.orderFrontRegardless()   // show without activating our app
     }
 
@@ -35,34 +37,31 @@ final class RecorderPill {
         panel.backgroundColor = .clear
         panel.isOpaque = false
         panel.hasShadow = true
-        panel.isMovableByWindowBackground = true
+        panel.isMovableByWindowBackground = true   // draggable
         panel.hidesOnDeactivate = false
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
         let host = NSHostingView(rootView: RecorderPillView(coordinator: coordinator, meter: coordinator.meter))
         host.frame = panel.contentView?.bounds ?? .zero
         host.autoresizingMask = [.width, .height]
         panel.contentView = host
-        // Persist the position whenever the user drags it.
-        NotificationCenter.default.addObserver(forName: NSWindow.didMoveNotification, object: panel, queue: .main) { _ in
-            MainActor.assumeIsolated {
-                let o = panel.frame.origin
-                UserDefaults.standard.set([o.x, o.y], forKey: Self.originKey)
-            }
-        }
         return panel
     }
 
-    private func positionIfNeeded(_ panel: NSPanel) {
-        if let saved = UserDefaults.standard.array(forKey: Self.originKey) as? [CGFloat], saved.count == 2 {
-            panel.setFrameOrigin(NSPoint(x: saved[0], y: saved[1]))
-            return
+    /// AX rects use a top-left origin measured from the primary display; NSWindow
+    /// origins are bottom-left in Cocoa space. Convert, then place the pill just
+    /// inside the window's top-right corner.
+    private func topRightOrigin(pillSize: NSSize, windowAX: CGRect?) -> NSPoint {
+        let margin: CGFloat = 10
+        let primaryHeight = NSScreen.screens.first { $0.frame.origin == .zero }?.frame.height
+            ?? NSScreen.main?.frame.height ?? 0
+        if let w = windowAX {
+            let x = w.maxX - pillSize.width - margin
+            let y = (primaryHeight - w.minY) - pillSize.height - margin   // window top edge, in Cocoa
+            return NSPoint(x: x, y: y)
         }
-        // Default: bottom-center of the main screen.
-        guard let screen = NSScreen.main else { return }
-        let f = panel.frame
-        let x = screen.visibleFrame.midX - f.width / 2
-        let y = screen.visibleFrame.minY + 90
-        panel.setFrameOrigin(NSPoint(x: x, y: y))
+        // No window: top-right of the main screen's visible area.
+        guard let vf = NSScreen.main?.visibleFrame else { return .zero }
+        return NSPoint(x: vf.maxX - pillSize.width - margin, y: vf.maxY - pillSize.height - margin)
     }
 }
 

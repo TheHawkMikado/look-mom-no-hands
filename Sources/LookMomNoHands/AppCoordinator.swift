@@ -616,7 +616,10 @@ final class AppCoordinator: ObservableObject {
         listener.metering = true
         armCaptureForCurrentMode()
         startTicker()
-        pill.show(coordinator: self)
+        // Anchor the pill to the window the user is working in (not our own app,
+        // which may be frontmost if they clicked the menu).
+        let anchorApp = insertTargetApp ?? lastExternalApp ?? NSWorkspace.shared.frontmostApplication
+        pill.show(coordinator: self, near: ScreenController.windowFrame(for: anchorApp))
         store.log("recorder", "started (\(output))")
     }
 
