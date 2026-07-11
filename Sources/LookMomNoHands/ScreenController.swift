@@ -14,6 +14,7 @@ enum ScreenController {
         case noFrontApp
         case missingDirection
         case appLaunchFailed(String)
+        case unknownKeystroke(String)
 
         var description: String {
             switch self {
@@ -22,6 +23,7 @@ enum ScreenController {
             case .noFrontApp: return "no frontmost application"
             case .missingDirection: return "scroll command arrived without a direction"
             case .appLaunchFailed(let n): return "couldn't open “\(n)”"
+            case .unknownKeystroke(let k): return "don't know the shortcut “\(k)”"
             }
         }
     }
@@ -39,11 +41,11 @@ enum ScreenController {
 
     static func perform(_ action: ScreenAction) throws {
         switch action.kind {
-        case .click, .type, .scroll:
+        case .click, .type, .scroll, .keystroke:
             // macOS silently discards synthetic events from untrusted processes —
             // fail loudly instead of logging a success that never happened.
             guard isTrusted else { throw ControlError.notTrusted }
-        case .openApp, .dictateStart, .none:
+        case .openApp, .openURL, .dictateStart, .none:
             break
         }
         switch action.kind {
@@ -55,6 +57,8 @@ enum ScreenController {
             guard let direction = action.direction else { throw ControlError.missingDirection }
             try scroll(direction: direction)
         case .openApp: try openApp(named: action.target)
+        case .openURL: try openURL(action.url, inApp: action.target)
+        case .keystroke: try keystroke(action.keys)
         case .dictateStart, .none: break // handled by the coordinator, not here
         }
     }
@@ -111,32 +115,97 @@ enum ScreenController {
     }
 
     static func openApp(named name: String) throws {
-        // Launching an app is as irreversible as a click — a cancelled (stopped)
+        // `open -a` resolves fuzzy app names the way Spotlight does.
+        try runOpen(["-a", name], failureName: name)
+    }
+
+    static func openURL(_ raw: String, inApp app: String) throws {
+        let url = normalizedURL(raw)
+        guard !url.isEmpty else { throw ControlError.appLaunchFailed(raw) }
+        // A named browser routes the URL there; otherwise the system default.
+        try runOpen(app.isEmpty ? [url] : ["-a", app, url], failureName: url)
+    }
+
+    /// Bare hostnames ("youtube.com") become https URLs; anything with a scheme
+    /// passes through untouched.
+    static func normalizedURL(_ raw: String) -> String {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return "" }
+        return trimmed.contains("://") ? trimmed : "https://" + trimmed
+    }
+
+    private static func runOpen(_ arguments: [String], failureName: String) throws {
+        // Launching is as irreversible as a click — a cancelled (stopped)
         // command must not do it, and a failed launch must surface, not vanish.
         try Task.checkCancellation()
-        // `open -a` resolves fuzzy app names the way Spotlight does.
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: "/usr/bin/open")
-        proc.arguments = ["-a", name]
+        proc.arguments = arguments
         proc.standardError = Pipe()   // keep `open`'s complaint off our stderr
         try proc.run()
-        // run() only proves `open` spawned — an unresolvable app name exits
-        // nonzero afterward. Poll instead of waitUntilExit(): `open` normally
-        // exits in tens of milliseconds, but a LaunchServices stall must not
-        // wedge the session's command processing, and Stop (cancellation) must
-        // be able to abandon the wait. Runs off the main actor, so the sleeps
-        // block no UI.
+        // run() only proves `open` spawned — an unresolvable name exits nonzero
+        // afterward. Poll instead of waitUntilExit(): `open` normally exits in
+        // tens of milliseconds, but a LaunchServices stall must not wedge the
+        // session's command processing, and Stop (cancellation) must be able to
+        // abandon the wait. Runs off the main actor, so the sleeps block no UI.
         // Monotonic deadline — wall-clock (Date) can step backward under NTP.
         let deadline = DispatchTime.now() + .seconds(10)
         while proc.isRunning {
             if Task.isCancelled || DispatchTime.now() > deadline {
                 proc.terminate()
-                throw ControlError.appLaunchFailed(name)
+                throw ControlError.appLaunchFailed(failureName)
             }
             usleep(50_000)
         }
-        guard proc.terminationStatus == 0 else { throw ControlError.appLaunchFailed(name) }
+        guard proc.terminationStatus == 0 else { throw ControlError.appLaunchFailed(failureName) }
     }
+
+    // MARK: - Keystrokes
+
+    static func keystroke(_ spec: String) throws {
+        guard let combo = parseKeystroke(spec) else { throw ControlError.unknownKeystroke(spec) }
+        try Task.checkCancellation()
+        let source = CGEventSource(stateID: .combinedSessionState)
+        if let down = CGEvent(keyboardEventSource: source, virtualKey: combo.key, keyDown: true) {
+            down.flags = combo.flags
+            down.post(tap: .cghidEventTap)
+        }
+        if let up = CGEvent(keyboardEventSource: source, virtualKey: combo.key, keyDown: false) {
+            up.flags = combo.flags
+            up.post(tap: .cghidEventTap)
+        }
+    }
+
+    /// "cmd+shift+t" → (keycode for t, [.maskCommand, .maskShift]). Returns nil
+    /// for anything it can't map — the caller reports it rather than guessing.
+    static func parseKeystroke(_ spec: String) -> (key: CGKeyCode, flags: CGEventFlags)? {
+        var flags: CGEventFlags = []
+        var key: CGKeyCode?
+        for part in spec.lowercased().split(separator: "+").map({ $0.trimmingCharacters(in: .whitespaces) }) {
+            switch part {
+            case "cmd", "command", "meta": flags.insert(.maskCommand)
+            case "shift": flags.insert(.maskShift)
+            case "opt", "option", "alt": flags.insert(.maskAlternate)
+            case "ctrl", "control": flags.insert(.maskControl)
+            default:
+                guard let code = keyCodes[part] else { return nil }
+                key = code
+            }
+        }
+        guard let key else { return nil }
+        return (key, flags)
+    }
+
+    // US-ANSI virtual keycodes (kVK_*) for the keys shortcuts actually use.
+    private static let keyCodes: [String: CGKeyCode] = [
+        "a": 0, "s": 1, "d": 2, "f": 3, "h": 4, "g": 5, "z": 6, "x": 7, "c": 8, "v": 9,
+        "b": 11, "q": 12, "w": 13, "e": 14, "r": 15, "y": 16, "t": 17,
+        "1": 18, "2": 19, "3": 20, "4": 21, "6": 22, "5": 23, "9": 25, "7": 26, "8": 28, "0": 29,
+        "o": 31, "u": 32, "i": 34, "p": 35, "l": 37, "j": 38, "k": 40, "n": 45, "m": 46,
+        "return": 36, "enter": 36, "tab": 48, "space": 49, "esc": 53, "escape": 53,
+        "delete": 51, "backspace": 51,
+        "left": 123, "right": 124, "down": 125, "up": 126
+    ]
 
     // MARK: - Accessibility tree search
 

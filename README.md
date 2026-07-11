@@ -11,10 +11,18 @@ through the **Anthropic Messages API** (Claude).
 
 1. **Wake word** — continuous on-device listening for "Hey Mama".
 2. **Two capture modes** after waking:
-   - **Command** → Claude parses it into a screen action (click / type / scroll /
-     open app) and it's executed via the Accessibility API + CGEvent.
+   - **Command** → Claude turns a spoken request into an ordered **plan** of
+     steps — open app, open URL (in a named browser or the default), keystroke
+     shortcut (e.g. new tab = ⌘T), click / type / scroll — executed via the
+     Accessibility API + CGEvent. One request can carry several action items.
    - **Dictation** → say "take a note"; it records until you pause, then Claude
      returns a **TLDR summary + action items + cleaned transcript** (Wisprflow-style).
+3. **Clarifies when unsure** — if a request is ambiguous, the app doesn't guess:
+   it shows a question with clickable options in the menu-bar panel and speaks
+   it aloud. Answer by clicking or just by saying your answer.
+4. **Speaks back** — spoken confirmations and questions via **ElevenLabs** when
+   you add its API key (natural voice, low latency), or the built-in macOS voice
+   otherwise. Recognition is muted while it talks so it never hears itself.
 
 ## Architecture
 
@@ -23,8 +31,9 @@ through the **Anthropic Messages API** (Claude).
 | [LookMomNoHandsApp.swift](Sources/LookMomNoHands/LookMomNoHandsApp.swift) | `@main` menu-bar app + panel UI |
 | [AppCoordinator.swift](Sources/LookMomNoHands/AppCoordinator.swift) | Orchestrates wake → transcribe → Claude → act |
 | [VoiceListener.swift](Sources/LookMomNoHands/VoiceListener.swift) | Single always-on speech pipeline (wake word + transcription) |
-| [ClaudeClient.swift](Sources/LookMomNoHands/ClaudeClient.swift) | Messages API: forced-tool routing + json_schema report |
-| [ScreenController.swift](Sources/LookMomNoHands/ScreenController.swift) | Accessibility tree search + CGEvent click/type/scroll |
+| [ClaudeClient.swift](Sources/LookMomNoHands/ClaudeClient.swift) | Messages API: forced-tool plan routing + json_schema report |
+| [ScreenController.swift](Sources/LookMomNoHands/ScreenController.swift) | Accessibility search + CGEvent click/type/scroll/keystroke, open app/URL |
+| [Speaker.swift](Sources/LookMomNoHands/Speaker.swift) | Spoken replies: ElevenLabs TTS with system-voice fallback |
 | [AppStore.swift](Sources/LookMomNoHands/AppStore.swift) | Disk-backed transcript store + activity log |
 | [DashboardView.swift](Sources/LookMomNoHands/DashboardView.swift) | Dashboard window: transcripts + activity tabs |
 | [Models.swift](Sources/LookMomNoHands/Models.swift) | Shared value types + frozen app-identity strings |
@@ -62,8 +71,12 @@ ship no XCTest); if `xcode-select` points at the CLT, run
    Or, for dev, export `LMNH_ANTHROPIC_API_KEY` before launching.
 2. Grant permissions in **System Settings → Privacy & Security**:
    - **Microphone** and **Speech Recognition** — prompted on first launch.
-   - **Accessibility** — add the app manually; required to click and type.
-3. Click **Start listening**, say the wake word, then speak a command.
+   - **Accessibility** — add the app manually; required to click, type, and
+     send keystroke shortcuts. (Opening apps and URLs works without it.)
+3. Optional: add an **ElevenLabs API key** in the panel (or export
+   `LMNH_ELEVENLABS_API_KEY`) for natural spoken replies; without it the app
+   uses the system voice. Override the voice with `LMNH_ELEVENLABS_VOICE`.
+4. Click **Start listening**, say the wake word, then speak a request.
 
 ## Model choices
 

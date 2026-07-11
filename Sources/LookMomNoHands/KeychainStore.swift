@@ -5,9 +5,11 @@ import Security
 /// UserDefaults or the app bundle — it would ship in plaintext.
 enum KeychainStore {
     private static let service = AppIdentity.keychainService
-    private static let account = "api-key"
+    /// Anthropic key lives under the historical default account; other
+    /// providers (ElevenLabs) get their own account under the same service.
+    static let defaultAccount = "api-key"
 
-    static func save(_ key: String) {
+    static func save(_ key: String, account: String = defaultAccount) {
         let data = Data(key.utf8)
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
@@ -20,9 +22,11 @@ enum KeychainStore {
         SecItemAdd(add as CFDictionary, nil)
     }
 
-    static func load() -> String? {
-        // 1. The item this app writes via setAPIKey.
+    static func load(account: String = defaultAccount) -> String? {
+        // 1. The item this app writes via save().
         if let key = read(service: service, account: account) { return key }
+        // The manual-item fallbacks below are Anthropic-specific.
+        guard account == defaultAccount else { return nil }
 
         // 2. Fallback: an item added by hand in Keychain Access. When you create a
         //    password item there, the "Keychain Item Name" becomes the service and

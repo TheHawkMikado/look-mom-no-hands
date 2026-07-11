@@ -15,10 +15,12 @@ final class AppCoordinator: ObservableObject {
     @Published var phase: AppPhase = .idle
     @Published var lastCommand: String = ""
     @Published var lastReport: DictationReport?
+    @Published var pendingClarification: Clarification?   // drives the on-screen ask panel
     @Published var isRunning = false          // app-level on/off (Start/Stop button)
     @Published var micAuthorized = false
     @Published var speechAuthorized = false
     @Published var accessibilityTrusted = false
+    @Published var hasElevenLabsKey = false
 
     /// Wake session open. Derived from `mode` so it can never desync; every mode
     /// change is accompanied by a `phase` write, which publishes the update.
@@ -29,6 +31,7 @@ final class AppCoordinator: ObservableObject {
     private enum Mode { case standby, command, dictation }
     private var mode: Mode = .standby
     private var processing = false            // Claude call / action in flight
+    private var speaking = false             // TTS playing; recognition is ignored so we don't hear ourselves
     private var utterance = ""                // current partial transcript
     private var lastHeardAt = Date()
     private var sessionIdleSince = Date()
@@ -36,11 +39,17 @@ final class AppCoordinator: ObservableObject {
     private var ticker: Timer?
     private var actionTask: Task<Void, Never>?   // in-flight parse/act; cancelled by stop()
     private var runGeneration = 0                // stale task completions must not touch newer state
+    // The pending clarification exchange (question + prior turns), so the user's
+    // next utterance is interpreted as an answer with full context.
+    private var dialogue: [(role: String, content: String)] = []
 
     private let listener = VoiceListener()
     private var claude: ClaudeClient?
+    private let speaker = Speaker()
 
-    private let commandSilence: TimeInterval = 1.2
+    // Longer than the old 1.2s: a spoken request can be several action items, so
+    // don't cut it off on a mid-sentence breath.
+    private let commandSilence: TimeInterval = 2.2
     private let dictationSilence: TimeInterval = 3.0
     private let dictationMax: TimeInterval = 180
     private let sessionIdleLimit: TimeInterval = 90   // quiet this long → standby
@@ -79,21 +88,33 @@ final class AppCoordinator: ObservableObject {
 
     // MARK: API key
 
+    private static let elevenLabsAccount = "elevenlabs-api-key"
+
     private func loadKey() {
         if let env = ProcessInfo.processInfo.environment["LMNH_ANTHROPIC_API_KEY"] {
             claude = ClaudeClient(apiKey: env)
             store.log("app", "API key loaded from env")
-            return
         }
+        if let env = ProcessInfo.processInfo.environment["LMNH_ELEVENLABS_API_KEY"] {
+            speaker.elevenLabsKey = env
+            hasElevenLabsKey = true
+        }
+        let needsAnthropic = claude == nil
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            let key = KeychainStore.load()
+            let anthropic = needsAnthropic ? KeychainStore.load() : nil
+            let eleven = KeychainStore.load(account: Self.elevenLabsAccount)
             DispatchQueue.main.async {
                 guard let self else { return }
-                if let key {
-                    self.claude = ClaudeClient(apiKey: key)
+                if let anthropic {
+                    self.claude = ClaudeClient(apiKey: anthropic)
                     self.store.log("app", "API key loaded from keychain")
-                } else {
+                } else if needsAnthropic {
                     self.store.log("app", "no keychain key — enter it in the panel")
+                }
+                if let eleven, !self.hasElevenLabsKey {
+                    self.speaker.elevenLabsKey = eleven
+                    self.hasElevenLabsKey = true
+                    self.store.log("app", "ElevenLabs key loaded — spoken replies on")
                 }
             }
         }
@@ -103,6 +124,14 @@ final class AppCoordinator: ObservableObject {
         KeychainStore.save(key)
         claude = ClaudeClient(apiKey: key)
         store.log("app", "API key saved")
+    }
+
+    func setElevenLabsKey(_ key: String) {
+        let trimmed = key.trimmingCharacters(in: .whitespacesAndNewlines)
+        KeychainStore.save(trimmed, account: Self.elevenLabsAccount)
+        speaker.elevenLabsKey = trimmed
+        hasElevenLabsKey = !trimmed.isEmpty
+        store.log("app", "ElevenLabs key saved — spoken replies on")
     }
 
     var hasKey: Bool { claude != nil }
@@ -138,7 +167,11 @@ final class AppCoordinator: ObservableObject {
     func stop() {
         runGeneration += 1
         actionTask?.cancel(); actionTask = nil
+        speaker.cancel()
         processing = false
+        speaking = false
+        pendingClarification = nil
+        dialogue = []
         isRunning = false
         mode = .standby
         stopTicker()
@@ -164,6 +197,9 @@ final class AppCoordinator: ObservableObject {
 
     private func handlePartial(_ text: String) {
         guard isRunning else { return }
+        // Ignore audio captured while we're talking — otherwise the app hears its
+        // own spoken reply and treats it as a command.
+        guard !speaking else { return }
         utterance = text
         lastHeardAt = Date()
         guard !processing else { return }
@@ -227,8 +263,24 @@ final class AppCoordinator: ObservableObject {
         store.log("wake", "session ended (\(reason)) — back to standby")
         mode = .standby
         phase = .listeningWake
+        pendingClarification = nil
+        dialogue = []
         freshUtterance()
         stopTicker()
+    }
+
+    /// The user clicked an option in the on-screen clarification panel — treat it
+    /// exactly as if they'd spoken it.
+    func answerClarification(_ option: String) {
+        guard isRunning, mode == .command, !processing else { return }
+        utterance = option
+        finalizeCommand()
+    }
+
+    func dismissClarification() {
+        pendingClarification = nil
+        dialogue = []
+        if mode == .command, !processing { phase = .capturingCommand }
     }
 
     private func freshUtterance() {
@@ -244,7 +296,12 @@ final class AppCoordinator: ObservableObject {
         guard gen == runGeneration else { return }
         processing = false
         guard isRunning, mode == .command else { return }
-        if case .error = phase {} else { phase = .capturingCommand }
+        // Preserve an error (so the user sees it) or a pending question (so we
+        // keep waiting for the answer); otherwise return to plain listening.
+        switch phase {
+        case .error, .clarifying: break
+        default: phase = .capturingCommand
+        }
         // Discard anything heard while we were acting (e.g. our own typing sounds).
         freshUtterance()
         sessionIdleSince = Date()
@@ -260,40 +317,25 @@ final class AppCoordinator: ObservableObject {
         guard let claude else { phase = .error("No API key set"); return }
 
         lastCommand = text
-        store.log("asr", "command: \(text)")
+        // A spoken answer clears the on-screen question — from here it's just
+        // another turn in the dialogue.
+        let answeringClarification = pendingClarification != nil
+        pendingClarification = nil
+        store.log("asr", answeringClarification ? "answer: \(text)" : "command: \(text)")
         processing = true
         phase = .thinking
         let startedAt = Date()
         let gen = runGeneration
+        let priorDialogue = dialogue
 
         actionTask = Task {
             defer { self.finishProcessing(gen) }
             do {
-                let action = try await claude.parseCommand(text)
+                let plan = try await claude.parsePlan(text, dialogue: priorDialogue)
                 try Task.checkCancellation()
                 let ms = Int(Date().timeIntervalSince(startedAt) * 1000)
-                self.store.log("claude", "action=\(action.kind.rawValue) target=\"\(action.target)\" conf=\(action.confidence) (\(ms)ms)")
-                switch action.kind {
-                case .dictateStart:
-                    self.beginDictation()
-                case .none:
-                    self.store.log("action", "nothing actionable — still listening")
-                default:
-                    self.phase = .acting
-                    // The AX tree walk + CGEvent posting is synchronous and can be
-                    // slow on a complex UI — run it off the main actor so it never
-                    // stalls the event loop (a task-group child leaves the actor).
-                    // Structured, not detached: cancelling actionTask propagates
-                    // into the child, and perform() checks cancellation before
-                    // every irreversible event, so Stop halts mid-walk/mid-typing.
-                    try await withThrowingTaskGroup(of: Void.self) { group in
-                        group.addTask { try ScreenController.perform(action) }
-                        try await group.waitForAll()
-                    }
-                    let outcome = "\(action.kind.rawValue) \(action.target)".trimmingCharacters(in: .whitespaces)
-                    self.store.log("action", "performed: \(outcome)")
-                    self.store.addTranscript(TranscriptRecord(kind: "command", transcript: text, outcome: outcome))
-                }
+                self.store.log("claude", "plan: \(plan.steps.count) step(s)\(plan.clarify != nil ? " + question" : "") conf=\(plan.confidence) (\(ms)ms)")
+                try await self.runPlan(plan, transcript: text, priorDialogue: priorDialogue, gen: gen)
             } catch {
                 // Cancellation isn't a failure: Stop was pressed while the call was
                 // in flight, and acting now would defy the user's explicit off.
@@ -306,6 +348,82 @@ final class AppCoordinator: ObservableObject {
                 self.store.addTranscript(TranscriptRecord(kind: "command", transcript: text, outcome: "error: \(error)"))
             }
         }
+    }
+
+    /// Runs a parsed plan: either ask a clarifying question (and wait for the
+    /// next utterance), or execute each step in order. Speaks the model's reply.
+    private func runPlan(_ plan: ActionPlan, transcript: String,
+                         priorDialogue: [(role: String, content: String)], gen: Int) async throws {
+        if let clarify = plan.clarify {
+            // Remember the exchange so the user's answer is interpreted in context.
+            dialogue = priorDialogue
+            dialogue.append((role: "user", content: transcript))
+            dialogue.append((role: "assistant", content: "I need to clarify: \(clarify.question)"))
+            store.log("clarify", clarify.question)
+            await speak(clarify.spoken)
+            guard gen == runGeneration else { return }
+            // Set phase last: the task's defer runs finishProcessing, which
+            // preserves .clarifying (so we keep listening for the answer).
+            pendingClarification = clarify
+            phase = .clarifying
+            return
+        }
+
+        dialogue = []   // request resolved; next utterance starts fresh
+        await speak(plan.say)
+        guard gen == runGeneration, !Task.isCancelled else { return }
+
+        var performed: [String] = []
+        for step in plan.steps {
+            try Task.checkCancellation()
+            switch step.kind {
+            case .dictateStart:
+                self.beginDictation()
+                return   // dictation owns the session now; remaining steps don't apply
+            case .none:
+                continue
+            default:
+                self.phase = .acting
+                // The AX walk + CGEvent posting is synchronous and can be slow on a
+                // complex UI — run it off the main actor (a task-group child leaves
+                // the actor). Structured, not detached: cancelling actionTask
+                // propagates in, and perform() checks cancellation before every
+                // irreversible event, so Stop halts mid-walk/mid-typing.
+                try await withThrowingTaskGroup(of: Void.self) { group in
+                    group.addTask { try ScreenController.perform(step) }
+                    try await group.waitForAll()
+                }
+                performed.append(Self.describe(step))
+                self.store.log("action", "performed: \(Self.describe(step))")
+            }
+        }
+        if !performed.isEmpty {
+            self.store.addTranscript(TranscriptRecord(kind: "command", transcript: transcript,
+                                                      outcome: performed.joined(separator: " → ")))
+        }
+    }
+
+    private static func describe(_ step: ScreenAction) -> String {
+        switch step.kind {
+        case .openURL: return "open_url \(step.url)\(step.target.isEmpty ? "" : " in \(step.target)")"
+        case .keystroke: return "keystroke \(step.keys)"
+        case .type: return "type \(step.text)"
+        case .scroll: return "scroll \(step.direction?.rawValue ?? "?")"
+        default: return "\(step.kind.rawValue) \(step.target)".trimmingCharacters(in: .whitespaces)
+        }
+    }
+
+    /// Speaks a reply with recognition muted so the app can't hear itself, then
+    /// flushes whatever the mic captured meanwhile.
+    private func speak(_ text: String) async {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        speaking = true
+        store.log("say", trimmed)
+        await speaker.speak(trimmed)
+        speaking = false
+        freshUtterance()   // drop anything heard while talking
+        lastHeardAt = Date()
     }
 
     nonisolated static func strippingPhrases(_ phrases: [String], from text: String) -> String {

@@ -43,21 +43,57 @@ final class ClaudeClient: @unchecked Sendable {
         self.session = session
     }
 
-    // MARK: Screen-action parsing + intent routing (forced tool use)
+    // MARK: Plan parsing + intent routing (forced tool use)
 
-    func parseCommand(_ transcript: String) async throws -> ScreenAction {
-        let json = try await post(Self.commandRequestBody(transcript: transcript, model: .haiku45), timeout: 15)
+    /// `dialogue` carries a pending clarification exchange: earlier turns as
+    /// (role, content) pairs, ending before the current transcript.
+    func parsePlan(_ transcript: String, dialogue: [(role: String, content: String)] = []) async throws -> ActionPlan {
+        let json = try await post(Self.planRequestBody(transcript: transcript, dialogue: dialogue, model: .haiku45), timeout: 20)
         try Self.checkRefusal(json)
         return try Self.decodeBlock(json, blockType: "tool_use", payloadKey: "input")
     }
 
-    static func commandRequestBody(transcript: String, model: ClaudeModel) -> [String: Any] {
+    static func planRequestBody(transcript: String,
+                                dialogue: [(role: String, content: String)] = [],
+                                model: ClaudeModel) -> [String: Any] {
+        let step: [String: Any] = [
+            "type": "object",
+            "additionalProperties": false,
+            "properties": [
+                "kind": ["type": "string",
+                         "enum": ["click", "type", "scroll", "open_app", "open_url", "keystroke", "dictate_start", "none"]],
+                "target": ["type": "string", "description": "UI element or app name; for open_url optionally the browser to use; empty if unused"],
+                "text": ["type": "string", "description": "text to type; empty if unused"],
+                "url": ["type": "string", "description": "open_url only: the website, e.g. \"youtube.com\"; empty if unused"],
+                "keys": ["type": "string", "description": "keystroke only: shortcut like \"cmd+t\", \"cmd+shift+t\", \"enter\"; empty if unused"],
+                "direction": ["type": "string", "enum": ["up", "down", "left", "right"],
+                              "description": "Scroll direction. For scroll this controls the action; for every other kind emit \"down\" (ignored)."]
+            ],
+            // Everything required: without strict mode the model may omit
+            // non-required fields, and execution needs the ""-when-unused
+            // convention to hold.
+            "required": ["kind", "target", "text", "url", "keys", "direction"]
+        ]
+
         let tool: [String: Any] = [
-            "name": "emit_action",
+            "name": "emit_plan",
             "description": """
-            Interpret the user's spoken command and emit exactly one action.
-            Use "dictate_start" when they want to take a note or dictate a passage rather than \
-            control the screen. Use "none" if nothing is actionable.
+            Interpret the user's spoken request and emit ONE plan. A long request may \
+            contain several action items — emit one step per item, in the order they \
+            should run. Prefer open_url for websites ("open YouTube" means youtube.com \
+            unless a macOS app by that name plainly exists), open_app for applications, \
+            keystroke for app shortcuts (new tab = cmd+t), click/type/scroll for direct \
+            screen control. Use a single dictate_start step when they want to take a \
+            note or dictate. Use a single none step when nothing is actionable.
+
+            If the request is ambiguous or you are not confident what the user wants, \
+            emit NO steps and set clarify with one concise question and 2-4 short \
+            answer options — do not guess. When the user's latest message answers a \
+            previous clarification question, act on it; if they decline, emit no steps \
+            and a brief acknowledging say.
+
+            say: one short spoken sentence confirming what you're doing or reporting; \
+            empty for a single obvious action.
             """,
             // No `strict: true` — forced tool_choice already guarantees the call,
             // and strict adds a server-side schema-compilation latency spike on
@@ -66,28 +102,33 @@ final class ClaudeClient: @unchecked Sendable {
                 "type": "object",
                 "additionalProperties": false,
                 "properties": [
-                    "kind": ["type": "string",
-                             "enum": ["click", "type", "scroll", "open_app", "dictate_start", "none"]],
-                    "target": ["type": "string", "description": "UI element or app name; empty if unused"],
-                    "text": ["type": "string", "description": "text to type; empty if unused"],
-                    "direction": ["type": "string", "enum": ["up", "down", "left", "right"],
-                                  "description": "Scroll direction. For scroll this controls the action; for every other kind emit \"down\" (ignored)."],
+                    "say": ["type": "string"],
+                    "steps": ["type": "array", "items": step],
+                    "clarify": [
+                        "type": "object",
+                        "additionalProperties": false,
+                        "properties": [
+                            "question": ["type": "string"],
+                            "options": ["type": "array", "items": ["type": "string"]]
+                        ],
+                        "required": ["question", "options"]
+                    ],
                     "confidence": ["type": "number"]
                 ],
-                // `direction` is required unconditionally: without strict mode the
-                // model may omit non-required fields, and a scroll without a
-                // direction hard-fails at execution.
-                "required": ["kind", "target", "text", "direction", "confidence"]
+                "required": ["say", "steps", "confidence"]
             ]
         ]
+
+        var messages: [[String: Any]] = dialogue.map { ["role": $0.role, "content": $0.content] }
+        messages.append(["role": "user", "content": "Spoken request: \"\(transcript)\""])
 
         // No effort/thinking on this path regardless of model — latency-critical.
         return [
             "model": model.rawValue,
-            "max_tokens": 1024,
+            "max_tokens": 2048,
             "tools": [tool],
-            "tool_choice": ["type": "tool", "name": "emit_action"],
-            "messages": [["role": "user", "content": "Spoken command: \"\(transcript)\""]]
+            "tool_choice": ["type": "tool", "name": "emit_plan"],
+            "messages": messages
         ]
     }
 

@@ -1,0 +1,96 @@
+import Foundation
+import AVFoundation
+
+/// Speaks short replies back to the user. Uses ElevenLabs when a key is
+/// configured (natural voice, needs network); falls back to Apple's on-device
+/// synthesizer when there's no key or the request fails, so replies never go
+/// silent. One utterance at a time — the coordinator awaits each speak() and
+/// mutes recognition while it runs, so the app can't hear itself.
+final class Speaker: NSObject, AVAudioPlayerDelegate, AVSpeechSynthesizerDelegate {
+
+    /// ElevenLabs key; nil/empty → local voice. Set by the coordinator.
+    var elevenLabsKey: String?
+
+    private let synth = AVSpeechSynthesizer()
+    private var player: AVAudioPlayer?
+    private var continuation: CheckedContinuation<Void, Never>?
+
+    // Overridable so a different voice is a env-var change, not a rebuild.
+    private static let voiceID =
+        ProcessInfo.processInfo.environment["LMNH_ELEVENLABS_VOICE"] ?? "21m00Tcm4TlvDq8ikWAM"
+    // Flash model: lowest latency tier, plenty for one-sentence replies.
+    private static let modelID = "eleven_flash_v2_5"
+
+    override init() {
+        super.init()
+        synth.delegate = self
+    }
+
+    func speak(_ text: String) async {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        if let key = elevenLabsKey, !key.isEmpty, await speakElevenLabs(trimmed, key: key) {
+            return
+        }
+        await speakLocal(trimmed)
+    }
+
+    private func speakElevenLabs(_ text: String, key: String) async -> Bool {
+        guard let url = URL(string: "https://api.elevenlabs.io/v1/text-to-speech/\(Self.voiceID)?output_format=mp3_44100_64") else {
+            return false
+        }
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.timeoutInterval = 10   // a slow TTS reply must not wedge the session
+        req.setValue(key, forHTTPHeaderField: "xi-api-key")
+        req.setValue("application/json", forHTTPHeaderField: "content-type")
+        req.httpBody = try? JSONSerialization.data(withJSONObject: [
+            "text": text,
+            "model_id": Self.modelID
+        ])
+        guard let (data, response) = try? await URLSession.shared.data(for: req),
+              (response as? HTTPURLResponse)?.statusCode == 200,
+              let player = try? AVAudioPlayer(data: data) else {
+            return false   // caller falls back to the local voice
+        }
+        self.player = player
+        player.delegate = self
+        await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in
+            continuation = c
+            if !player.play() { finish() }
+        }
+        self.player = nil
+        return true
+    }
+
+    private func speakLocal(_ text: String) async {
+        await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in
+            continuation = c
+            synth.speak(AVSpeechUtterance(string: text))
+        }
+    }
+
+    /// Cuts off whatever is playing (Stop pressed). The delegate/`finish()` still
+    /// resumes the awaiting speak(), so nothing hangs.
+    func cancel() {
+        player?.stop()
+        synth.stopSpeaking(at: .immediate)
+        finish()
+    }
+
+    // Resumes exactly once even if a delegate fires twice (finish + error).
+    private func finish() {
+        continuation?.resume()
+        continuation = nil
+    }
+
+    // MARK: AVAudioPlayerDelegate
+
+    func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) { finish() }
+    func audioPlayerDecodeErrorDidOccur(_ player: AVAudioPlayer, error: Error?) { finish() }
+
+    // MARK: AVSpeechSynthesizerDelegate
+
+    func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didFinish utterance: AVSpeechUtterance) { finish() }
+    func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didCancel utterance: AVSpeechUtterance) { finish() }
+}

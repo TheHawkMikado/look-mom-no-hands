@@ -53,23 +53,38 @@ final class RequestShapeTests: XCTestCase {
         XCTAssertEqual(output?["effort"] as? String, "medium")
     }
 
-    func testCommandBodyStaysThinkingFree() {
-        let body = ClaudeClient.commandRequestBody(transcript: "x", model: .haiku45)
+    func testPlanBodyStaysThinkingFree() {
+        let body = ClaudeClient.planRequestBody(transcript: "x", model: .haiku45)
         XCTAssertNil(body["thinking"])
         XCTAssertNil(body["output_config"])
-        XCTAssertNotNil(body["tool_choice"])
+        let choice = body["tool_choice"] as? [String: Any]
+        XCTAssertEqual(choice?["name"] as? String, "emit_plan")
     }
 
-    func testCommandSchemaRequiresScrollDirection() throws {
-        let body = ClaudeClient.commandRequestBody(transcript: "x", model: .haiku45)
+    func testPlanStepSchemaRequiresAllFields() throws {
+        let body = ClaudeClient.planRequestBody(transcript: "x", model: .haiku45)
         let tools = body["tools"] as? [[String: Any]]
         let schema = tools?.first?["input_schema"] as? [String: Any]
-        let properties = schema?["properties"] as? [String: Any]
-        XCTAssertNotNil(properties?["direction"], "scroll direction must be a typed schema field")
-        // Without strict mode the model may omit non-required fields, and a
-        // scroll without a direction hard-fails at execution.
-        let required = schema?["required"] as? [String]
-        XCTAssertTrue(required?.contains("direction") ?? false, "direction must be required")
+        let props = schema?["properties"] as? [String: Any]
+        let steps = props?["steps"] as? [String: Any]
+        let item = steps?["items"] as? [String: Any]
+        let required = item?["required"] as? [String]
+        // Without strict mode the model may omit non-required fields; every step
+        // field must be present so the ""-when-unused convention holds.
+        for field in ["kind", "target", "text", "url", "keys", "direction"] {
+            XCTAssertTrue(required?.contains(field) ?? false, "\(field) must be required")
+        }
+    }
+
+    func testPlanBodyCarriesDialogue() {
+        let body = ClaudeClient.planRequestBody(
+            transcript: "the first one",
+            dialogue: [(role: "user", content: "open it"),
+                       (role: "assistant", content: "I need to clarify: which app?")],
+            model: .haiku45)
+        let messages = body["messages"] as? [[String: Any]]
+        XCTAssertEqual(messages?.count, 3, "prior turns + current transcript")
+        XCTAssertEqual(messages?.last?["role"] as? String, "user")
     }
 }
 
@@ -142,5 +157,71 @@ final class ActionDecodingTests: XCTestCase {
         let report: DictationReport = try ClaudeClient.decodeBlock(json, blockType: "text", payloadKey: "text")
         XCTAssertEqual(report.summary, "s")
         XCTAssertEqual(report.actionItems, ["a"])
+    }
+}
+
+final class PlanDecodingTests: XCTestCase {
+    func testMultiStepPlanDecodesInOrder() throws {
+        let json = #"""
+        {"say":"Opening YouTube in Chrome and a new tab","confidence":0.9,"steps":[
+          {"kind":"open_url","target":"Google Chrome","text":"","url":"youtube.com","keys":"","direction":"down"},
+          {"kind":"keystroke","target":"","text":"","url":"","keys":"cmd+t","direction":"down"}
+        ]}
+        """#
+        let plan = try JSONDecoder().decode(ActionPlan.self, from: Data(json.utf8))
+        XCTAssertNil(plan.clarify)
+        XCTAssertEqual(plan.steps.count, 2)
+        XCTAssertEqual(plan.steps[0].kind, .openURL)
+        XCTAssertEqual(plan.steps[0].url, "youtube.com")
+        XCTAssertEqual(plan.steps[0].target, "Google Chrome")
+        XCTAssertEqual(plan.steps[1].kind, .keystroke)
+        XCTAssertEqual(plan.steps[1].keys, "cmd+t")
+    }
+
+    func testClarificationPlanDecodes() throws {
+        let json = #"""
+        {"say":"","confidence":0.4,"steps":[],
+         "clarify":{"question":"Which browser?","options":["Chrome","Safari"]}}
+        """#
+        let plan = try JSONDecoder().decode(ActionPlan.self, from: Data(json.utf8))
+        XCTAssertTrue(plan.steps.isEmpty)
+        XCTAssertEqual(plan.clarify?.options, ["Chrome", "Safari"])
+        XCTAssertTrue(plan.clarify?.spoken.contains("Chrome") ?? false)
+    }
+
+    func testPlanWithMissingOptionalFieldsDecodes() throws {
+        // Tolerant top-level decode: a sparse response must not throw.
+        let plan = try JSONDecoder().decode(ActionPlan.self, from: Data(#"{"steps":[]}"#.utf8))
+        XCTAssertEqual(plan.say, "")
+        XCTAssertNil(plan.clarify)
+    }
+}
+
+final class URLAndKeystrokeTests: XCTestCase {
+    func testBareHostGetsHTTPS() {
+        XCTAssertEqual(ScreenController.normalizedURL("youtube.com"), "https://youtube.com")
+        XCTAssertEqual(ScreenController.normalizedURL("  example.org "), "https://example.org")
+    }
+
+    func testExistingSchemePassesThrough() {
+        XCTAssertEqual(ScreenController.normalizedURL("http://x.com"), "http://x.com")
+        XCTAssertEqual(ScreenController.normalizedURL("https://x.com"), "https://x.com")
+    }
+
+    func testKeystrokeParsesModifiers() throws {
+        let combo = try XCTUnwrap(ScreenController.parseKeystroke("cmd+shift+t"))
+        XCTAssertEqual(combo.key, 17) // 't'
+        XCTAssertTrue(combo.flags.contains(.maskCommand))
+        XCTAssertTrue(combo.flags.contains(.maskShift))
+    }
+
+    func testKeystrokeAliasesAndBareKeys() throws {
+        XCTAssertEqual(try XCTUnwrap(ScreenController.parseKeystroke("enter")).key, 36)
+        XCTAssertTrue(try XCTUnwrap(ScreenController.parseKeystroke("option+left")).flags.contains(.maskAlternate))
+    }
+
+    func testUnknownKeystrokeReturnsNil() {
+        XCTAssertNil(ScreenController.parseKeystroke("cmd+")) // no base key
+        XCTAssertNil(ScreenController.parseKeystroke("cmd+f13")) // unmapped key
     }
 }

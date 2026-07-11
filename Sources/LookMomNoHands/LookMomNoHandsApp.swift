@@ -26,6 +26,8 @@ struct PanelView: View {
     @ObservedObject var store: AppStore
     @Environment(\.openWindow) private var openWindow
     @State private var keyField = ""
+    @State private var elevenField = ""
+    @State private var showVoiceSetup = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -36,11 +38,19 @@ struct PanelView: View {
                 Divider()
             }
 
+            if let clarify = coordinator.pendingClarification {
+                ClarifyView(clarification: clarify,
+                            onPick: { coordinator.answerClarification($0) },
+                            onDismiss: { coordinator.dismissClarification() })
+                Divider()
+            }
+
             controls
 
             if !coordinator.accessibilityTrusted {
                 accessibilityNotice
             }
+            voiceReplyRow
             Divider()
 
             if let report = coordinator.lastReport {
@@ -52,6 +62,34 @@ struct PanelView: View {
         }
         .padding(14)
         .frame(width: 380)
+    }
+
+    private var voiceReplyRow: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 6) {
+                Image(systemName: coordinator.hasElevenLabsKey ? "speaker.wave.2.fill" : "speaker.wave.1")
+                    .foregroundStyle(coordinator.hasElevenLabsKey ? .green : .secondary)
+                Text(coordinator.hasElevenLabsKey ? "Spoken replies: ElevenLabs" : "Spoken replies: system voice")
+                    .font(.caption).foregroundStyle(.secondary)
+                Spacer()
+                Button(showVoiceSetup ? "Close" : (coordinator.hasElevenLabsKey ? "Change" : "Add key")) {
+                    showVoiceSetup.toggle()
+                }
+                .font(.caption)
+            }
+            if showVoiceSetup {
+                HStack {
+                    SecureField("ElevenLabs API key", text: $elevenField)
+                        .textFieldStyle(.roundedBorder)
+                    Button("Save") {
+                        coordinator.setElevenLabsKey(elevenField)
+                        elevenField = ""
+                        showVoiceSetup = false
+                    }
+                    .disabled(elevenField.isEmpty)
+                }
+            }
+        }
     }
 
     private var header: some View {
@@ -149,5 +187,41 @@ struct PanelView: View {
             }
             .frame(maxHeight: 100)
         }
+    }
+}
+
+/// The on-screen clarification prompt: shows the model's question and lets the
+/// user answer by clicking (the same answer they could speak).
+struct ClarifyView: View {
+    let clarification: Clarification
+    let onPick: (String) -> Void
+    let onDismiss: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 6) {
+                Image(systemName: "questionmark.bubble.fill").foregroundStyle(.blue)
+                Text(clarification.question).font(.callout.weight(.medium))
+                Spacer()
+                Button { onDismiss() } label: { Image(systemName: "xmark.circle.fill") }
+                    .buttonStyle(.plain).foregroundStyle(.secondary)
+            }
+            if !clarification.options.isEmpty {
+                ForEach(clarification.options, id: \.self) { option in
+                    Button { onPick(option) } label: {
+                        HStack {
+                            Text(option)
+                            Spacer()
+                        }
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.bordered)
+                }
+            }
+            Text("or just say your answer")
+                .font(.caption2).foregroundStyle(.secondary)
+        }
+        .padding(10)
+        .background(.blue.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
     }
 }
