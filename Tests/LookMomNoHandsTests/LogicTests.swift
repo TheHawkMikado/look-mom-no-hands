@@ -386,6 +386,16 @@ final class URLAndKeystrokeTests: XCTestCase {
         XCTAssertEqual(ScreenController.bestAppMatch(mixed, query: "Mail"), "Mail.app")
     }
 
+    func testTrustedTierBeatsUserLocalHijack() {
+        // A planted ~/Applications/Chrome.app (exact) must NOT beat the machine
+        // /Applications/Google Chrome.app (substring) — trusted tier wins first.
+        let trusted = ["Google Chrome.app"]
+        let user = ["Chrome.app"]
+        XCTAssertEqual(ScreenController.firstTierMatch([trusted, user], query: "chrome"), "Google Chrome.app")
+        // But a user-local app is still reachable when nothing trusted matches.
+        XCTAssertEqual(ScreenController.firstTierMatch([[], ["MyTool.app"]], query: "mytool"), "MyTool.app")
+    }
+
     func testZoomShortcutsParse() throws {
         // "zoom in/out" idioms the model is likely to emit.
         XCTAssertEqual(try XCTUnwrap(ScreenController.parseKeystroke("cmd+=")).key, 24)

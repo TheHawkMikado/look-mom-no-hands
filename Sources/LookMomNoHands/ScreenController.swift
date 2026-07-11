@@ -150,27 +150,45 @@ enum ScreenController {
 
     // MARK: - App-name resolution
 
-    private static let appDirectories = [
+    // Machine-wide, admin-installed apps. Ranked as a trust tier ABOVE the
+    // user-writable ~/Applications so a planted ~/Applications/Chrome.app can't
+    // hijack a "chrome" command away from the real /Applications/Google Chrome.
+    private static let trustedAppDirectories = [
         "/Applications", "/Applications/Utilities",
-        "/System/Applications", "/System/Applications/Utilities",
-        NSHomeDirectory() + "/Applications"
+        "/System/Applications", "/System/Applications/Utilities"
     ]
+    private static let userAppDirectories = [NSHomeDirectory() + "/Applications"]
 
-    /// Full path to an installed .app matching a spoken name, or nil. Candidates
-    /// are gathered across ALL directories first so a global exact-name match wins
-    /// over a substring match that merely sits in an earlier directory (e.g. a
-    /// query for "Safari" must not pick "/Applications/Safari Technology Preview"
-    /// over the exact "/System/Applications/Safari.app").
+    /// Full path to an installed .app matching a spoken name, or nil. Trusted
+    /// directories are matched first (ranked globally so an exact name beats a
+    /// substring across them); ~/Applications is consulted only if nothing
+    /// trusted matches.
     static func resolveAppPath(_ name: String) -> String? {
-        var candidates: [(name: String, path: String)] = []
-        for dir in appDirectories {
-            guard let items = try? FileManager.default.contentsOfDirectory(atPath: dir) else { continue }
-            for item in items where item.hasSuffix(".app") {
-                candidates.append((item, dir + "/" + item))
+        for dirs in [trustedAppDirectories, userAppDirectories] {
+            let candidates = appCandidates(in: dirs)
+            if let match = bestAppMatch(candidates.map { $0.name }, query: name) {
+                return candidates.first { $0.name == match }?.path
             }
         }
-        guard let match = bestAppMatch(candidates.map(\.name), query: name) else { return nil }
-        return candidates.first { $0.name == match }?.path
+        return nil
+    }
+
+    private static func appCandidates(in dirs: [String]) -> [(name: String, path: String)] {
+        var out: [(name: String, path: String)] = []
+        for dir in dirs {
+            guard let items = try? FileManager.default.contentsOfDirectory(atPath: dir) else { continue }
+            for item in items where item.hasSuffix(".app") { out.append((item, dir + "/" + item)) }
+        }
+        return out
+    }
+
+    /// Pure mirror of the tier precedence for testing: the first tier that yields
+    /// any match wins, so a user-local exact name can't beat a trusted substring.
+    static func firstTierMatch(_ tiers: [[String]], query: String) -> String? {
+        for tier in tiers {
+            if let match = bestAppMatch(tier, query: query) { return match }
+        }
+        return nil
     }
 
     /// Picks the best ".app" filename for a query: exact stem match first, then a
