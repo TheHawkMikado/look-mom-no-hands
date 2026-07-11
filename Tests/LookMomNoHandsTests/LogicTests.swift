@@ -273,17 +273,18 @@ final class DictateVoicePhraseTests: XCTestCase {
         // Trailing stop phrase removed.
         XCTAssertEqual(AppCoordinator.stripDictationTriggers("buy milk and eggs mama stop dictating"),
                        "buy milk and eggs")
-        // Trailing stop phrase with punctuation still removed.
-        XCTAssertEqual(AppCoordinator.stripDictationTriggers("Buy milk and eggs. Mama stop dictating."),
-                       "Buy milk and eggs")
-        // Leading start phrase removed.
-        XCTAssertEqual(AppCoordinator.stripDictationTriggers("mama dictate this buy milk"),
+        // The real-world case: comma after "Mama" and a trailing "this." — both
+        // used to defeat stripping.
+        XCTAssertEqual(AppCoordinator.stripDictationTriggers("I'm wondering how well this dictates. Mama, stop dictating this."),
+                       "I'm wondering how well this dictates.")
+        // Leading start phrase removed (with punctuation).
+        XCTAssertEqual(AppCoordinator.stripDictationTriggers("Mama, dictate this: buy milk"),
                        "buy milk")
-        // Overlapping stop phrases: "you stop dictating" must strip whole, not
-        // leave a dangling "you".
+        // Overlapping stop phrases: "you stop dictating" strips whole, no dangling "you".
         XCTAssertEqual(AppCoordinator.stripDictationTriggers("buy milk you stop dictating"),
                        "buy milk")
-        // Mid-note content that merely CONTAINS a phrase is preserved.
+        // Mid-note content that merely CONTAINS a phrase (with >2 trailing words)
+        // is preserved.
         XCTAssertEqual(AppCoordinator.stripDictationTriggers("remind me to stop dictating at work when done"),
                        "remind me to stop dictating at work when done")
         XCTAssertEqual(AppCoordinator.stripDictationTriggers("tell mama dictate the recipe to grandma"),

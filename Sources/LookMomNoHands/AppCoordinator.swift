@@ -48,6 +48,7 @@ final class AppCoordinator: ObservableObject {
     private var pendingHotkeyDictation = false               // start requested before the mic was on
     private var starting = false                             // start() in flight (async permission gap)
     private var insertTargetApp: NSRunningApplication?       // app to paste into (captured at insert start)
+    private var lastExternalApp: NSRunningApplication?       // most recent frontmost app that ISN'T us
 
     /// Wake session open. Derived from `mode` so it can never desync; every mode
     /// change is accompanied by a `phase` write, which publishes the update.
@@ -112,6 +113,17 @@ final class AppCoordinator: ObservableObject {
         hotkey.onToggle = { [weak self] in self?.toggleHotkeyDictation() }
         hotkey.setChord(dictationChord.flags)
         hotkey.start()
+        // Track the last app that had focus that ISN'T us, so a push-to-dictate
+        // paste always targets the user's editor even if our panel was frontmost
+        // when they triggered it.
+        lastExternalApp = NSWorkspace.shared.frontmostApplication
+        NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main
+        ) { [weak self] note in
+            guard let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
+                  app.bundleIdentifier != Bundle.main.bundleIdentifier else { return }
+            Task { @MainActor in self?.lastExternalApp = app }
+        }
         store.log("app", "launched")
         loadKey()
         refreshAuthFlags()
@@ -283,7 +295,7 @@ final class AppCoordinator: ObservableObject {
         }
         // Capture the paste target NOW, before start() might activate our app on a
         // cold start (which would otherwise make US the frontmost app).
-        insertTargetApp = NSWorkspace.shared.frontmostApplication
+        captureInsertTarget()
         // Insert only needs the API key when cleanup is on (Scribe uses the
         // ElevenLabs key separately); raw paste works with just on-device ASR.
         guard hasKey || !cleanUpInsertedText else {
@@ -656,8 +668,20 @@ final class AppCoordinator: ObservableObject {
     /// Voice-triggered insert: capture the paste target before starting (the app
     /// is already frontmost — no activation happens on this path).
     private func startInsertByVoice() {
-        insertTargetApp = NSWorkspace.shared.frontmostApplication
+        captureInsertTarget()
         startDictation(output: .insert)
+    }
+
+    /// The app to paste into: the current frontmost app, or — if that's us (panel
+    /// open, or just launched) — the last external app that had focus. Never
+    /// ourselves, so a push-to-dictate paste can't land in our own panel.
+    private func captureInsertTarget() {
+        let front = NSWorkspace.shared.frontmostApplication
+        if let front, front.bundleIdentifier != Bundle.main.bundleIdentifier {
+            insertTargetApp = front
+        } else {
+            insertTargetApp = lastExternalApp
+        }
     }
 
     private func beginDictation(returnTo: Mode, output: DictationOutput) {
@@ -717,29 +741,50 @@ final class AppCoordinator: ObservableObject {
         }
     }
 
-    /// Strips a leading start phrase and a trailing stop phrase (only at the
-    /// edges, where the spoken triggers actually land) so legitimate note content
-    /// that merely contains those words mid-sentence is preserved.
+    /// Strips a leading start phrase and a trailing stop phrase from a captured
+    /// note. Word-based and punctuation-insensitive, so it handles the recognizer's
+    /// real output ("Mama, stop dictating this.") — the comma and a couple trailing
+    /// words ("this") no longer defeat it — while a phrase appearing mid-sentence
+    /// as legitimate content is preserved.
     nonisolated static func stripDictationTriggers(_ text: String) -> String {
-        var out = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        let edges = CharacterSet.whitespacesAndNewlines.union(.punctuationCharacters)
-        // Longest phrase first, so "you stop dictating" is tried before the
-        // shorter "stop dictating" (which is its suffix) and doesn't leave "you".
+        // Up to this many words may follow the stop phrase and still be treated as
+        // part of the trigger ("stop dictating THIS"), not note content.
+        let maxTrailing = 2
+        var words = text.split { $0 == " " || $0 == "\n" || $0 == "\t" }.map(String.init)
+        func norm(_ w: String) -> String {
+            String(w.lowercased().unicodeScalars.filter { CharacterSet.alphanumerics.contains($0) })
+        }
+        // Keep 1:1 with `words` (no filtering) so an index into `normed` slices
+        // `words` correctly.
+        func normWords(_ ws: [String]) -> [String] { ws.map(norm) }
+
+        // Leading start phrase (prefix match on normalized words).
+        var normed = normWords(words)
         for phrase in dictateStartPhrases.sorted(by: { $0.count > $1.count }) {
-            if let r = out.range(of: phrase, options: [.caseInsensitive, .anchored]) {
-                out.removeSubrange(..<r.upperBound)
+            let pw = phrase.split(separator: " ").map(String.init)
+            if normed.count >= pw.count, Array(normed.prefix(pw.count)) == pw {
+                words.removeFirst(pw.count)
                 break
             }
         }
-        out = out.trimmingCharacters(in: edges)
-        for phrase in dictateStopPhrases.sorted(by: { $0.count > $1.count }) {
-            if let r = out.range(of: phrase, options: [.caseInsensitive, .backwards]),
-               out[r.upperBound...].trimmingCharacters(in: edges).isEmpty {
-                out.removeSubrange(r.lowerBound...)
-                break
+
+        // Trailing stop phrase: match its word sequence starting within the last
+        // (phrase length + maxTrailing) words, and drop from there to the end.
+        normed = normWords(words)
+        outer: for phrase in dictateStopPhrases.sorted(by: { $0.count > $1.count }) {
+            let pw = phrase.split(separator: " ").map(String.init)
+            guard pw.count <= normed.count else { continue }
+            let earliest = max(0, normed.count - pw.count - maxTrailing)
+            var i = normed.count - pw.count
+            while i >= earliest {
+                if Array(normed[i..<i + pw.count]) == pw {
+                    words.removeSubrange(i..<words.count)
+                    break outer
+                }
+                i -= 1
             }
         }
-        return out.trimmingCharacters(in: edges)
+        return words.joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private func finalizeDictation() {
@@ -843,19 +888,21 @@ final class AppCoordinator: ObservableObject {
             store.log("dictation", "\(final.count) chars on clipboard — press ⌘V (auto-paste needs Accessibility)")
             return
         }
-        // If our own UI grabbed focus (e.g. we had to prompt for a permission on a
-        // cold start), put the user's app back in front so ⌘V lands there.
-        if let target = insertTargetApp,
-           NSWorkspace.shared.frontmostApplication?.processIdentifier != target.processIdentifier {
-            target.activate(options: [])
-            try? await Task.sleep(nanoseconds: 80_000_000)
+        // Bring the user's editor to the front so ⌘V lands there, not in our panel
+        // or whatever grabbed focus during transcription. Without a known target,
+        // don't blind-paste into an unknown app — leave it on the clipboard.
+        guard let target = insertTargetApp else {
+            store.log("dictation", "\(final.count) chars on clipboard — no target window; press ⌘V where you want it")
+            return
         }
-        // Let the frontmost app register the new clipboard before ⌘V (async — no
-        // main-thread blocking), then re-check the run isn't stale.
-        try? await Task.sleep(nanoseconds: 40_000_000)
+        if NSWorkspace.shared.frontmostApplication?.processIdentifier != target.processIdentifier {
+            target.activate(options: [])
+            try? await Task.sleep(nanoseconds: 120_000_000)
+        }
+        try? await Task.sleep(nanoseconds: 40_000_000)   // let the app register the clipboard
         guard gen == runGeneration, !Task.isCancelled else { return }
         try? ScreenController.sendPaste()
-        store.log("dictation", "pasted \(final.count) chars at cursor")
+        store.log("dictation", "pasted \(final.count) chars into \(target.localizedName ?? "target app")")
     }
 
     // MARK: Permissions
