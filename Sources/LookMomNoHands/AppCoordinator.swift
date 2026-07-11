@@ -83,9 +83,15 @@ final class AppCoordinator: ObservableObject {
     }
 
     private func refreshAuthFlags() {
-        micAuthorized = AVCaptureDevice.authorizationStatus(for: .audio) == .authorized
-        speechAuthorized = SFSpeechRecognizer.authorizationStatus() == .authorized
-        accessibilityTrusted = ScreenController.isTrusted
+        // Assign only on change: @Published fires objectWillChange on every set
+        // regardless of equality, and this runs on a 1.5s poll — unconditional
+        // writes would re-render every observing view each tick.
+        let mic = AVCaptureDevice.authorizationStatus(for: .audio) == .authorized
+        let speech = SFSpeechRecognizer.authorizationStatus() == .authorized
+        let ax = ScreenController.isTrusted
+        if micAuthorized != mic { micAuthorized = mic }
+        if speechAuthorized != speech { speechAuthorized = speech }
+        if accessibilityTrusted != ax { accessibilityTrusted = ax }
     }
 
     private var allPermissionsGranted: Bool {
@@ -110,12 +116,15 @@ final class AppCoordinator: ObservableObject {
     }
 
     private func pollAuth() {
+        let wasGranted = allPermissionsGranted
         refreshAuthFlags()
-        if allPermissionsGranted { store.log("perm", "all permissions granted") }
+        if allPermissionsGranted, !wasGranted { store.log("perm", "all permissions granted") }
         if allPermissionsGranted || Date() > authPollDeadline {
             authPoll?.invalidate(); authPoll = nil
         }
     }
+
+    deinit { authPoll?.invalidate() }
 
     /// Explicit, user-initiated Accessibility prompt (opens System Settings once).
     /// Never called automatically — only from the panel button, so we don't nag.
