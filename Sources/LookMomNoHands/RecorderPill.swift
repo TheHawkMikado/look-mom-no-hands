@@ -27,7 +27,7 @@ final class RecorderPill {
     func hide() { panel?.orderOut(nil) }
 
     private func makePanel(coordinator: AppCoordinator) -> NSPanel {
-        let panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 320, height: 64),
+        let panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 232, height: 46),
                             styleMask: [.borderless, .nonactivatingPanel],
                             backing: .buffered, defer: false)
         panel.isFloatingPanel = true
@@ -69,16 +69,16 @@ final class RecorderPill {
 private struct RecorderPillView: View {
     @ObservedObject var coordinator: AppCoordinator
     @ObservedObject var meter: RecorderMeter
-    @State private var bars: [Float] = Array(repeating: 0.05, count: 28)
+    @State private var bars: [Float] = Array(repeating: 0.05, count: 22)
     @State private var now = Date()
     private let clock = Timer.publish(every: 0.5, on: .main, in: .common).autoconnect()
 
     var body: some View {
-        HStack(spacing: 12) {
+        HStack(spacing: 8) {
             if coordinator.phase == .recording {
                 Button(action: { coordinator.cancelRecording() }) {
-                    Image(systemName: "xmark").font(.system(size: 12, weight: .bold))
-                        .foregroundColor(.white).frame(width: 26, height: 26)
+                    Image(systemName: "xmark").font(.system(size: 9, weight: .bold))
+                        .foregroundColor(.white).frame(width: 20, height: 20)
                         .background(Circle().fill(Color.white.opacity(0.18)))
                 }
                 .buttonStyle(.plain)
@@ -86,28 +86,28 @@ private struct RecorderPillView: View {
                 waveform
                     .frame(maxWidth: .infinity)
 
-                Text(elapsed).font(.system(.callout, design: .monospaced)).foregroundColor(.white.opacity(0.85))
+                Text(elapsed).font(.system(size: 11, design: .monospaced)).foregroundColor(.white.opacity(0.85))
 
                 Button(action: { coordinator.stopRecording() }) {
-                    Image(systemName: "stop.fill").font(.system(size: 12, weight: .bold))
-                        .foregroundColor(.white).frame(width: 30, height: 30)
+                    Image(systemName: "stop.fill").font(.system(size: 9, weight: .bold))
+                        .foregroundColor(.white).frame(width: 22, height: 22)
                         .background(Circle().fill(Color.red))
                 }
                 .buttonStyle(.plain)
             } else {
                 // Processing state.
                 ProgressView().controlSize(.small).tint(.white)
-                Text("Processing…").foregroundColor(.white.opacity(0.9)).font(.callout)
+                Text("Processing…").foregroundColor(.white.opacity(0.9)).font(.caption)
                 Spacer()
             }
         }
-        .padding(.horizontal, 14)
-        .frame(height: 64)
+        .padding(.horizontal, 10)
+        .frame(height: 46)
         .background(
-            RoundedRectangle(cornerRadius: 20, style: .continuous)
+            RoundedRectangle(cornerRadius: 15, style: .continuous)
                 .fill(Color.black.opacity(0.82))
         )
-        .padding(6)
+        .padding(5)
         .onChange(of: meter.level) { level in
             bars.removeFirst()
             bars.append(max(0.05, level))
@@ -117,17 +117,17 @@ private struct RecorderPillView: View {
 
     private var waveform: some View {
         GeometryReader { geo in
-            HStack(alignment: .center, spacing: 3) {
+            HStack(alignment: .center, spacing: 2) {
                 ForEach(Array(bars.enumerated()), id: \.offset) { _, v in
                     Capsule()
                         .fill(Color.white.opacity(0.9))
-                        .frame(height: max(3, CGFloat(v) * geo.size.height))
+                        .frame(height: max(2, CGFloat(v) * geo.size.height))
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
             .animation(.easeOut(duration: 0.12), value: bars)
         }
-        .frame(height: 30)
+        .frame(height: 22)
     }
 
     private var elapsed: String {
