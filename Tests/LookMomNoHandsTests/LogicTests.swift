@@ -121,6 +121,51 @@ final class ActionDecodingTests: XCTestCase {
         XCTAssertEqual(action.kind, .dictateStart)
     }
 
+    func testActionSignatureDistinguishesPayloadsExcludesNoiseKinds() throws {
+        func steps(_ json: String) throws -> [ScreenAction] {
+            try JSONDecoder().decode([ScreenAction].self, from: Data(json.utf8))
+        }
+        // Different typed text → DIFFERENT signatures, so re-entering distinct values
+        // into the same form is not flagged as a loop (adversarial-review fix).
+        let a = try steps(#"[{"kind":"click","target":"Search"},{"kind":"type","text":"cats"},{"kind":"keystroke","keys":"enter"}]"#)
+        let b = try steps(#"[{"kind":"click","target":"Search"},{"kind":"type","text":"dogs"},{"kind":"keystroke","keys":"enter"}]"#)
+        XCTAssertNotEqual(AppCoordinator.coarseSignature(a), AppCoordinator.coarseSignature(b))
+        // The exact same action (same text) collides — that's the stuck case.
+        let a2 = try steps(#"[{"kind":"click","target":"Search"},{"kind":"type","text":"cats"},{"kind":"keystroke","keys":"enter"}]"#)
+        XCTAssertEqual(AppCoordinator.coarseSignature(a), AppCoordinator.coarseSignature(a2))
+        // none/describe/scroll contribute nothing (no-op or legitimately repeated).
+        XCTAssertTrue(AppCoordinator.coarseSignature(try steps(#"[{"kind":"none","target":""}]"#)).isEmpty)
+        XCTAssertTrue(AppCoordinator.coarseSignature(try steps(#"[{"kind":"scroll","target":"","direction":"down"}]"#)).isEmpty)
+    }
+
+    @MainActor func testInsertRulesMatchWholeWord() {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("lmnh-ins-\(UUID().uuidString)")
+        let s = InsertRulesStore(directory: dir)
+        s.general = "Use my name."
+        s.upsert(InsertRule(app: "Code", instructions: "Numbered steps."))
+        // Whole-word match: "Code" applies to VS Code but NOT Xcode.
+        XCTAssertTrue(s.instructions(forApp: "Code").contains("Numbered steps."))
+        XCTAssertTrue(s.instructions(forApp: "Visual Studio Code").contains("Numbered steps."))
+        XCTAssertFalse(s.instructions(forApp: "Xcode").contains("Numbered steps."))
+        XCTAssertTrue(s.instructions(forApp: "Xcode").contains("Use my name."))   // general still applies
+    }
+
+    @MainActor func testInsertRulesLoadDoesNotClobberDisk() throws {
+        // Regression: general's didSet fired during load() and persisted an empty
+        // appRules before it was assigned. load() must not rewrite the file.
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("lmnh-ins-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let file = dir.appendingPathComponent("insert_rules.json")
+        let json = #"{"general":"G","appRules":[{"id":"1","app":"Code","instructions":"X"}]}"#
+        try json.data(using: .utf8)!.write(to: file)
+        let s = InsertRulesStore(directory: dir)   // init → load() (must not persist)
+        XCTAssertEqual(s.appRules.count, 1)
+        XCTAssertEqual(s.general, "G")
+        // The on-disk file is untouched (still has the rule) — no clobber.
+        let onDisk = try String(contentsOf: file, encoding: .utf8)
+        XCTAssertTrue(onDisk.contains("\"app\":\"Code\""))
+    }
+
     func testRepeatPhraseDetection() {
         XCTAssertTrue(AppCoordinator.isRepeatPhrase("do that again"))
         XCTAssertTrue(AppCoordinator.isRepeatPhrase("Do it again."))
@@ -460,6 +505,25 @@ final class KnowledgeTests: XCTestCase {
 }
 
 extension PlanDecodingTests {
+    func testPlanDecodesBlocked() throws {
+        let json = #"{"say":"stuck","steps":[],"confidence":1.0,"goal_complete":false,"blocked":true}"#
+        let plan = try JSONDecoder().decode(ActionPlan.self, from: Data(json.utf8))
+        XCTAssertTrue(plan.blocked)
+        XCTAssertFalse(plan.goalComplete)
+        // Absent → false (not a false success/blocked).
+        let none = try JSONDecoder().decode(ActionPlan.self, from: Data(#"{"say":"","steps":[],"confidence":1.0}"#.utf8))
+        XCTAssertFalse(none.blocked)
+    }
+
+    func testEmptyNonCompletePlanIsNotComplete() throws {
+        // Regression: an empty plan with goal_complete=false must NOT read as complete
+        // (the loop keys completion on goalComplete alone, not steps.isEmpty).
+        let plan = try JSONDecoder().decode(ActionPlan.self,
+            from: Data(#"{"say":"","steps":[],"confidence":1.0,"goal_complete":false}"#.utf8))
+        XCTAssertTrue(plan.steps.isEmpty)
+        XCTAssertFalse(plan.goalComplete)   // → loop treats it as no-progress, not success
+    }
+
     func testPlanDecodesRemember() throws {
         let json = #"{"say":"ok","steps":[],"confidence":1.0,"goal_complete":true,"remember":"I use Brave"}"#
         let plan = try JSONDecoder().decode(ActionPlan.self, from: Data(json.utf8))

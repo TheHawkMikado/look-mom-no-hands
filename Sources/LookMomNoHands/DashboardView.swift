@@ -21,6 +21,8 @@ struct DashboardView: View {
                 .tabItem { Label("Profiles", systemImage: "slider.horizontal.3") }
             ProceduresTab(procedures: coordinator.procedures)
                 .tabItem { Label("Procedures", systemImage: "list.number") }
+            PasteRulesTab(rules: coordinator.insertRules)
+                .tabItem { Label("Paste", systemImage: "doc.on.clipboard") }
             ActivityTab(store: coordinator.store)
                 .tabItem { Label("Activity", systemImage: "list.bullet.rectangle") }
             SettingsTab(coordinator: coordinator)
@@ -222,6 +224,63 @@ private struct LiveTab: View {
         let q = question.trimmingCharacters(in: .whitespaces)
         guard !q.isEmpty else { return }
         coordinator.askLiveTranscript(q)
+    }
+}
+
+/// How dictated text is formatted before it's pasted: a general instruction plus
+/// per-app rules (e.g. VS Code gets one style, Slack another).
+private struct PasteRulesTab: View {
+    @ObservedObject var rules: InsertRulesStore
+    @State private var newApp = ""
+
+    private var border: some View { RoundedRectangle(cornerRadius: 6).stroke(Color.secondary.opacity(0.3)) }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("How push-to-dictate / insert text is cleaned up before pasting. General always applies; a per-app rule adds to it when you paste into that app.")
+                .font(.caption).foregroundStyle(.secondary)
+
+            Text("General").font(.headline)
+            TextEditor(text: $rules.general).font(.body).frame(height: 70).overlay(border)
+
+            Divider()
+            HStack {
+                Text("Per app").font(.headline)
+                Spacer()
+                TextField("App name (e.g. Code)", text: $newApp).frame(width: 160).textFieldStyle(.roundedBorder)
+                Button("Add") {
+                    let a = newApp.trimmingCharacters(in: .whitespaces)
+                    guard !a.isEmpty else { return }
+                    rules.upsert(InsertRule(app: a, instructions: ""))
+                    newApp = ""
+                }
+            }
+
+            List {
+                if rules.appRules.isEmpty {
+                    Text("No per-app rules. Add one to format differently in a specific app.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                ForEach(rules.appRules) { rule in
+                    VStack(alignment: .leading, spacing: 4) {
+                        HStack {
+                            Text(rule.app).font(.callout.weight(.semibold))
+                            Spacer()
+                            Button { rules.remove(rule.id) } label: { Image(systemName: "trash").foregroundStyle(.red) }
+                                .buttonStyle(.plain)
+                        }
+                        TextEditor(text: instructionsBinding(rule)).font(.callout).frame(height: 54).overlay(border)
+                    }
+                    .padding(.vertical, 2)
+                }
+            }
+        }
+        .padding()
+    }
+
+    private func instructionsBinding(_ rule: InsertRule) -> Binding<String> {
+        Binding(get: { rule.instructions },
+                set: { rules.upsert(InsertRule(id: rule.id, app: rule.app, instructions: $0)) })
     }
 }
 
@@ -546,32 +605,39 @@ private struct TranscriptsTab: View {
         }
     }
 
+    // HSplitView (not NavigationSplitView): a NavigationSplitView inside the TabView
+    // takes over the window chrome and hides the tab bar, so you couldn't switch tabs.
     var body: some View {
-        NavigationSplitView {
-            List(filtered, selection: $selection) { rec in
-                VStack(alignment: .leading, spacing: 2) {
-                    HStack {
-                        Image(systemName: rec.kind == "dictation" ? "note.text" : "cursorarrow.rays")
-                        Text(rec.summary ?? rec.transcript)
-                            .lineLimit(1)
-                        Spacer()
+        HSplitView {
+            VStack(spacing: 6) {
+                TextField("Search transcripts", text: $search)
+                    .textFieldStyle(.roundedBorder)
+                    .padding([.horizontal, .top], 8)
+                List(filtered, selection: $selection) { rec in
+                    VStack(alignment: .leading, spacing: 2) {
+                        HStack {
+                            Image(systemName: rec.kind == "dictation" ? "note.text" : "cursorarrow.rays")
+                            Text(rec.summary ?? rec.transcript).lineLimit(1)
+                            Spacer()
+                        }
+                        Text(rec.date.formatted(date: .abbreviated, time: .shortened))
+                            .font(.caption2).foregroundStyle(.secondary)
                     }
-                    Text(rec.date.formatted(date: .abbreviated, time: .shortened))
-                        .font(.caption2).foregroundStyle(.secondary)
+                    .tag(rec.id)
                 }
-                .tag(rec.id)
             }
-            .searchable(text: $search, placement: .sidebar, prompt: "Search transcripts")
-            .navigationTitle("Transcripts")
             .frame(minWidth: 260)
-        } detail: {
-            if let id = selection, let rec = store.transcripts.first(where: { $0.id == id }) {
-                TranscriptDetail(record: rec)
-            } else {
-                ContentUnavailableView("No transcript selected",
-                                       systemImage: "text.book.closed",
-                                       description: Text("\(store.transcripts.count) stored"))
+
+            Group {
+                if let id = selection, let rec = store.transcripts.first(where: { $0.id == id }) {
+                    TranscriptDetail(record: rec)
+                } else {
+                    ContentUnavailableView("No transcript selected",
+                                           systemImage: "text.book.closed",
+                                           description: Text("\(store.transcripts.count) stored"))
+                }
             }
+            .frame(minWidth: 340, maxWidth: .infinity, maxHeight: .infinity)
         }
     }
 }

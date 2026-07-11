@@ -114,6 +114,7 @@ final class AppCoordinator: ObservableObject {
     let profiles: ProfileStore
     let procedures: ProcedureStore
     let knowledge: KnowledgeStore
+    let insertRules: InsertRulesStore
 
     // Longer than the old 1.2s: a spoken request can be several action items, so
     // don't cut it off on a mid-sentence breath.
@@ -160,6 +161,7 @@ final class AppCoordinator: ObservableObject {
         profiles = ProfileStore(directory: store.directory)
         procedures = ProcedureStore(directory: store.directory)
         knowledge = KnowledgeStore(directory: store.directory)
+        insertRules = InsertRulesStore(directory: store.directory)
         if UserDefaults.standard.object(forKey: Self.silenceKey) != nil {
             recorderEndPause = UserDefaults.standard.double(forKey: Self.silenceKey)
         }
@@ -882,6 +884,10 @@ final class AppCoordinator: ObservableObject {
         var performedAll = seedProgress   // carried across a mid-task clarification
         var complete = false
         var round = 0
+        var lastState = ""                      // (exact action + screen) of the prior round
+        var consecutiveRepeats = 0              // back-to-back identical no-progress rounds
+        var emptyRounds = 0                     // consecutive rounds that did nothing real
+        var brokeOut = false                    // stopped early (loop/spin/blocked) — already spoke
         while round < Self.maxTaskRounds, !complete {
             try Task.checkCancellation()
             phase = .thinking
@@ -934,15 +940,54 @@ final class AppCoordinator: ObservableObject {
                 await speak("I didn't catch part of that — could you say it again?", gen: gen)
                 return
             }
+            // The model gave up — record an incomplete outcome, don't loop or fake success.
+            if plan.blocked {
+                dialogue = []
+                await speak(plan.say.isEmpty ? "I couldn't finish that." : plan.say, gen: gen)
+                brokeOut = true
+                break
+            }
 
             dialogue = []                        // request resolved; next utterance is fresh
             if !plan.say.isEmpty { await speak(plan.say, gen: gen) }
             guard gen == runGeneration, !Task.isCancelled else { return }
 
+            // Stuck-loop guard: the EXACT same action (including typed text) proposed
+            // against the SAME screen on THREE CONSECUTIVE rounds. Consecutive-only
+            // (the counter resets the moment the action or screen changes) so a
+            // workflow that revisits a state non-consecutively is never affected;
+            // requiring three-in-a-row (not one) tolerates a lossy/truncated snapshot
+            // that happens to hash-collide on a productive repeat. A genuine stuck loop
+            // repeats far more than that. Empty screen (round 0) can't match.
+            let signature = Self.coarseSignature(plan.steps)
+            if !signature.isEmpty, !screen.isEmpty {
+                let state = "\(signature)@@\(screen.hashValue)"
+                consecutiveRepeats = (state == lastState) ? consecutiveRepeats + 1 : 1
+                lastState = state
+                if consecutiveRepeats >= 3 {
+                    store.log("command", "no-progress loop detected — stopping")
+                    await speak("I keep doing the same thing without the screen changing, so I'll stop. Tell me exactly which element to use and I'll try that.", gen: gen)
+                    brokeOut = true
+                    break
+                }
+            } else {
+                consecutiveRepeats = 0; lastState = ""   // a non-action round breaks the streak
+            }
+
             do {
                 let (performed, stop) = try await executeSteps(plan, gen: gen)
                 performedAll += performed
                 if stop { return }              // dictate_start handed the session to the recorder
+                // Spin guard: two rounds in a row with no real action AND no observation
+                // (e.g. the model keeps "waiting" for something it can't do) — stop.
+                let observed = plan.steps.contains { $0.kind == .describeScreen }
+                emptyRounds = (performed.isEmpty && !observed) ? emptyRounds + 1 : 0
+                if emptyRounds >= 2, !plan.goalComplete {
+                    store.log("command", "no progress for \(emptyRounds) rounds — stopping")
+                    await speak("I'm not able to make progress on that — could you tell me the steps, or which element to use?", gen: gen)
+                    brokeOut = true
+                    break
+                }
             } catch {
                 if Task.isCancelled || gen != runGeneration { throw error }
                 let done = performedAll.isEmpty ? "" : performedAll.joined(separator: " → ") + " → "
@@ -954,7 +999,11 @@ final class AppCoordinator: ObservableObject {
                 return
             }
 
-            complete = plan.goalComplete || plan.steps.isEmpty
+            // Success requires an explicit goal_complete — an empty, non-complete,
+            // non-blocked plan (a stalled/malformed response) must NOT count as done;
+            // it falls through as a no-progress round (the emptyRounds guard catches a
+            // persistent stall and records it INCOMPLETE).
+            complete = plan.goalComplete
             round += 1
             // Let the UI settle (a menu/dialog appears) before the next observation —
             // but not after the final round (no next observation to wait for).
@@ -964,14 +1013,32 @@ final class AppCoordinator: ObservableObject {
         // Stop pressed during the loop's tail (esp. the sleep, which swallows
         // cancellation) must not write stale history or speak a completion line.
         guard gen == runGeneration, !Task.isCancelled else { return }
-        if !performedAll.isEmpty {
-            store.addTranscript(TranscriptRecord(kind: "command", transcript: text, outcome: performedAll.joined(separator: " → ")))
-            recordRecentAction("\(contextTag())\"\(text)\" → \(performedAll.joined(separator: " → "))")
+        // Record the outcome. A non-complete ending (blocked / stuck / spin / round
+        // cap) is marked INCOMPLETE so it isn't logged as a false success and can't
+        // contaminate future context/history.
+        let didWork = !performedAll.isEmpty
+        if didWork || !complete {
+            let base = performedAll.joined(separator: " → ")
+            let outcome = complete ? base : (didWork ? base + " → " : "") + "INCOMPLETE"
+            store.addTranscript(TranscriptRecord(kind: "command", transcript: text, outcome: outcome))
+            recordRecentAction("\(contextTag())\"\(text)\" → \(outcome)")
         }
-        if !complete {
+        if !complete, !brokeOut {
             store.log("command", "stopped after \(round) rounds without goal_complete")
             await speak("I did what I could — it may not be fully finished.", gen: gen)
         }
+    }
+
+    /// A fingerprint of a round's actions INCLUDING the typed text/url, so that
+    /// re-entering different values into the same form (a productive repeat) does NOT
+    /// collide — only a byte-identical action does. Paired with the screen hash, this
+    /// fires only when the exact same action is attempted against an unchanged screen.
+    nonisolated static func coarseSignature(_ steps: [ScreenAction]) -> String {
+        // Exclude none/describe (no mutation) and scroll (scroll-to-find legitimately
+        // repeats the same action across rounds).
+        steps.filter { $0.kind != .none && $0.kind != .describeScreen && $0.kind != .scroll }
+            .map { "\($0.kind.rawValue):\($0.target.lowercased()):\($0.text):\($0.url):\($0.keys.lowercased()):\($0.direction?.rawValue ?? "")" }
+            .joined(separator: "|")
     }
 
     private var carriedTaskProgress: [String] = []
@@ -1314,10 +1381,14 @@ final class AppCoordinator: ObservableObject {
     /// was in and leave it on the clipboard. The final text is recorded so nothing
     /// is lost, even if the paste can't happen.
     private func insertDictation(_ raw: String, claude: ClaudeClient?, gen: Int) async throws {
+        // Format per the target app (general + per-app insert rules). Run the model
+        // pass when cleanup is on OR a paste rule applies — so configured rules aren't
+        // silently ignored just because the cleanup toggle is off. Failure → raw text.
+        let rules = insertRules.instructions(forApp: insertTargetApp?.localizedName)
         let final: String
-        if cleanUpInsertedText, let claude {
-            // Cleanup is a nicety — a failure just pastes the raw transcript.
-            final = (try? await claude.cleanUpDictation(raw, vocabulary: vocabulary.promptContext)) ?? raw
+        if let claude, (cleanUpInsertedText || !rules.isEmpty) {
+            final = (try? await claude.cleanUpDictation(raw, vocabulary: vocabulary.promptContext,
+                                                        instructions: rules, cleanup: cleanUpInsertedText)) ?? raw
         } else {
             final = raw
         }

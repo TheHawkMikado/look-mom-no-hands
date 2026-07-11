@@ -106,10 +106,24 @@ final class ClaudeClient: @unchecked Sendable {
             task, and you emit the NEXT action(s) toward the goal. Do NOT stop at \
             opening a menu/palette/dialog — the next turn you'll see it, so continue \
             into it (select the item, type, confirm) until the goal is actually done. \
-            Set goal_complete=true ONLY when the whole goal is achieved; leave it false \
-            while steps remain. Keep `say` EMPTY on intermediate turns; speak only to \
-            ask something, report completion, or report a problem. Don't repeat an \
-            action already listed in "this task so far".
+            Set goal_complete=true ONLY when the whole goal is achieved; if the request \
+            had several parts, finish ALL of them first. Keep `say` EMPTY on \
+            intermediate turns; speak only to ask, report completion, or report a problem.
+
+            STAY IN THE CURRENT PAGE/WINDOW. You are already where the user is working. \
+            Do the task THERE using the on-screen controls. Do NOT open a new tab or \
+            window, and do NOT type into the browser address/URL bar (labels like \
+            "Address and search bar"), for a task the current page can do — e.g. on \
+            YouTube use YouTube's own search box, not the address bar. Only navigate \
+            away if the user explicitly asks to.
+
+            NEVER REPEAT A FAILED ACTION. If "this task so far" already shows an action \
+            and the screen indicates it didn't achieve the goal, do something DIFFERENT \
+            (a different element, scroll to find it, or read the page) — never re-issue \
+            the same click/type/search. Prefer reading and acting on what's actually on \
+            the page (search the visible results/fields) over re-navigating. If you're \
+            stuck and cannot make progress, set blocked=true (NOT goal_complete) and \
+            say what you managed and what's blocking you, rather than looping.
 
             You may be given a working context (the app/window/tab the user is \
             operating in), the list of everything currently open, and a log of recent \
@@ -125,11 +139,16 @@ final class ClaudeClient: @unchecked Sendable {
             say: one short spoken sentence confirming what you're doing or reporting; \
             empty for a single obvious action.
 
-            teach: set when the user is teaching you HOW to do a task (not doing it) — \
-            "here's how to X", "I'll show you how to X", "remember how to X: …". Capture \
-            a short name, trigger phrases, and the ordered steps. Don't perform it in \
-            the same turn unless they say to do it now. If a taught procedure is listed \
-            in the context and matches the request, follow its steps.
+            teach: set when the user NARRATES how to do a task in words ("here's how to \
+            X: first…, then…"). Capture a short name, trigger phrases, and the ordered \
+            steps. Don't perform it in the same turn unless they say to do it now. If a \
+            taught procedure in the context matches the request, follow its steps. \
+            IMPORTANT: you CANNOT watch or record the user's screen to learn by \
+            demonstration yet. If they say "watch me", "let me show you by doing it", or \
+            "learn from my screen recording", do NOT set teach, do NOT invent placeholder \
+            steps, and do NOT keep waiting/looping — set goal_complete=true and say once: \
+            "I can't watch your screen yet — tell me the steps in words and I'll remember \
+            them."
 
             learn: set ONLY when the user EXPLICITLY teaches or corrects you — they use \
             corrective/teaching language ("no, I meant…", "when I say X I mean Y", \
@@ -181,7 +200,8 @@ final class ClaudeClient: @unchecked Sendable {
                     ],
                     "remember": ["type": "string", "description": "Set to a durable fact when the user tells you to remember something about them or their setup (\"remember that my main project is X\", \"note that I use Brave\", \"for future reference, …\"). One concise fact. Empty otherwise."],
                     "confidence": ["type": "number"],
-                    "goal_complete": ["type": "boolean", "description": "true ONLY when the user's whole goal is fully achieved and no further action is needed. false if more steps remain (e.g. you just opened a panel/dialog and must still act inside it)."]
+                    "goal_complete": ["type": "boolean", "description": "true ONLY when the user's whole goal is fully achieved and no further action is needed. false if more steps remain (e.g. you just opened a panel/dialog and must still act inside it)."],
+                    "blocked": ["type": "boolean", "description": "true if you cannot make progress toward the goal (you're stuck, an element can't be found, or the task isn't doable). Use INSTEAD of goal_complete when the goal was NOT achieved; explain in `say`."]
                 ],
                 "required": ["say", "steps", "confidence", "goal_complete"]
             ]
@@ -261,21 +281,48 @@ final class ClaudeClient: @unchecked Sendable {
     /// errors, adds punctuation/capitalization, drops filler — keeps the wording.
     /// Haiku for latency (this sits directly in front of a paste). Returns the
     /// cleaned text, or throws so the caller can paste the raw transcript.
-    func cleanUpDictation(_ raw: String, vocabulary: String = "") async throws -> String {
+    /// `cleanup` = the user's cleanup toggle. When false, we only apply the explicit
+    /// formatting `instructions` (a paste rule) and otherwise keep the text verbatim —
+    /// so a paste rule doesn't silently re-enable the cleanup the user turned off.
+    func cleanUpDictation(_ raw: String, vocabulary: String = "", instructions: String = "", cleanup: Bool = true) async throws -> String {
+        let content: String
+        if cleanup {
+            let extra = instructions.isEmpty ? "" : """
+
+
+                Also follow these formatting instructions for where this is being pasted:
+                \(instructions)
+                """
+            content = """
+                Clean up this dictated text so it can be pasted as-is: fix obvious \
+                speech-to-text errors, add sensible punctuation and capitalization, \
+                and remove filler words and false starts (um, uh, "like", repeated \
+                words). Keep the user's wording and meaning — do NOT summarize, \
+                rephrase, or add anything unless the formatting instructions say to. \
+                Output ONLY the cleaned text.\(extra)
+
+                \(raw)
+                """
+        } else {
+            // Formatting-only: apply the paste rule, otherwise keep it verbatim.
+            content = """
+                Apply ONLY these formatting instructions to the text below; otherwise \
+                keep it EXACTLY as-is (do not fix speech-to-text errors, change \
+                punctuation, or remove filler). Output ONLY the result.
+
+                Formatting instructions:
+                \(instructions)
+
+                Text:
+                \(raw)
+                """
+        }
         var body: [String: Any] = [
             "model": ClaudeModel.haiku45.rawValue,
             "max_tokens": 4000,
             "messages": [[
                 "role": "user",
-                "content": """
-                Clean up this dictated text so it can be pasted as-is: fix obvious \
-                speech-to-text errors, add sensible punctuation and capitalization, \
-                and remove filler words and false starts (um, uh, "like", repeated \
-                words). Keep the user's wording and meaning — do NOT summarize, \
-                rephrase, or add anything. Output ONLY the cleaned text.
-
-                \(raw)
-                """
+                "content": content
             ]]
         ]
         if !vocabulary.isEmpty { body["system"] = vocabulary }

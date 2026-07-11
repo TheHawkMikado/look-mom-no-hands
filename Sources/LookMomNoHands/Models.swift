@@ -72,6 +72,9 @@ struct ActionPlan: Decodable, Sendable {
     /// the screen and asks for the next actions — so a task like "create a new
     /// session" continues into the panel it just opened instead of stopping there.
     let goalComplete: Bool
+    /// The model gave up: it can't make progress toward the goal. Distinct from
+    /// goal_complete so a failed task is recorded as incomplete, not a false success.
+    let blocked: Bool
     /// A step failed to decode (e.g. unknown kind). Steps are ordered and can
     /// depend on each other, so the coordinator must refuse to run a plan with a
     /// hole rather than execute the survivors against the wrong context.
@@ -105,10 +108,11 @@ struct ActionPlan: Decodable, Sendable {
         // Default false so the loop keeps going toward completion; the round cap and
         // the empty-steps break prevent runaway if the model omits it.
         goalComplete = (try? c.decodeIfPresent(Bool.self, forKey: .goalComplete)) ?? false
+        blocked = (try? c.decodeIfPresent(Bool.self, forKey: .blocked)) ?? false
     }
 
     private enum CodingKeys: String, CodingKey {
-        case say, steps, clarify, learn, teach, remember, confidence
+        case say, steps, clarify, learn, teach, remember, blocked, confidence
         case goalComplete = "goal_complete"
     }
 
@@ -180,6 +184,23 @@ enum RecorderOutput: Sendable, Equatable {
         case .note: return "Save as note"
         case .both: return "Insert + note"
         }
+    }
+}
+
+/// A per-app instruction for how to format text before it's pasted (insert mode).
+/// E.g. app "Code" → "format as a clear prompt with numbered steps." Applied on top
+/// of the general insert instruction.
+struct InsertRule: Codable, Identifiable, Sendable, Equatable {
+    let id: String
+    var app: String            // matched against the target app's name (contains, case-insensitive)
+    var instructions: String
+
+    init(id: String = UUID().uuidString, app: String, instructions: String) {
+        self.id = id
+        self.app = app.trimmingCharacters(in: .whitespacesAndNewlines)
+        // NOT trimmed: this is edited live through a Binding, and trimming on every
+        // keystroke strips a trailing space before the next character can arrive.
+        self.instructions = instructions
     }
 }
 
