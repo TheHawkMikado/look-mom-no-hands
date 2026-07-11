@@ -65,6 +65,11 @@ struct ActionPlan: Decodable, Sendable {
     let clarify: Clarification?         // set ⇒ steps is empty; ask before acting
     let learn: LearnedFact?             // a durable mapping the user just taught/corrected
     let confidence: Double
+    /// The act-observe loop's stop signal: the model sets this true once the user's
+    /// goal is fully achieved. While false (and steps ran), the coordinator re-reads
+    /// the screen and asks for the next actions — so a task like "create a new
+    /// session" continues into the panel it just opened instead of stopping there.
+    let goalComplete: Bool
     /// A step failed to decode (e.g. unknown kind). Steps are ordered and can
     /// depend on each other, so the coordinator must refuse to run a plan with a
     /// hole rather than execute the survivors against the wrong context.
@@ -93,9 +98,15 @@ struct ActionPlan: Decodable, Sendable {
         }
         clarify = try? c.decodeIfPresent(Clarification.self, forKey: .clarify)
         confidence = (try? c.decodeIfPresent(Double.self, forKey: .confidence)) ?? 0
+        // Default false so the loop keeps going toward completion; the round cap and
+        // the empty-steps break prevent runaway if the model omits it.
+        goalComplete = (try? c.decodeIfPresent(Bool.self, forKey: .goalComplete)) ?? false
     }
 
-    private enum CodingKeys: String, CodingKey { case say, steps, clarify, learn, confidence }
+    private enum CodingKeys: String, CodingKey {
+        case say, steps, clarify, learn, confidence
+        case goalComplete = "goal_complete"
+    }
 
     /// Never throws out of an array decode — a bad element becomes nil.
     private struct FailableStep: Decodable {

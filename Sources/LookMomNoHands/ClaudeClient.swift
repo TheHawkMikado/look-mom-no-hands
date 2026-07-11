@@ -101,6 +101,16 @@ final class ClaudeClient: @unchecked Sendable {
             previous clarification question, act on it; if they decline, emit no steps \
             and a brief acknowledging say.
 
+            You run in an ACT-OBSERVE LOOP. You are called repeatedly for ONE goal: \
+            each turn you see the current screen and the actions already taken this \
+            task, and you emit the NEXT action(s) toward the goal. Do NOT stop at \
+            opening a menu/palette/dialog — the next turn you'll see it, so continue \
+            into it (select the item, type, confirm) until the goal is actually done. \
+            Set goal_complete=true ONLY when the whole goal is achieved; leave it false \
+            while steps remain. Keep `say` EMPTY on intermediate turns; speak only to \
+            ask something, report completion, or report a problem. Don't repeat an \
+            action already listed in "this task so far".
+
             You may be given a working context (the app/window/tab the user is \
             operating in), the list of everything currently open, and a log of recent \
             actions. Treat the working context as the ACTIVE target: apply commands to \
@@ -152,9 +162,10 @@ final class ClaudeClient: @unchecked Sendable {
                         ],
                         "required": ["spoken", "written"]
                     ],
-                    "confidence": ["type": "number"]
+                    "confidence": ["type": "number"],
+                    "goal_complete": ["type": "boolean", "description": "true ONLY when the user's whole goal is fully achieved and no further action is needed. false if more steps remain (e.g. you just opened a panel/dialog and must still act inside it)."]
                 ],
-                "required": ["say", "steps", "confidence"]
+                "required": ["say", "steps", "confidence", "goal_complete"]
             ]
         ]
 

@@ -804,7 +804,7 @@ final class AppCoordinator: ObservableObject {
         freshUtterance()
         sessionIdleSince = Date()
         guard !appleText.isEmpty else { armCaptureForCurrentMode(); return }
-        guard let claude else { phase = .error("No API key set"); armCaptureForCurrentMode(); return }
+        guard claude != nil else { phase = .error("No API key set"); armCaptureForCurrentMode(); return }
 
         // A spoken answer clears the on-screen question — from here it's just
         // another turn in the dialogue.
@@ -812,9 +812,11 @@ final class AppCoordinator: ObservableObject {
         pendingClarification = nil
         processing = true
         phase = .thinking
-        let startedAt = Date()
         let gen = runGeneration
-        let priorDialogue = dialogue
+        // Resume a mid-task clarification with what was already done; a fresh command
+        // starts clean.
+        let seedProgress = answeringClarification ? carriedTaskProgress : []
+        carriedTaskProgress = []
 
         actionTask = Task {
             defer { self.finishProcessing(gen) }
@@ -838,48 +840,7 @@ final class AppCoordinator: ObservableObject {
                     self.lastActionableCommand = text
                 }
                 self.store.log("asr", answeringClarification ? "answer: \(text)" : "command: \(text)")
-                // Read the actual screen only when the command likely acts on it —
-                // simple "open X" commands skip the (slower) AX walk. Runs in a
-                // task-group child (off the main actor AND cancellation-aware, so
-                // Stop interrupts the walk); a failure falls back to no context.
-                var screen = ""
-                if Self.needsScreenContext(text) {
-                    // Sticky focus: bring the working-context window forward first, so
-                    // the snapshot is read from it and actions land there — "everything
-                    // relates to that window until I switch." But if that window is gone
-                    // (closed since), clear it rather than raise a dead window forever.
-                    if let win = self.workingContext.window {
-                        let labels = self.environment.snapshot.apps.flatMap { a in a.windows.map { "\(a.name) \($0.title)" } }
-                        if ScreenController.bestWindowIndex(labels, query: win) != nil {
-                            try? await withThrowingTaskGroup(of: Void.self) { group in
-                                group.addTask { try? ScreenController.focusWindow(matching: win) }
-                                try await group.waitForAll()
-                            }
-                        } else {
-                            self.workingContext.window = nil
-                        }
-                    }
-                    let snap = try await withThrowingTaskGroup(of: ScreenController.Snapshot?.self) { group in
-                        group.addTask { try? ScreenController.focusedWindowSnapshot() }
-                        return try await group.next() ?? nil
-                    }
-                    if let snap {
-                        screen = snap.promptText
-                        self.store.log("screen", "read \(snap.elements.count) elements from \(snap.app)")
-                    }
-                }
-                // Everything the planner needs to stay on-track across turns: the
-                // sticky focus, what's open, and what we just did.
-                let context = [self.workingContext.promptText,
-                               self.environment.snapshot.promptText,
-                               self.recentActionsBlock()].filter { !$0.isEmpty }.joined(separator: "\n\n")
-                let plan = try await claude.parsePlan(text, dialogue: priorDialogue,
-                                                      vocabulary: self.vocabulary.promptContext,
-                                                      screen: screen, context: context)
-                try Task.checkCancellation()
-                let ms = Int(Date().timeIntervalSince(startedAt) * 1000)
-                self.store.log("claude", "plan: \(plan.steps.count) step(s)\(plan.clarify != nil ? " + question" : "") conf=\(plan.confidence) (\(ms)ms)")
-                try await self.runPlan(plan, transcript: text, priorDialogue: priorDialogue, gen: gen)
+                try await self.runGoal(text: text, gen: gen, seedProgress: seedProgress)
             } catch {
                 // Cancellation isn't a failure: Stop was pressed while the call was
                 // in flight, and acting now would defy the user's explicit off.
@@ -903,105 +864,164 @@ final class AppCoordinator: ObservableObject {
     // sequence starting on a user turn, as the Messages API requires.
     private static let maxDialogueTurns = 8
 
-    /// Runs a parsed plan: either ask a clarifying question (and wait for the
-    /// next utterance), or execute each step in order. Speaks the model's reply.
-    private func runPlan(_ plan: ActionPlan, transcript: String,
-                         priorDialogue: [(role: String, content: String)], gen: Int) async throws {
-        // Save a taught/corrected mapping first (so it survives even a clarify
-        // plan), gen-guarded so a superseded run can't write to the vocabulary.
-        if let fact = plan.learn, fact.isValid, gen == runGeneration {
-            vocabulary.learnCorrection(spoken: fact.spoken, written: fact.written)
-            refreshContextualPhrases()
-            store.log("learn", "\(fact.spoken) → \(fact.written)")
-        }
+    // A goal runs as an act-observe loop, bounded so it can't run away.
+    private static let maxTaskRounds = 6
 
-        if let clarify = plan.clarify {
-            // Remember the exchange so the user's answer is interpreted in context.
-            dialogue = priorDialogue
-            dialogue.append((role: "user", content: transcript))
-            dialogue.append((role: "assistant", content: "I need to clarify: \(clarify.question)"))
-            if dialogue.count > Self.maxDialogueTurns {
-                dialogue.removeFirst(dialogue.count - Self.maxDialogueTurns)
+    /// Drives one goal to completion: each round re-reads the screen, asks the model
+    /// for the next action(s) toward the goal, executes them, and repeats until the
+    /// model reports goal_complete (or nothing more to do, or the round cap). This is
+    /// what makes it *finish* a task — continue into the panel it just opened rather
+    /// than stopping there. Parse/network errors propagate to the caller's catch;
+    /// step-execution failures are reported here and end the loop.
+    private func runGoal(text: String, gen: Int, seedProgress: [String]) async throws {
+        guard let claude else { return }
+        var performedAll = seedProgress   // carried across a mid-task clarification
+        var complete = false
+        var round = 0
+        while round < Self.maxTaskRounds, !complete {
+            try Task.checkCancellation()
+            phase = .thinking
+            let screen = try await gatherScreen(for: text, round: round)
+            let context = buildPlannerContext(taskProgress: performedAll)
+            let plan = try await claude.parsePlan(text, dialogue: dialogue,
+                                                  vocabulary: vocabulary.promptContext,
+                                                  screen: screen, context: context)
+            try Task.checkCancellation()
+            store.log("claude", "round \(round): \(plan.steps.count) step(s) complete=\(plan.goalComplete)\(plan.clarify != nil ? " +question" : "")")
+
+            // A taught correction applies regardless of the rest of the plan.
+            if let fact = plan.learn, fact.isValid, gen == runGeneration {
+                vocabulary.learnCorrection(spoken: fact.spoken, written: fact.written)
+                refreshContextualPhrases()
+                store.log("learn", "\(fact.spoken) → \(fact.written)")
             }
-            store.log("clarify", clarify.question)
-            // Publish the panel/phase BEFORE speaking, so even if TTS stalls the
-            // question is on screen. finishProcessing (task defer) preserves
-            // .clarifying, so we keep listening for the answer.
-            pendingClarification = clarify
-            phase = .clarifying
-            await speak(clarify.spoken, gen: gen)
-            return
+
+            if let clarify = plan.clarify {
+                dialogue.append((role: "user", content: text))
+                dialogue.append((role: "assistant", content: "I need to clarify: \(clarify.question)"))
+                if dialogue.count > Self.maxDialogueTurns { dialogue.removeFirst(dialogue.count - Self.maxDialogueTurns) }
+                carriedTaskProgress = performedAll   // resume the task (not re-run it) after the answer
+                store.log("clarify", clarify.question)
+                pendingClarification = clarify
+                phase = .clarifying
+                await speak(clarify.spoken, gen: gen)
+                return
+            }
+            if plan.malformed {
+                dialogue = []
+                phase = .error("didn't understand part of that")
+                await speak("I didn't catch part of that — could you say it again?", gen: gen)
+                return
+            }
+
+            dialogue = []                        // request resolved; next utterance is fresh
+            if !plan.say.isEmpty { await speak(plan.say, gen: gen) }
+            guard gen == runGeneration, !Task.isCancelled else { return }
+
+            do {
+                let (performed, stop) = try await executeSteps(plan, gen: gen)
+                performedAll += performed
+                if stop { return }              // dictate_start handed the session to the recorder
+            } catch {
+                if Task.isCancelled || gen != runGeneration { throw error }
+                let done = performedAll.isEmpty ? "" : performedAll.joined(separator: " → ") + " → "
+                store.addTranscript(TranscriptRecord(kind: "command", transcript: text, outcome: "\(done)FAILED: \(error)"))
+                recordRecentAction("\"\(text)\" → \(done)FAILED")
+                phase = .error("\(error)")
+                store.log("error", "step failed after \(performedAll.count) done: \(error)")
+                await speak(performedAll.isEmpty ? "That didn't work." : "I did part of it, then hit a problem.", gen: gen)
+                return
+            }
+
+            complete = plan.goalComplete || plan.steps.isEmpty
+            round += 1
+            // Let the UI settle (a menu/dialog appears) before the next observation —
+            // but not after the final round (no next observation to wait for).
+            if !complete, round < Self.maxTaskRounds { try? await Task.sleep(nanoseconds: 350_000_000) }
         }
 
-        // A step failed to decode: the plan has a hole, and steps are ordered and
-        // interdependent, so running the survivors could act against the wrong
-        // context. Fail closed and ask the user to rephrase.
-        if plan.malformed {
-            dialogue = []
-            phase = .error("didn't understand part of that")
-            store.log("error", "plan had an undecodable step — refusing partial execution")
-            await speak("I didn't catch part of that — could you say it again?", gen: gen)
-            return
-        }
-
-        dialogue = []   // request resolved; next utterance starts fresh
-        await speak(plan.say, gen: gen)
+        // Stop pressed during the loop's tail (esp. the sleep, which swallows
+        // cancellation) must not write stale history or speak a completion line.
         guard gen == runGeneration, !Task.isCancelled else { return }
-
-        var performed: [String] = []
-        do {
-            for step in plan.steps {
-                try Task.checkCancellation()
-                switch step.kind {
-                case .dictateStart:
-                    self.startRecording(output: .note)
-                    return   // the recorder owns the session now; remaining steps don't apply
-                case .describeScreen:
-                    // Writes its own transcript record (the spoken answer), so it's
-                    // not added to `performed` — that would double-log a thin record.
-                    try await self.describeScreen(question: step.target, gen: gen)
-                case .none:
-                    continue
-                default:
-                    self.phase = .acting
-                    if step.kind == .click {
-                        // A click gets a screenshot fallback (see performClick); the
-                        // other kinds run the plain synchronous AX/CGEvent path.
-                        try await self.performClick(target: step.target, gen: gen)
-                    } else {
-                        // The AX walk + CGEvent posting is synchronous and can be slow on
-                        // a complex UI — run it off the main actor (a task-group child
-                        // leaves the actor). Structured, not detached: cancelling
-                        // actionTask propagates in, and perform() checks cancellation
-                        // before every irreversible event, so Stop halts mid-walk/typing.
-                        try await withThrowingTaskGroup(of: Void.self) { group in
-                            group.addTask { try ScreenController.perform(step) }
-                            try await group.waitForAll()
-                        }
-                    }
-                    performed.append(Self.describe(step))
-                    self.updateContext(for: step)   // move the sticky focus if this step changed it
-                    self.store.log("action", "performed: \(Self.describe(step))")
-                }
-            }
-            if !performed.isEmpty {
-                self.store.addTranscript(TranscriptRecord(kind: "command", transcript: transcript,
-                                                          outcome: performed.joined(separator: " → ")))
-                self.recordRecentAction("\"\(transcript)\" → \(performed.joined(separator: " → "))")
-            }
-        } catch {
-            if Task.isCancelled || gen != runGeneration { throw error }
-            // A step failed partway. Persist what actually ran (so history and any
-            // retry see partial completion, not a clean slate), report it on screen
-            // AND aloud — this is a hands-free app, silence reads as success.
-            let done = performed.isEmpty ? "" : performed.joined(separator: " → ") + " → "
-            self.store.addTranscript(TranscriptRecord(kind: "command", transcript: transcript,
-                                                      outcome: "\(done)FAILED: \(error)"))
-            self.recordRecentAction("\"\(transcript)\" → \(done)FAILED")
-            self.phase = .error("\(error)")
-            self.store.log("error", "step failed after \(performed.count) done: \(error)")
-            await self.speak(performed.isEmpty ? "That didn't work." : "I did the first part, then hit a problem.", gen: gen)
+        if !performedAll.isEmpty {
+            store.addTranscript(TranscriptRecord(kind: "command", transcript: text, outcome: performedAll.joined(separator: " → ")))
+            recordRecentAction("\"\(text)\" → \(performedAll.joined(separator: " → "))")
         }
+        if !complete {
+            store.log("command", "stopped after \(round) rounds without goal_complete")
+            await speak("I did what I could — it may not be fully finished.", gen: gen)
+        }
+    }
+
+    private var carriedTaskProgress: [String] = []
+
+    /// Executes one round's steps in order. Returns what ran and whether the loop
+    /// must stop (a dictate_start step hands the mic to the recorder).
+    private func executeSteps(_ plan: ActionPlan, gen: Int) async throws -> (performed: [String], stop: Bool) {
+        var performed: [String] = []
+        for step in plan.steps {
+            try Task.checkCancellation()
+            switch step.kind {
+            case .dictateStart:
+                self.startRecording(output: .note)
+                return (performed, true)
+            case .describeScreen:
+                try await self.describeScreen(question: step.target, gen: gen)
+            case .none:
+                continue
+            default:
+                self.phase = .acting
+                if step.kind == .click {
+                    try await self.performClick(target: step.target, gen: gen)
+                } else {
+                    // Off the main actor + cancellable: perform() checks cancellation
+                    // before every irreversible event, so Stop halts mid-walk/typing.
+                    try await withThrowingTaskGroup(of: Void.self) { group in
+                        group.addTask { try ScreenController.perform(step) }
+                        try await group.waitForAll()
+                    }
+                }
+                performed.append(Self.describe(step))
+                self.updateContext(for: step)
+                self.store.log("action", "performed: \(Self.describe(step))")
+            }
+        }
+        return (performed, false)
+    }
+
+    /// Reads the focused window (raising the sticky-context window first). Round 0
+    /// skips the AX walk for simple commands; later rounds always observe results.
+    private func gatherScreen(for text: String, round: Int) async throws -> String {
+        guard round > 0 || Self.needsScreenContext(text) else { return "" }
+        // Establish the sticky window only on the first round. Re-raising it every
+        // round would dismiss a menu/palette/overlay a prior round opened — the loop
+        // must read (and act in) whatever the last action produced.
+        if round == 0, let win = workingContext.window {
+            let labels = environment.snapshot.apps.flatMap { a in a.windows.map { "\(a.name) \($0.title)" } }
+            if ScreenController.bestWindowIndex(labels, query: win) != nil {
+                try? await withThrowingTaskGroup(of: Void.self) { group in
+                    group.addTask { try? ScreenController.focusWindow(matching: win) }
+                    try await group.waitForAll()
+                }
+            } else {
+                workingContext.window = nil   // stale — the window is gone
+            }
+        }
+        let snap = try await withThrowingTaskGroup(of: ScreenController.Snapshot?.self) { group in
+            group.addTask { try? ScreenController.focusedWindowSnapshot() }
+            return try await group.next() ?? nil
+        }
+        guard let snap else { return "" }
+        store.log("screen", "round \(round): read \(snap.elements.count) elements from \(snap.app)")
+        return snap.promptText
+    }
+
+    private func buildPlannerContext(taskProgress: [String]) -> String {
+        var parts = [workingContext.promptText, environment.snapshot.promptText, recentActionsBlock()]
+        if !taskProgress.isEmpty {
+            parts.append("This task so far (already done — don't repeat):\n" + taskProgress.map { "- \($0)" }.joined(separator: "\n"))
+        }
+        return parts.filter { !$0.isEmpty }.joined(separator: "\n\n")
     }
 
     // MARK: Working context + memory
