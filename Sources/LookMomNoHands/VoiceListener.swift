@@ -28,6 +28,11 @@ final class VoiceListener {
     var onInfo: ((String) -> Void)?
     /// Phrases the recognizer is biased toward (wake/stop words). Set before start().
     var contextualPhrases: [String] = []
+    /// Main queue; smoothed 0…1 mic level for the recorder pill's waveform. Only
+    /// emitted while `metering` is on (recording), to avoid needless main-thread churn.
+    var onLevel: ((Float) -> Void)?
+    var metering = false
+    private var levelSmoothed: Float = 0
 
     private let recognizer = SFSpeechRecognizer(locale: Locale(identifier: "en-US"))
     private let engine = AVAudioEngine()
@@ -106,6 +111,7 @@ final class VoiceListener {
             self.request?.append(buffer)
             self.requestLock.unlock()
             self.captureIfNeeded(buffer)
+            self.emitLevel(buffer)
         }
         engine.prepare()
         do {
@@ -146,6 +152,29 @@ final class VoiceListener {
             let clamped = max(-1, min(1, channel[i]))
             captureSamples.append(Int16(clamped * Float(Int16.max)))
         }
+    }
+
+    // Realtime audio thread. Emits a smoothed mic level for the pill waveform.
+    private func emitLevel(_ buffer: AVAudioPCMBuffer) {
+        guard metering, let cb = onLevel, let channel = buffer.floatChannelData?[0] else { return }
+        let n = Int(buffer.frameLength)
+        guard n > 0 else { return }
+        let level = Self.normalizedLevel(rms: Self.rms(channel, n))
+        levelSmoothed = levelSmoothed * 0.7 + level * 0.3   // ease jitter
+        let out = levelSmoothed
+        DispatchQueue.main.async { cb(out) }
+    }
+
+    private static func rms(_ samples: UnsafePointer<Float>, _ n: Int) -> Float {
+        var sum: Float = 0
+        for i in 0..<n { let s = samples[i]; sum += s * s }
+        return (sum / Float(n)).squareRoot()
+    }
+
+    /// Maps a raw RMS (speech is a small fraction of full-scale) to a lively 0…1
+    /// bar height. Pure — unit-tested.
+    static func normalizedLevel(rms: Float) -> Float {
+        min(1, max(0, rms * 12))
     }
 
     /// Builds a canonical 16-bit mono PCM WAV. Pure function — unit-tested.

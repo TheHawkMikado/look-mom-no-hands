@@ -50,6 +50,7 @@ final class AppCoordinator: ObservableObject {
     private static let cleanupKey = "cleanUpInsertedText"
     private static let visionKey = "visionClickEnabled"
     private let hotkey = HotkeyMonitor()
+    private let pill = RecorderPill()                        // floating recorder HUD
     private var recorderOutput: RecorderOutput = .note       // what the current recording produces
     private var starting = false                             // start() in flight (async permission gap)
     private var pendingRecording = false                     // recording requested before the mic was on
@@ -79,6 +80,8 @@ final class AppCoordinator: ObservableObject {
     // never buffers more than one chunk of audio in memory.
     @Published var liveActive = false
     @Published var liveTranscript = ""
+    let meter = RecorderMeter()                 // 0…1 mic level (isolated from other views)
+    @Published var recordingStartedAt: Date?    // drives the pill's elapsed timer
     private var lastFlushAt = Date()
     private var flushing = false
     private var liveGeneration = 0   // bumped each live session; stale flush tasks compare against it
@@ -173,6 +176,7 @@ final class AppCoordinator: ObservableObject {
         refreshContextualPhrases()
         listener.onPartial = { [weak self] text in self?.handlePartial(text) }
         listener.onInfo = { [weak self] msg in self?.store.log("speech", msg) }
+        listener.onLevel = { [weak self] level in self?.meter.level = level }
         // Push-to-dictate chord works whenever the app is running, even before
         // Start — it turns the mic on on demand. Global delivery needs Accessibility.
         hotkey.onToggle = { [weak self] in self?.toggleHotkeyDictation() }
@@ -398,6 +402,10 @@ final class AppCoordinator: ObservableObject {
         flushing = false
         pendingClarification = nil
         pendingRecording = false
+        listener.metering = false
+        meter.level = 0
+        recordingStartedAt = nil
+        pill.hide()
         liveActive = false
         dialogue = []
         isRunning = false
@@ -601,11 +609,14 @@ final class AppCoordinator: ObservableObject {
         phase = .recording
         lastFlushAt = Date()
         lastHeardAt = Date()   // don't let the end-pause fire before any speech
+        recordingStartedAt = Date()
         flushing = false
         freshUtterance()
         listener.carryForward = true
+        listener.metering = true
         armCaptureForCurrentMode()
         startTicker()
+        pill.show(coordinator: self)
         store.log("recorder", "started (\(output))")
     }
 
@@ -617,8 +628,29 @@ final class AppCoordinator: ObservableObject {
         mode = recorderReturnMode
         liveActive = false
         listener.carryForward = false
+        listener.metering = false
+        meter.level = 0
+        recordingStartedAt = nil
         store.log("recorder", "stopped (\(output)) — processing")
         finishRecording(output: output)
+    }
+
+    /// Discards the current recording without processing it (pill's ✕).
+    func cancelRecording() {
+        guard mode == .recording else { return }
+        liveGeneration += 1            // drop any in-flight chunk
+        mode = recorderReturnMode
+        liveActive = false
+        liveTranscript = ""
+        listener.carryForward = false
+        listener.metering = false
+        listener.captureAudio = false
+        meter.level = 0
+        recordingStartedAt = nil
+        pill.hide()
+        freshUtterance()
+        settleSessionPhase()
+        store.log("recorder", "cancelled")
     }
 
     private func finishRecording(output: RecorderOutput) {
@@ -626,7 +658,9 @@ final class AppCoordinator: ObservableObject {
         phase = .thinking
         let gen = runGeneration
         actionTask = Task {
-            defer { self.finishProcessing(gen) }
+            // Gen-guard the hide: a superseded task must not hide a *newer*
+            // recording's pill (Stop→retry overlapping an in-flight transcription).
+            defer { self.finishProcessing(gen); if gen == self.runGeneration { self.pill.hide() } }
             let raw = await self.finalizeRecorderTranscript()
             let text = Self.stripDictationTriggers(raw).trimmingCharacters(in: .whitespacesAndNewlines)
             guard !text.isEmpty else {

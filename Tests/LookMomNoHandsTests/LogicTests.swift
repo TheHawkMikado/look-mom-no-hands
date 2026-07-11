@@ -132,6 +132,14 @@ final class ActionDecodingTests: XCTestCase {
         XCTAssertFalse(AppCoordinator.isRepeatPhrase(""))
     }
 
+    func testNormalizedLevelClampsAndScales() {
+        XCTAssertEqual(VoiceListener.normalizedLevel(rms: 0), 0)
+        XCTAssertEqual(VoiceListener.normalizedLevel(rms: 1), 1)       // clamped
+        XCTAssertEqual(VoiceListener.normalizedLevel(rms: 0.05), 0.6, accuracy: 0.0001)
+        XCTAssertGreaterThan(VoiceListener.normalizedLevel(rms: 0.02), 0)
+        XCTAssertLessThanOrEqual(VoiceListener.normalizedLevel(rms: 5), 1)
+    }
+
     func testRecorderOutputRouting() {
         XCTAssertTrue(RecorderOutput.insert.producesInsert)
         XCTAssertFalse(RecorderOutput.insert.producesNote)
