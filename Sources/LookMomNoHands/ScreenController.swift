@@ -41,9 +41,10 @@ enum ScreenController {
 
     static func perform(_ action: ScreenAction) throws {
         switch action.kind {
-        case .click, .type, .scroll, .keystroke:
-            // macOS silently discards synthetic events from untrusted processes —
-            // fail loudly instead of logging a success that never happened.
+        case .click, .type, .scroll, .keystroke, .focusWindow:
+            // macOS silently discards synthetic events from untrusted processes,
+            // and window enumeration needs AX — fail loudly instead of logging a
+            // success that never happened.
             guard isTrusted else { throw ControlError.notTrusted }
         case .openApp, .openURL, .dictateStart, .none:
             break
@@ -58,9 +59,61 @@ enum ScreenController {
             try scroll(direction: direction)
         case .openApp: try openApp(named: action.target)
         case .openURL: try openURL(action.url, inApp: action.target)
+        case .focusWindow: try focusWindow(matching: action.target)
         case .keystroke: try keystroke(action.keys)
         case .dictateStart, .none: break // handled by the coordinator, not here
         }
+    }
+
+    // MARK: - Window focus
+
+    struct WindowInfo { let app: String; let title: String; let window: AXUIElement; let runningApp: NSRunningApplication }
+
+    /// Every on-screen window of every regular app, with its title (via AX — no
+    /// Screen Recording permission needed, unlike CGWindowList names).
+    static func openWindows() -> [WindowInfo] {
+        var out: [WindowInfo] = []
+        for app in NSWorkspace.shared.runningApplications where app.activationPolicy == .regular {
+            guard let name = app.localizedName else { continue }
+            let axApp = AXUIElementCreateApplication(app.processIdentifier)
+            var value: CFTypeRef?
+            guard AXUIElementCopyAttributeValue(axApp, kAXWindowsAttribute as CFString, &value) == .success,
+                  let windows = value as? [AXUIElement] else { continue }
+            for w in windows {
+                out.append(WindowInfo(app: name, title: string(w, kAXTitleAttribute) ?? "",
+                                      window: w, runningApp: app))
+            }
+        }
+        return out
+    }
+
+    /// Raises the open window that best matches a spoken description ("the Look
+    /// Mom No Hands VS Code") and activates its app. Matches on app name + title,
+    /// so "look-mom-no-hands — Visual Studio Code" resolves.
+    static func focusWindow(matching query: String) throws {
+        try Task.checkCancellation()
+        let windows = openWindows()
+        let labels = windows.map { "\($0.app) \($0.title)" }
+        guard let idx = bestWindowIndex(labels, query: query) else {
+            throw ControlError.elementNotFound(query)
+        }
+        let hit = windows[idx]
+        hit.runningApp.activate(options: [])
+        AXUIElementPerformAction(hit.window, kAXRaiseAction as CFString)
+    }
+
+    /// Index of the window label sharing the most words with the query (0 → nil).
+    /// Pure — unit-tested.
+    static func bestWindowIndex(_ labels: [String], query: String) -> Int? {
+        let q = Set(tokens(query.lowercased()))
+        guard !q.isEmpty else { return nil }
+        var best: (idx: Int, score: Int)?
+        for (i, label) in labels.enumerated() {
+            let words = Set(tokens(label.lowercased()))
+            let score = q.intersection(words).count
+            if score > 0, score > (best?.score ?? 0) { best = (i, score) }
+        }
+        return best?.idx
     }
 
     static func click(target: String) throws {

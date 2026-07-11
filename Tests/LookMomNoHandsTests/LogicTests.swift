@@ -461,6 +461,21 @@ final class URLAndKeystrokeTests: XCTestCase {
         XCTAssertNil(ScreenController.parseKeystroke("cmd+f13")) // unmapped key
     }
 
+    func testWindowMatchPicksBestByTitle() {
+        // The reporter's real scenario: several VS Code windows, target one by name.
+        let labels = [
+            "Code file.ts — best-day-manager — Visual Studio Code",
+            "Code file.swift — look-mom-no-hands — Visual Studio Code",
+            "Google Chrome — YouTube",
+        ]
+        XCTAssertEqual(ScreenController.bestWindowIndex(labels, query: "the look mom no hands VS Code"), 1)
+        XCTAssertEqual(ScreenController.bestWindowIndex(labels, query: "best day manager vs code"), 0)
+        XCTAssertEqual(ScreenController.bestWindowIndex(labels, query: "chrome youtube"), 2)
+        // No shared words → nil (caller errors rather than raising a random window).
+        XCTAssertNil(ScreenController.bestWindowIndex(labels, query: "photoshop"))
+        XCTAssertNil(ScreenController.bestWindowIndex(labels, query: ""))
+    }
+
     func testAppNameResolvesShorthand() {
         // Mirrors the reporter's real /Applications, incl. a longer decoy that
         // also contains "chrome".

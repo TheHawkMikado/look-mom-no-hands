@@ -646,6 +646,7 @@ final class AppCoordinator: ObservableObject {
     private static func describe(_ step: ScreenAction) -> String {
         switch step.kind {
         case .openURL: return "open_url \(step.url)\(step.target.isEmpty ? "" : " in \(step.target)")"
+        case .focusWindow: return "focus_window \(step.target)"
         case .keystroke: return "keystroke \(step.keys)"
         case .type: return "type \(step.text)"
         case .scroll: return "scroll \(step.direction?.rawValue ?? "?")"

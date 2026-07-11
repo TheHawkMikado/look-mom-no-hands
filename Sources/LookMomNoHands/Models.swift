@@ -24,6 +24,7 @@ struct ScreenAction: Decodable, Sendable {
         case scroll                           // scroll the frontmost window
         case openApp = "open_app"             // launch/activate an app by name
         case openURL = "open_url"             // open a website (optionally in a named browser)
+        case focusWindow = "focus_window"     // raise a specific open window by its title/app
         case keystroke                        // press a shortcut like "cmd+t"
         case dictateStart = "dictate_start"   // begin a Wisprflow-style dictation session
         case none                             // nothing actionable

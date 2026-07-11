@@ -64,8 +64,8 @@ final class ClaudeClient: @unchecked Sendable {
             "additionalProperties": false,
             "properties": [
                 "kind": ["type": "string",
-                         "enum": ["click", "type", "scroll", "open_app", "open_url", "keystroke", "dictate_start", "none"]],
-                "target": ["type": "string", "description": "UI element or app name; for open_url optionally the browser to use; empty if unused"],
+                         "enum": ["click", "type", "scroll", "open_app", "open_url", "focus_window", "keystroke", "dictate_start", "none"]],
+                "target": ["type": "string", "description": "UI element / app name; for open_url optionally the browser; for focus_window the window description to match (e.g. \"the look-mom-no-hands VS Code\"); empty if unused"],
                 "text": ["type": "string", "description": "text to type; empty if unused"],
                 "url": ["type": "string", "description": "open_url only: the website, e.g. \"youtube.com\"; empty if unused"],
                 "keys": ["type": "string", "description": "keystroke only: shortcut like \"cmd+t\", \"cmd+shift+t\", \"enter\"; empty if unused"],
@@ -85,9 +85,13 @@ final class ClaudeClient: @unchecked Sendable {
             contain several action items — emit one step per item, in the order they \
             should run. Prefer open_url for websites ("open YouTube" means youtube.com \
             unless a macOS app by that name plainly exists), open_app for applications, \
-            keystroke for app shortcuts (new tab = cmd+t), click/type/scroll for direct \
-            screen control. Use a single dictate_start step when they want to take a \
-            note or dictate. Use a single none step when nothing is actionable.
+            focus_window when the user names a specific already-open window ("go to the \
+            look-mom-no-hands VS Code") — put their description in target, keystroke for \
+            app shortcuts (new tab = cmd+t; submit/send = enter), type to enter text, \
+            click/type/scroll for direct screen control. To type into a named window, \
+            emit focus_window first, then type, then keystroke "enter" if they say submit/ \
+            send. Use a single dictate_start step for note-taking. Use a single none step \
+            when nothing is actionable.
 
             If the request is ambiguous or you are not confident what the user wants, \
             emit NO steps and set clarify with one concise question and 2-4 short \
