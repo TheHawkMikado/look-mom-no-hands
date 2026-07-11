@@ -316,6 +316,35 @@ final class DictateVoicePhraseTests: XCTestCase {
     }
 }
 
+final class LiveTranscriptPhraseTests: XCTestCase {
+    func testLivePhrasesDoNotCollideWithWakeOrDictation() {
+        // "mama take notes" / "mama stop transcribing" must not read as the wake
+        // word, the command stop word, or a dictation start/stop trigger.
+        for phrase in AppCoordinator.liveStartPhrases + AppCoordinator.liveStopPhrases {
+            XCTAssertFalse(AppCoordinator.wakePhrases.contains(where: phrase.contains), phrase)
+            XCTAssertFalse(AppCoordinator.dictateStartPhrases.contains(where: phrase.contains), phrase)
+        }
+    }
+
+    func testStartAndStopPhrasesAreDistinct() {
+        // A single utterance must not match both a start and a stop phrase, or the
+        // toggle would fight itself.
+        for start in AppCoordinator.liveStartPhrases {
+            XCTAssertFalse(AppCoordinator.liveStopPhrases.contains(where: start.contains), start)
+        }
+        for stop in AppCoordinator.liveStopPhrases {
+            XCTAssertFalse(AppCoordinator.liveStartPhrases.contains(where: stop.contains), stop)
+        }
+    }
+
+    func testChunkPacingConstantsAreSane() {
+        // A chunk must be allowed to flush at its target before the hard cap, and
+        // the pause window must be shorter than the target (else it never fires).
+        XCTAssertLessThan(AppCoordinator.liveChunkSecondsForTest, AppCoordinator.liveChunkMaxForTest)
+        XCTAssertLessThan(AppCoordinator.liveChunkSilenceForTest, AppCoordinator.liveChunkSecondsForTest)
+    }
+}
+
 final class SpeechEngineTests: XCTestCase {
     func testScribeRoutingPerMode() {
         XCTAssertFalse(SpeechEngine.appleOnly.usesScribe(forDictation: true))

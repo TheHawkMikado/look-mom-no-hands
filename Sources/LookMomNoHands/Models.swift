@@ -245,6 +245,7 @@ enum AppPhase: Equatable, Sendable {
     case thinking             // Claude call in flight
     case acting               // executing a screen action
     case clarifying           // asked the user a question; listening for the answer
+    case live                 // Otter-style live transcription running
     case error(String)
 
     var label: String {
@@ -256,6 +257,7 @@ enum AppPhase: Equatable, Sendable {
         case .thinking: return "Thinking…"
         case .acting: return "Acting…"
         case .clarifying: return "Waiting for your answer…"
+        case .live: return "Live transcript…"
         case .error(let m): return "Error: \(m)"
         }
     }

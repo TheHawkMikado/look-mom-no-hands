@@ -103,10 +103,14 @@ final class ClaudeClient: @unchecked Sendable {
             say: one short spoken sentence confirming what you're doing or reporting; \
             empty for a single obvious action.
 
-            learn: when the user teaches or corrects a durable mapping (e.g. answers a \
-            clarification with what a term means, or says "when I say X I mean Y"), set \
-            learn.spoken and learn.written so it's remembered — AND still carry out the \
-            request in the same plan.
+            learn: set ONLY when the user EXPLICITLY teaches or corrects you — they use \
+            corrective/teaching language ("no, I meant…", "when I say X I mean Y", \
+            "remember that…"), or they just answered a clarification telling you what a \
+            term means. Do NOT set learn for an ordinary command like "open Chrome" even \
+            if you resolve Chrome to Google Chrome — resolving is not correcting. When you \
+            do set it, still carry out the request in the same plan. Example: after you \
+            asked which browser and the user replies "I always mean Brave", set \
+            learn.spoken="browser", learn.written="Brave".
             """,
             // No `strict: true` — forced tool_choice already guarantees the call,
             // and strict adds a server-side schema-compilation latency spike on
@@ -239,6 +243,30 @@ final class ClaudeClient: @unchecked Sendable {
         guard let text = Self.firstTextBlock(json), !text.isEmpty else {
             throw ClaudeError.decoding("no text block")
         }
+        return text.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// Answers a question about a transcript (Otter-style "ask your notes").
+    func answer(question: String, about transcript: String) async throws -> String {
+        let body: [String: Any] = [
+            "model": ClaudeModel.opus48.rawValue,
+            "max_tokens": 2000,
+            "messages": [[
+                "role": "user",
+                "content": """
+                Here is a transcript. Answer the question using only what it contains; \
+                if it isn't covered, say so briefly.
+
+                Transcript:
+                \(transcript)
+
+                Question: \(question)
+                """
+            ]]
+        ]
+        let json = try await post(body, timeout: 30)
+        try Self.checkRefusal(json)
+        guard let text = Self.firstTextBlock(json), !text.isEmpty else { throw ClaudeError.decoding("no text") }
         return text.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 

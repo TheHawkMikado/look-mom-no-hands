@@ -47,6 +47,7 @@ final class AppCoordinator: ObservableObject {
     private var dictationOutput: DictationOutput = .report   // where the current note goes
     private var pendingHotkeyDictation = false               // start requested before the mic was on
     private var starting = false                             // start() in flight (async permission gap)
+    private var pendingLive = false                          // live transcript requested before the mic was on
     private var insertTargetApp: NSRunningApplication?       // app to paste into (captured at insert start)
     private var lastExternalApp: NSRunningApplication?       // most recent frontmost app that ISN'T us
 
@@ -56,8 +57,27 @@ final class AppCoordinator: ObservableObject {
 
     let store = AppStore()
 
-    private enum Mode { case standby, command, dictation }
+    private enum Mode { case standby, command, dictation, live }
     private var mode: Mode = .standby
+
+    // Otter-style live transcription: capture continuously and flush ~60s audio
+    // chunks to Scribe at the next pause, appending to a growing transcript that
+    // never buffers more than one chunk of audio in memory.
+    @Published var liveActive = false
+    @Published var liveTranscript = ""
+    private var lastFlushAt = Date()
+    private var flushing = false
+    private var liveGeneration = 0   // bumped each live session; stale flush tasks compare against it
+    nonisolated static let liveChunkSecondsForTest: TimeInterval = 60    // aim to flush after this…
+    nonisolated static let liveChunkSilenceForTest: TimeInterval = 1.5   // …at the next pause (sentence end)
+    nonisolated static let liveChunkMaxForTest: TimeInterval = 90        // …but flush anyway by here
+    private var liveChunkSeconds: TimeInterval { Self.liveChunkSecondsForTest }
+    private var liveChunkSilence: TimeInterval { Self.liveChunkSilenceForTest }
+    private var liveChunkMax: TimeInterval { Self.liveChunkMaxForTest }
+    nonisolated static let liveStopPhrases = ["mama stop listening", "mama stop transcribing",
+                                              "mama stop the transcript", "mama stop recording"]
+    nonisolated static let liveStartPhrases = ["mama start listening", "mama take notes",
+                                               "mama start transcribing", "mama transcribe this"]
     private var processing = false            // Claude call / action in flight
     private var speaking = false             // TTS playing; recognition is ignored so we don't hear ourselves
     private var utterance = ""                // current partial transcript
@@ -281,6 +301,7 @@ final class AppCoordinator: ObservableObject {
             self.starting = false
             guard granted else {
                 self.pendingHotkeyDictation = false
+                self.pendingLive = false
                 self.phase = .error("Mic/Speech permission denied")
                 self.store.log("perm", "denied — cannot start")
                 return
@@ -290,6 +311,7 @@ final class AppCoordinator: ObservableObject {
             } catch {
                 // Don't claim to be listening over a dead pipeline.
                 self.pendingHotkeyDictation = false
+                self.pendingLive = false
                 self.phase = .error("\(error)")
                 self.store.log("error", "listener failed to start: \(error)")
                 return
@@ -304,6 +326,9 @@ final class AppCoordinator: ObservableObject {
             if self.pendingHotkeyDictation {
                 self.pendingHotkeyDictation = false
                 self.startDictation(output: .insert)
+            } else if self.pendingLive {
+                self.pendingLive = false
+                self.startLiveTranscription()
             }
         }
     }
@@ -343,7 +368,11 @@ final class AppCoordinator: ObservableObject {
         speaker.cancel()
         processing = false
         speaking = false
+        flushing = false
         pendingClarification = nil
+        pendingHotkeyDictation = false
+        pendingLive = false
+        liveActive = false
         dialogue = []
         isRunning = false
         mode = .standby
@@ -384,13 +413,18 @@ final class AppCoordinator: ObservableObject {
         switch mode {
         case .standby:
             if Self.wakePhrases.contains(where: tail.contains) { beginSession() }
+            else if Self.liveStartPhrases.contains(where: tail.contains) { startLiveTranscription() }
             else if Self.dictateStartPhrases.contains(where: tail.contains) { startInsertByVoice() }
         case .command:
             if Self.stopPhrases.contains(where: tail.contains) { endSession(reason: "\"Adios Mama\"") }
+            else if Self.liveStartPhrases.contains(where: tail.contains) { startLiveTranscription() }
             else if Self.dictateStartPhrases.contains(where: tail.contains) { startInsertByVoice() }
         case .dictation:
             // A voice stop phrase ends the note; otherwise a long pause does.
             if Self.dictateStopPhrases.contains(where: tail.contains) { finalizeDictation() }
+        case .live:
+            // Only a stop phrase ends live capture; the chunks accumulate otherwise.
+            if Self.liveStopPhrases.contains(where: tail.contains) { stopLiveTranscription() }
         }
     }
 
@@ -420,6 +454,12 @@ final class AppCoordinator: ObservableObject {
             let tooLong = Date().timeIntervalSince(dictationStartAt) > dictationMax
             if (!utterance.isEmpty && quiet > dictationSilence) || tooLong {
                 finalizeDictation()
+            }
+        case .live:
+            let sinceFlush = Date().timeIntervalSince(lastFlushAt)
+            // Flush after ~60s at the next pause (sentence end), or force it by 90s.
+            if !flushing, (sinceFlush > liveChunkSeconds && quiet > liveChunkSilence) || sinceFlush > liveChunkMax {
+                flushLiveChunk(final: false)
             }
         }
     }
@@ -494,12 +534,116 @@ final class AppCoordinator: ObservableObject {
         case .standby:
             if case .error = phase {} else { phase = .listeningWake }
             stopTicker()
-        case .dictation:
+        case .dictation, .live:
             return   // still capturing; nothing to settle
         }
         // Discard anything heard while we were acting (e.g. our own typing sounds).
         freshUtterance()
         armCaptureForCurrentMode()
+    }
+
+    // MARK: Live transcription (Otter-style, chunked)
+
+    /// Begins continuous background transcription: captures audio and flushes ~60s
+    /// chunks to Scribe, appending to `liveTranscript`. Requires an ElevenLabs key
+    /// (chunks are transcribed by Scribe). Starts the mic on demand.
+    func startLiveTranscription() {
+        guard hasElevenLabsKey else { phase = .error("Live transcript needs an ElevenLabs key"); return }
+        guard !processing, mode != .live else { return }
+        if !isRunning { pendingLive = true; start(); return }
+        liveGeneration += 1   // invalidates any still-in-flight chunk from a prior live session
+        liveTranscript = ""
+        liveActive = true
+        mode = .live
+        phase = .live
+        lastFlushAt = Date()
+        flushing = false
+        freshUtterance()
+        listener.carryForward = true
+        armCaptureForCurrentMode()   // captureAudio = true
+        startTicker()
+        store.log("live", "started")
+    }
+
+    func stopLiveTranscription() {
+        guard mode == .live else { return }
+        flushLiveChunk(final: true)   // transcribe the remaining audio
+        mode = .standby
+        liveActive = false
+        phase = isRunning ? .listeningWake : .idle
+        listener.captureAudio = false
+        listener.carryForward = false
+        stopTicker()
+        freshUtterance()
+        store.log("live", "stopped — \(liveTranscript.count) chars")
+    }
+
+    /// Takes the current audio chunk, transcribes it via Scribe, and appends the
+    /// text to the running transcript — never holding more than one chunk in memory.
+    private func flushLiveChunk(final: Bool) {
+        guard let key = elevenLabsKey else { return }
+        guard let wav = listener.takeCapturedWAV() else { lastFlushAt = Date(); return }
+        flushing = true
+        lastFlushAt = Date()
+        let gen = runGeneration
+        let liveGen = liveGeneration
+        Task {
+            let text = ((try? await ScribeClient(apiKey: key).transcribe(wav: wav)) ?? "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            self.flushing = false
+            // Keep this chunk unless the app was hard-stopped (runGeneration bumped)
+            // or a *new* live session started (liveGeneration bumped). A graceful stop
+            // flips `mode` to .standby but leaves both generations, so the tail chunk
+            // still lands — checking `mode == .live` here would silently drop it.
+            guard gen == self.runGeneration, liveGen == self.liveGeneration else { return }
+            guard !text.isEmpty else { return }
+            self.liveTranscript += (self.liveTranscript.isEmpty ? "" : " ") + text
+            self.store.log("live", "\(final ? "final " : "")chunk +\(text.count) chars")
+        }
+    }
+
+    func clearLiveTranscript() { liveTranscript = ""; liveAnswer = "" }
+
+    @Published var liveBusy = false
+    @Published var liveAnswer = ""
+
+    /// Turns the live transcript into a titled summary + key points + action items
+    /// (reuses the dictation report), shown in the panel.
+    func summarizeLiveTranscript() {
+        let text = liveTranscript.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty, let claude, !liveBusy else { return }
+        liveBusy = true
+        Task {
+            defer { self.liveBusy = false }
+            if let report = try? await claude.buildDictationReport(text, vocabulary: self.vocabulary.promptContext) {
+                self.lastReport = report
+                self.store.addTranscript(TranscriptRecord(kind: "dictation", transcript: text,
+                    title: report.title, summary: report.summary,
+                    keyPoints: report.keyPoints, actionItems: report.actionItems))
+                self.store.log("live", "summarized \(text.count) chars")
+            }
+        }
+    }
+
+    /// Answers a question about the live transcript (Otter-style "ask your notes").
+    func askLiveTranscript(_ question: String) {
+        let q = question.trimmingCharacters(in: .whitespacesAndNewlines)
+        let text = liveTranscript.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !q.isEmpty, !text.isEmpty, let claude, !liveBusy else { return }
+        liveBusy = true
+        liveAnswer = ""
+        Task {
+            defer { self.liveBusy = false }
+            self.liveAnswer = (try? await claude.answer(question: q, about: text)) ?? "Couldn't answer that."
+        }
+    }
+
+    /// Saves the current live transcript as a note (a dictation record).
+    func saveLiveAsNote() {
+        let text = liveTranscript.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return }
+        store.addTranscript(TranscriptRecord(kind: "dictation", transcript: text, title: "Live note"))
+        store.log("live", "saved as note")
     }
 
     // MARK: Commands
@@ -583,6 +727,14 @@ final class AppCoordinator: ObservableObject {
     /// next utterance), or execute each step in order. Speaks the model's reply.
     private func runPlan(_ plan: ActionPlan, transcript: String,
                          priorDialogue: [(role: String, content: String)], gen: Int) async throws {
+        // Save a taught/corrected mapping first (so it survives even a clarify
+        // plan), gen-guarded so a superseded run can't write to the vocabulary.
+        if let fact = plan.learn, fact.isValid, gen == runGeneration {
+            vocabulary.learnCorrection(spoken: fact.spoken, written: fact.written)
+            refreshContextualPhrases()
+            store.log("learn", "\(fact.spoken) → \(fact.written)")
+        }
+
         if let clarify = plan.clarify {
             // Remember the exchange so the user's answer is interpreted in context.
             dialogue = priorDialogue
@@ -610,14 +762,6 @@ final class AppCoordinator: ObservableObject {
             store.log("error", "plan had an undecodable step — refusing partial execution")
             await speak("I didn't catch part of that — could you say it again?", gen: gen)
             return
-        }
-
-        // The user taught/corrected a durable mapping — remember it, and keep going
-        // to carry out the request in the same plan.
-        if let fact = plan.learn, fact.isValid {
-            vocabulary.learnCorrection(spoken: fact.spoken, written: fact.written)
-            refreshContextualPhrases()
-            store.log("learn", "\(fact.spoken) → \(fact.written)")
         }
 
         dialogue = []   // request resolved; next utterance starts fresh
@@ -783,6 +927,7 @@ final class AppCoordinator: ObservableObject {
         case .standby: want = false
         case .command: want = hasElevenLabsKey && speechEngine.usesScribe(forDictation: false)
         case .dictation: want = hasElevenLabsKey && speechEngine.usesScribe(forDictation: true)
+        case .live: want = hasElevenLabsKey   // live always uses Scribe (chunked)
         }
         listener.captureAudio = want   // setting true also clears the prior clip
     }

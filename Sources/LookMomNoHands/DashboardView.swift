@@ -8,6 +8,8 @@ struct DashboardView: View {
 
     var body: some View {
         TabView {
+            LiveTab(coordinator: coordinator)
+                .tabItem { Label("Live", systemImage: "waveform") }
             TranscriptsTab(store: coordinator.store)
                 .tabItem { Label("Transcripts", systemImage: "text.book.closed") }
             VocabularyTab(vocabulary: coordinator.vocabulary,
@@ -17,6 +19,88 @@ struct DashboardView: View {
                 .tabItem { Label("Activity", systemImage: "list.bullet.rectangle") }
         }
         .frame(minWidth: 720, minHeight: 480)
+    }
+}
+
+/// Otter-style live transcript: a rolling note the app fills in from 60-second
+/// audio chunks while it listens, plus ask/summarize over what's been captured.
+private struct LiveTab: View {
+    @ObservedObject var coordinator: AppCoordinator
+    @State private var question = ""
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 10) {
+                if coordinator.liveActive {
+                    Button(role: .destructive) { coordinator.stopLiveTranscription() } label: {
+                        Label("Stop", systemImage: "stop.circle.fill")
+                    }
+                    Label("Recording…", systemImage: "waveform")
+                        .foregroundStyle(.red).font(.callout)
+                } else {
+                    Button { coordinator.startLiveTranscription() } label: {
+                        Label("Start live transcript", systemImage: "record.circle")
+                    }
+                    .disabled(!coordinator.hasElevenLabsKey)
+                }
+                Spacer()
+                if coordinator.liveBusy { ProgressView().controlSize(.small) }
+            }
+            if !coordinator.hasElevenLabsKey {
+                Text("Add an ElevenLabs API key to enable live transcription.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+
+            ScrollView {
+                Text(coordinator.liveTranscript.isEmpty
+                     ? "Nothing captured yet. Press Start and talk — the transcript fills in every ~60 seconds."
+                     : coordinator.liveTranscript)
+                    .textSelection(.enabled)
+                    .foregroundStyle(coordinator.liveTranscript.isEmpty ? .secondary : .primary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(8)
+            }
+            .background(Color(nsColor: .textBackgroundColor))
+            .clipShape(RoundedRectangle(cornerRadius: 6))
+
+            HStack(spacing: 8) {
+                TextField("Ask a question about this transcript…", text: $question)
+                    .textFieldStyle(.roundedBorder)
+                    .onSubmit { ask() }
+                Button("Ask") { ask() }
+                    .disabled(question.trimmingCharacters(in: .whitespaces).isEmpty || coordinator.liveTranscript.isEmpty)
+            }
+            if !coordinator.liveAnswer.isEmpty {
+                Text(coordinator.liveAnswer)
+                    .font(.callout).textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(8)
+                    .background(Color(nsColor: .controlBackgroundColor))
+                    .clipShape(RoundedRectangle(cornerRadius: 6))
+            }
+
+            HStack {
+                Button { coordinator.summarizeLiveTranscript() } label: { Label("Summarize", systemImage: "sparkles") }
+                    .disabled(coordinator.liveTranscript.isEmpty || coordinator.liveBusy)
+                Button { coordinator.saveLiveAsNote() } label: { Label("Save as note", systemImage: "square.and.arrow.down") }
+                    .disabled(coordinator.liveTranscript.isEmpty)
+                Spacer()
+                Button {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(coordinator.liveTranscript, forType: .string)
+                } label: { Label("Copy", systemImage: "doc.on.doc") }
+                    .disabled(coordinator.liveTranscript.isEmpty)
+                Button(role: .destructive) { coordinator.clearLiveTranscript() } label: { Label("Clear", systemImage: "trash") }
+                    .disabled(coordinator.liveTranscript.isEmpty)
+            }
+        }
+        .padding()
+    }
+
+    private func ask() {
+        let q = question.trimmingCharacters(in: .whitespaces)
+        guard !q.isEmpty else { return }
+        coordinator.askLiveTranscript(q)
     }
 }
 

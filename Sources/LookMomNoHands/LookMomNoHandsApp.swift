@@ -47,6 +47,7 @@ struct PanelView: View {
 
             controls
             dictateRow
+            liveRow
 
             if !coordinator.accessibilityTrusted {
                 accessibilityNotice
@@ -219,6 +220,29 @@ struct PanelView: View {
                 }
                 .disabled(!coordinator.isRunning || !coordinator.hasKey)
                 Spacer()
+            }
+        }
+    }
+
+    // Otter-style live transcript. Chunked to Scribe, so it needs an ElevenLabs key.
+    private var liveRow: some View {
+        HStack(spacing: 8) {
+            if coordinator.liveActive {
+                Image(systemName: "waveform").foregroundStyle(.red)
+                Text("Live transcript running").font(.caption)
+                Spacer()
+                Button("Stop") { coordinator.stopLiveTranscription() }
+            } else {
+                Button {
+                    coordinator.startLiveTranscription()
+                } label: {
+                    Label("Live transcript", systemImage: "waveform.badge.plus")
+                }
+                .disabled(!coordinator.hasElevenLabsKey)
+                Spacer()
+                if !coordinator.hasElevenLabsKey {
+                    Text("needs ElevenLabs key").font(.caption2).foregroundStyle(.secondary)
+                }
             }
         }
     }
