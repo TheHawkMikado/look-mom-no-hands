@@ -129,6 +129,20 @@ final class AppCoordinator: ObservableObject {
                                                   "mama start dictating", "you dictate this"]
     nonisolated static let dictateStopPhrases = ["mama stop dictating", "mama stop dictation",
                                                  "mama done dictating", "stop dictating", "you stop dictating"]
+    nonisolated static let repeatPhrases = ["do that again", "do it again", "again please",
+                                            "repeat that", "one more time", "same thing again"]
+    private var lastActionableCommand: String?   // last non-repeat command, for "do that again"
+
+    /// True when a command is just "run the last thing again" — after stripping the
+    /// wake word, the whole utterance is (or ends with) a repeat phrase, and it's
+    /// short enough not to be a real command that merely mentions "again".
+    nonisolated static func isRepeatPhrase(_ text: String) -> Bool {
+        let t = text.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: " .,!?"))
+        if repeatPhrases.contains(t) { return true }
+        // A bare "again" counts; anything longer must match a full phrase to avoid
+        // hijacking "remind me to call again tomorrow".
+        return t == "again"
+    }
 
     init() {
         vocabulary = VocabularyStore(directory: store.directory)
@@ -684,9 +698,21 @@ final class AppCoordinator: ObservableObject {
             defer { self.finishProcessing(gen) }
             do {
                 let raw = await self.transcribed(wav: wav, fallback: appleText)
-                let text = wav != nil ? Self.strippingPhrases(Self.wakePhrases + Self.stopPhrases, from: raw) : raw
+                var text = wav != nil ? Self.strippingPhrases(Self.wakePhrases + Self.stopPhrases, from: raw) : raw
                 try Task.checkCancellation()
                 self.lastCommand = text
+                // "Do that again" re-runs the previous real command, re-parsed against
+                // the current screen (not a replayed action list) so it acts on now.
+                if !answeringClarification, Self.isRepeatPhrase(text) {
+                    guard let prev = self.lastActionableCommand else {
+                        await self.speak("I don't have a previous command to repeat.", gen: gen)
+                        return
+                    }
+                    self.store.log("command", "repeat → \(prev)")
+                    text = prev
+                } else if !answeringClarification {
+                    self.lastActionableCommand = text
+                }
                 self.store.log("asr", answeringClarification ? "answer: \(text)" : "command: \(text)")
                 // Read the actual screen only when the command likely acts on it —
                 // simple "open X" commands skip the (slower) AX walk. Runs in a

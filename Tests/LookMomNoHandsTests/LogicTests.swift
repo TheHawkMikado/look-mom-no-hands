@@ -121,6 +121,17 @@ final class ActionDecodingTests: XCTestCase {
         XCTAssertEqual(action.kind, .dictateStart)
     }
 
+    func testRepeatPhraseDetection() {
+        XCTAssertTrue(AppCoordinator.isRepeatPhrase("do that again"))
+        XCTAssertTrue(AppCoordinator.isRepeatPhrase("Do it again."))
+        XCTAssertTrue(AppCoordinator.isRepeatPhrase("one more time"))
+        XCTAssertTrue(AppCoordinator.isRepeatPhrase("again"))
+        // A real command that merely mentions "again" must not be hijacked.
+        XCTAssertFalse(AppCoordinator.isRepeatPhrase("remind me to call again tomorrow"))
+        XCTAssertFalse(AppCoordinator.isRepeatPhrase("open Chrome"))
+        XCTAssertFalse(AppCoordinator.isRepeatPhrase(""))
+    }
+
     func testDescribeScreenKindDecodes() throws {
         // The question rides in `target`; empty means "just describe the screen".
         let json = #"{"kind":"describe_screen","target":"what does this error say","text":"","confidence":1.0}"#
