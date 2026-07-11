@@ -70,10 +70,13 @@ enum ScreenController {
     struct WindowInfo { let app: String; let title: String; let window: AXUIElement; let runningApp: NSRunningApplication }
 
     /// Every on-screen window of every regular app, with its title (via AX — no
-    /// Screen Recording permission needed, unlike CGWindowList names).
-    static func openWindows() -> [WindowInfo] {
+    /// Screen Recording permission needed, unlike CGWindowList names). Checks
+    /// cancellation per app: a slow/hung app's synchronous AX query has no timeout,
+    /// so without this Stop couldn't interrupt a stalled enumeration.
+    static func openWindows() throws -> [WindowInfo] {
         var out: [WindowInfo] = []
         for app in NSWorkspace.shared.runningApplications where app.activationPolicy == .regular {
+            try Task.checkCancellation()
             guard let name = app.localizedName else { continue }
             let axApp = AXUIElementCreateApplication(app.processIdentifier)
             var value: CFTypeRef?
@@ -88,18 +91,31 @@ enum ScreenController {
     }
 
     /// Raises the open window that best matches a spoken description ("the Look
-    /// Mom No Hands VS Code") and activates its app. Matches on app name + title,
-    /// so "look-mom-no-hands — Visual Studio Code" resolves.
+    /// Mom No Hands VS Code") and makes it frontmost. Matches on app name + title,
+    /// so "look-mom-no-hands — Visual Studio Code" resolves. Throws if it can't be
+    /// brought forward, so a following type/keystroke never lands in the wrong app.
     static func focusWindow(matching query: String) throws {
         try Task.checkCancellation()
-        let windows = openWindows()
+        let windows = try openWindows()
         let labels = windows.map { "\($0.app) \($0.title)" }
         guard let idx = bestWindowIndex(labels, query: query) else {
             throw ControlError.elementNotFound(query)
         }
         let hit = windows[idx]
-        hit.runningApp.activate(options: [])
+        // Restore if minimized (AXRaise is a no-op on a minimized window), make it
+        // the app's main window, raise it, then activate the app.
+        AXUIElementSetAttributeValue(hit.window, kAXMinimizedAttribute as CFString, kCFBooleanFalse)
+        AXUIElementSetAttributeValue(hit.window, kAXMainAttribute as CFString, kCFBooleanTrue)
         AXUIElementPerformAction(hit.window, kAXRaiseAction as CFString)
+        hit.runningApp.activate(options: [])
+        // Activation is async — wait (bounded, cancellation-aware) until the app is
+        // actually frontmost so the next step's input goes to this window.
+        let deadline = DispatchTime.now() + .milliseconds(800)
+        while NSWorkspace.shared.frontmostApplication?.processIdentifier != hit.runningApp.processIdentifier {
+            if Task.isCancelled { return }
+            if DispatchTime.now() > deadline { throw ControlError.elementNotFound(query) }
+            usleep(30_000)
+        }
     }
 
     /// Index of the window label sharing the most words with the query (0 → nil).
