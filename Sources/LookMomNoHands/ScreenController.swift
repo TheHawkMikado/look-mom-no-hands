@@ -121,9 +121,19 @@ enum ScreenController {
         proc.standardError = Pipe()   // keep `open`'s complaint off our stderr
         try proc.run()
         // run() only proves `open` spawned — an unresolvable app name exits
-        // nonzero afterward. Blocking is fine: this runs off the main actor,
-        // and `open` returns in tens of milliseconds.
-        proc.waitUntilExit()
+        // nonzero afterward. Poll instead of waitUntilExit(): `open` normally
+        // exits in tens of milliseconds, but a LaunchServices stall must not
+        // wedge the session's command processing, and Stop (cancellation) must
+        // be able to abandon the wait. Runs off the main actor, so the sleeps
+        // block no UI.
+        let deadline = Date().addingTimeInterval(10)
+        while proc.isRunning {
+            if Task.isCancelled || Date() > deadline {
+                proc.terminate()
+                throw ControlError.appLaunchFailed(name)
+            }
+            usleep(50_000)
+        }
         guard proc.terminationStatus == 0 else { throw ControlError.appLaunchFailed(name) }
     }
 
