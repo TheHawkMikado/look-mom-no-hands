@@ -137,7 +137,7 @@ final class AppStore: ObservableObject {
     }
 
     /// Pure selection: newest `keep` are retained, the rest returned for deletion.
-    static func recoveredNotesToPrune(_ dated: [(url: URL, date: Date)], keep: Int) -> [URL] {
+    nonisolated static func recoveredNotesToPrune(_ dated: [(url: URL, date: Date)], keep: Int) -> [URL] {
         dated.sorted { $0.date > $1.date }.dropFirst(keep).map(\.url)
     }
 
