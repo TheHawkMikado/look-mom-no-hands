@@ -71,10 +71,21 @@ struct ActionPlan: Decodable, Sendable {
         say = (try? c.decodeIfPresent(String.self, forKey: .say)) ?? ""
         // Decode element-by-element so one bad step doesn't blank the whole array
         // (which would read as an empty, silently-successful plan) — but record
-        // that a drop happened so execution can fail closed.
-        let raw = (try? c.decodeIfPresent([FailableStep].self, forKey: .steps)) ?? []
-        steps = raw.compactMap(\.value)
-        malformed = steps.count != raw.count
+        // that anything was dropped so execution can fail closed. A `steps` field
+        // that's present but not an array (schema drift) is malformed too, not a
+        // clean empty plan.
+        if c.contains(.steps), (try? c.decodeNil(forKey: .steps)) == false {
+            if let raw = try? c.decode([FailableStep].self, forKey: .steps) {
+                steps = raw.compactMap(\.value)
+                malformed = steps.count != raw.count
+            } else {
+                steps = []
+                malformed = true   // present but not a decodable array
+            }
+        } else {
+            steps = []             // genuinely absent or null
+            malformed = false
+        }
         clarify = try? c.decodeIfPresent(Clarification.self, forKey: .clarify)
         confidence = (try? c.decodeIfPresent(Double.self, forKey: .confidence)) ?? 0
     }

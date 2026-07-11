@@ -221,6 +221,23 @@ final class PlanDecodingTests: XCTestCase {
         let plan = try JSONDecoder().decode(ActionPlan.self, from: Data(json.utf8))
         XCTAssertFalse(plan.malformed)
     }
+
+    func testNonArrayStepsIsMalformedNotEmptySuccess() throws {
+        // A present-but-non-array `steps` (schema drift) must fail closed, not
+        // read as a clean empty plan that speaks success.
+        let object = try JSONDecoder().decode(ActionPlan.self, from: Data(#"{"steps":{"kind":"click"}}"#.utf8))
+        XCTAssertTrue(object.malformed)
+        let string = try JSONDecoder().decode(ActionPlan.self, from: Data(#"{"steps":"click send"}"#.utf8))
+        XCTAssertTrue(string.malformed)
+    }
+
+    func testAbsentOrNullStepsIsNotMalformed() throws {
+        // A genuinely empty/absent plan (e.g. a pure spoken reply) is fine.
+        let absent = try JSONDecoder().decode(ActionPlan.self, from: Data(#"{"say":"hi"}"#.utf8))
+        XCTAssertFalse(absent.malformed)
+        let null = try JSONDecoder().decode(ActionPlan.self, from: Data(#"{"steps":null}"#.utf8))
+        XCTAssertFalse(null.malformed)
+    }
 }
 
 final class URLAndKeystrokeTests: XCTestCase {
