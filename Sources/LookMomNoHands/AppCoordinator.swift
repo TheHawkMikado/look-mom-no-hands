@@ -941,7 +941,7 @@ final class AppCoordinator: ObservableObject {
     private static let maxDialogueTurns = 8
 
     // A goal runs as an act-observe loop, bounded so it can't run away.
-    private static let maxTaskRounds = 6
+    private static let maxTaskRounds = 8   // multi-step web tasks (open→wait→search→wait→click→verify)
 
     /// Drives one goal to completion: each round re-reads the screen, asks the model
     /// for the next action(s) toward the goal, executes them, and repeats until the
@@ -1056,10 +1056,12 @@ final class AppCoordinator: ObservableObject {
             }
 
             var navigated = false
+            var didAct = false
             do {
                 let result = try await executeSteps(plan, gen: gen)
                 performedAll += result.performed
                 navigated = result.navigated
+                didAct = !result.performed.isEmpty
                 if result.stop { return }       // dictate_start handed the session to the recorder
                 // Spin guard: two rounds in a row with no real action AND no observation
                 // (e.g. the model keeps "waiting" for something it can't do) — stop.
@@ -1086,14 +1088,22 @@ final class AppCoordinator: ObservableObject {
             // non-blocked plan (a stalled/malformed response) must NOT count as done;
             // it falls through as a no-progress round (the emptyRounds guard catches a
             // persistent stall and records it INCOMPLETE).
-            // A navigation break forces another observe round even if the model
-            // (wrongly) marked the whole plan complete before the page loaded.
+            // A navigation forces another observe round even if the model (wrongly)
+            // marked the plan complete before the page loaded.
             complete = plan.goalComplete && !navigated
             round += 1
-            // Wait longer after a navigation (a page/app has to load) than for a
-            // normal on-screen update; not at all after the final round.
             if !complete, round < Self.maxTaskRounds {
-                try? await Task.sleep(nanoseconds: navigated ? 1_600_000_000 : 350_000_000)
+                if navigated {
+                    // Opening a site/app: wait (up to 4s) for it to finish loading so the
+                    // next round sees YouTube's real search box, not the old page.
+                    await waitForPageSettle(gen: gen, maxWait: 4.0)
+                } else if didAct {
+                    // Any other action can also change the page (submitting a search,
+                    // clicking a link) — let it settle, but cap short for a plain click.
+                    await waitForPageSettle(gen: gen, maxWait: 1.8)
+                } else {
+                    try? await Task.sleep(nanoseconds: 300_000_000)
+                }
             }
         }
 
@@ -1203,17 +1213,38 @@ final class AppCoordinator: ObservableObject {
                 performed.append(Self.describe(step))
                 self.updateContext(for: step)
                 self.store.log("action", "performed: \(Self.describe(step))")
-                // Opening a site/app loads asynchronously. Anything after it must act
-                // on the LOADED page, so STOP the round here and let the loop re-observe
-                // — otherwise "click the search box / type" hits the old (still-showing)
-                // page. This is exactly the "searched Google instead of YouTube" bug.
-                if (step.kind == .openURL || step.kind == .openApp), i < plan.steps.count - 1 {
-                    self.store.log("action", "navigated — re-observing before the next step")
+                // Opening a site/app loads ASYNCHRONOUSLY, so END the round here and flag
+                // `navigated`: the loop then WAITS for the page to finish loading before
+                // it observes again, and any remaining steps this round are deferred to
+                // run against the LOADED page. Without this it reads the OLD page and
+                // clicks the address bar → searches Google instead of YouTube.
+                if step.kind == .openURL || step.kind == .openApp {
+                    if i < plan.steps.count - 1 { self.store.log("action", "navigated — deferring \(plan.steps.count - 1 - i) step(s) until the page loads") }
                     return (performed, false, true)
                 }
             }
         }
         return (performed, false, false)
+    }
+
+    /// Waits for the frontmost window to stop changing (a page/app finished loading)
+    /// before the loop observes again — the user's "wait for the page to load".
+    /// Polls the focused window; returns when its URL+title+element-count are stable
+    /// across two reads, or at a hard cap. Bounded, cancellable.
+    private func waitForPageSettle(gen: Int, maxWait: TimeInterval = 4.0) async {
+        var last = ""
+        let start = Date()
+        while Date().timeIntervalSince(start) < maxWait {
+            try? await Task.sleep(nanoseconds: 300_000_000)
+            guard gen == runGeneration, !Task.isCancelled else { return }
+            let snap = try? await withThrowingTaskGroup(of: ScreenController.Snapshot?.self) { group in
+                group.addTask { try? ScreenController.focusedWindowSnapshot(maxElements: 25) }
+                return try await group.next() ?? nil
+            }
+            let sig = "\(snap?.url ?? "")|\(snap?.title ?? "")|\(snap?.elements.count ?? 0)"
+            if sig == last, !sig.isEmpty { return }   // two matching reads in a row → settled
+            last = sig
+        }
     }
 
     // Speculative snapshot taken mid-utterance so the post-silence path skips the
