@@ -1052,14 +1052,16 @@ final class AppCoordinator: ObservableObject {
                 consecutiveRepeats = 0; lastState = ""   // a non-action round breaks the streak
             }
 
+            var navigated = false
             do {
-                let (performed, stop) = try await executeSteps(plan, gen: gen)
-                performedAll += performed
-                if stop { return }              // dictate_start handed the session to the recorder
+                let result = try await executeSteps(plan, gen: gen)
+                performedAll += result.performed
+                navigated = result.navigated
+                if result.stop { return }       // dictate_start handed the session to the recorder
                 // Spin guard: two rounds in a row with no real action AND no observation
                 // (e.g. the model keeps "waiting" for something it can't do) — stop.
                 let observed = plan.steps.contains { $0.kind == .describeScreen }
-                emptyRounds = (performed.isEmpty && !observed) ? emptyRounds + 1 : 0
+                emptyRounds = (result.performed.isEmpty && !observed) ? emptyRounds + 1 : 0
                 if emptyRounds >= 2, !plan.goalComplete {
                     store.log("command", "no progress for \(emptyRounds) rounds — stopping")
                     await speak("I'm not able to make progress on that — could you tell me the steps, or which element to use?", gen: gen)
@@ -1081,11 +1083,15 @@ final class AppCoordinator: ObservableObject {
             // non-blocked plan (a stalled/malformed response) must NOT count as done;
             // it falls through as a no-progress round (the emptyRounds guard catches a
             // persistent stall and records it INCOMPLETE).
-            complete = plan.goalComplete
+            // A navigation break forces another observe round even if the model
+            // (wrongly) marked the whole plan complete before the page loaded.
+            complete = plan.goalComplete && !navigated
             round += 1
-            // Let the UI settle (a menu/dialog appears) before the next observation —
-            // but not after the final round (no next observation to wait for).
-            if !complete, round < Self.maxTaskRounds { try? await Task.sleep(nanoseconds: 350_000_000) }
+            // Wait longer after a navigation (a page/app has to load) than for a
+            // normal on-screen update; not at all after the final round.
+            if !complete, round < Self.maxTaskRounds {
+                try? await Task.sleep(nanoseconds: navigated ? 1_600_000_000 : 350_000_000)
+            }
         }
 
         // Stop pressed during the loop's tail (esp. the sleep, which swallows
@@ -1164,17 +1170,17 @@ final class AppCoordinator: ObservableObject {
 
     /// Executes one round's steps in order. Returns what ran and whether the loop
     /// must stop (a dictate_start step hands the mic to the recorder).
-    private func executeSteps(_ plan: ActionPlan, gen: Int) async throws -> (performed: [String], stop: Bool) {
+    private func executeSteps(_ plan: ActionPlan, gen: Int) async throws -> (performed: [String], stop: Bool, navigated: Bool) {
         var performed: [String] = []
-        for step in plan.steps {
+        for (i, step) in plan.steps.enumerated() {
             try Task.checkCancellation()
             switch step.kind {
             case .dictateStart:
                 self.startRecording(output: .note)
-                return (performed, true)
+                return (performed, true, false)
             case .watchStart:
                 self.startDemonstration(name: step.target.isEmpty ? "demonstrated action" : step.target)
-                return (performed, true)   // the demo owns the session until "Mama done"
+                return (performed, true, false)   // the demo owns the session until "Mama done"
             case .describeScreen:
                 try await self.describeScreen(question: step.target, gen: gen)
             case .none:
@@ -1194,9 +1200,17 @@ final class AppCoordinator: ObservableObject {
                 performed.append(Self.describe(step))
                 self.updateContext(for: step)
                 self.store.log("action", "performed: \(Self.describe(step))")
+                // Opening a site/app loads asynchronously. Anything after it must act
+                // on the LOADED page, so STOP the round here and let the loop re-observe
+                // — otherwise "click the search box / type" hits the old (still-showing)
+                // page. This is exactly the "searched Google instead of YouTube" bug.
+                if (step.kind == .openURL || step.kind == .openApp), i < plan.steps.count - 1 {
+                    self.store.log("action", "navigated — re-observing before the next step")
+                    return (performed, false, true)
+                }
             }
         }
-        return (performed, false)
+        return (performed, false, false)
     }
 
     // Speculative snapshot taken mid-utterance so the post-silence path skips the

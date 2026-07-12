@@ -117,6 +117,17 @@ final class ClaudeClient: @unchecked Sendable {
             asked, or reporting that something genuinely failed. Never speak on a \
             successful action.
 
+            ONE NAVIGATION AT A TIME. If a step opens a site or app (open_url/open_app), \
+            emit ONLY up to and including that step this turn — do NOT also emit the \
+            click/type/search that comes after, because the page hasn't loaded yet and \
+            those would hit the OLD page (e.g. typing into Google instead of YouTube). \
+            Next turn you'll see the loaded page and can search/click on it.
+
+            SELECT / OPEN / PLAY / CHOOSE a thing on screen (a video, a link, a result, \
+            a button) is a CLICK step. describe_screen is ONLY for answering "what's on \
+            screen / read this" — NEVER use describe_screen to select or open something, \
+            and never just talk about a result instead of clicking it.
+
             STAY IN THE CURRENT PAGE/WINDOW. You are already where the user is working. \
             Do the task THERE using the on-screen controls. Do NOT open a new tab or \
             window, and do NOT type into the browser address/URL bar (labels like \
