@@ -25,9 +25,12 @@ graph**, so Swift feeds raw 16 kHz mono Float32 waveform and gets a 192-dim
 embedding out. No feature-extraction code needed in Swift — that's the whole
 point of tracing it in.
 
-- Size: ~25 MB fp32, ~13 MB as fp16 — fine to commit to the repo.
+- Size: ~83 MB fp32 (20.8M params) — convert with fp16 weights → ~42 MB.
+  Chunky but under GitHub's 100 MB hard limit; commit the fp16 build only.
 - Input: `[1, T]` Float32 waveform at 16 kHz, T flexible (use
-  `coremltools.RangeDim` for 8000…48000 samples, i.e. 0.5–3 s).
+  `coremltools.RangeDim` for 8000…160000 samples, i.e. 0.5–10 s — the upper
+  bound must cover the 4–6 s enrollment sentences in Phase 4, not just the
+  ~2.5 s wake grab).
 - Output: `[1, 192]` Float32 embedding.
 - Fallback if SpeechBrain tracing fights back: WeSpeaker ResNet34 or NVIDIA
   TitaNet-small via ONNX → `coremltools`. Same interface contract.
@@ -39,7 +42,11 @@ point of tracing it in.
    `nn.Module`, traces with a flexible time dim, converts via `coremltools`
    (fp16, `minimum_deployment_target=macOS14`), writes
    `SpeakerEmbedder.mlpackage`. One-time run; requires
-   `python3 -m pip install torch speechbrain coremltools`.
+   `python3 -m pip install "torch<=2.5" speechbrain coremltools` — the torch
+   pin matters: coremltools' `torch.stft` conversion (which SpeechBrain's
+   Fbank uses) is broken on torch ≥ 2.6 (apple/coremltools#2504). If tracing
+   still fights back, swap the STFT for a conv1d melspec (adobe-research/
+   convmelspec) before falling back to a different model.
 2. Compile and commit the **compiled** model (SwiftPM won't run coremlcompiler):
    `xcrun coremlcompiler compile SpeakerEmbedder.mlpackage Sources/LookMomNoHands/Resources/`
    → commit `Sources/LookMomNoHands/Resources/SpeakerEmbedder.mlmodelc/`.
@@ -108,7 +115,8 @@ moment the wake phrase matches, so:
     `didSet`-persist pattern of `visionClickEnabled` in `AppCoordinator.swift`).
     Disabled/greyed until a profile exists. Default off.
   - Strictness picker: Lenient 0.22 / Normal 0.30 / Strict 0.40 (cosine
-    threshold; ECAPA verification EER sits around 0.25–0.35).
+    threshold; SpeechBrain's own `verify_batch` defaults to 0.25, and typical
+    ECAPA operating thresholds sit around 0.25–0.35).
   - "Re-enroll" and "Delete voiceprint" buttons.
   - Warning row if the model failed to load (verification inert).
 
@@ -122,7 +130,9 @@ moment the wake phrase matches, so:
   standby. Also gate `liveStartPhrases`/`dictateStartPhrases` the same way —
   they're wake-equivalent entry points.
   - Embedding must not block the main thread: hop to a background task, and on
-    pass call `beginSession()` back on main. Expect <50 ms on Apple Silicon —
+    pass call `beginSession()` back on main. Flexible input shapes can push
+    Core ML off the Neural Engine onto CPU/GPU (apple/coremltools#2370), but
+    even CPU inference on ~2.5 s of audio lands well under 200 ms —
     imperceptible against the existing ~1 s silence gates.
   - Log the score on *success* too (debug-level) — it's the only way to tune
     the threshold on a real device.
