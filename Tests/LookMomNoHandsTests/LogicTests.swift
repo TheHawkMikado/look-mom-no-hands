@@ -166,6 +166,95 @@ final class ActionDecodingTests: XCTestCase {
         XCTAssertTrue(onDisk.contains("\"app\":\"Code\""))
     }
 
+    func testDisplayIndexParsing() {
+        XCTAssertEqual(ScreenController.displayIndex(for: "main screen", count: 2), 0)
+        XCTAssertEqual(ScreenController.displayIndex(for: "my main display", count: 1), 0)
+        XCTAssertEqual(ScreenController.displayIndex(for: "", count: 2), 0)
+        XCTAssertEqual(ScreenController.displayIndex(for: "second monitor", count: 2), 1)
+        XCTAssertEqual(ScreenController.displayIndex(for: "the other screen", count: 2), 1)
+        XCTAssertEqual(ScreenController.displayIndex(for: "display 2", count: 3), 1)
+        XCTAssertEqual(ScreenController.displayIndex(for: "third display", count: 3), 2)
+        // A display that doesn't exist resolves to nil (caller reports, not guesses).
+        XCTAssertNil(ScreenController.displayIndex(for: "second display", count: 1))
+        XCTAssertNil(ScreenController.displayIndex(for: "the moon", count: 2))
+    }
+
+    func testQuartzOriginCentersInDisplay() {
+        // Primary 1000pt tall; second display to the right, Cocoa visible frame
+        // x:1000..3000 y:0..1400. Centering an 800×600 window:
+        let origin = ScreenController.quartzOrigin(centering: CGSize(width: 800, height: 600),
+                                                   in: CGRect(x: 1000, y: 0, width: 2000, height: 1400),
+                                                   primaryHeight: 1000)
+        XCTAssertEqual(origin.x, 1600)                    // (1000+2000/2) - 400
+        XCTAssertEqual(origin.y, 1000 - (400 + 600))      // cocoaY=700-300=400 → flip
+    }
+
+    func testDemonstrationKeyTranslation() {
+        typealias R = DemonstrationRecorder
+        XCTAssertEqual(R.describeKey(chars: "a", keyCode: 0, command: false, option: false, control: false, shift: false), .typed("a"))
+        XCTAssertEqual(R.describeKey(chars: "s", keyCode: 1, command: true, option: false, control: false, shift: false), .special("cmd+s"))
+        // Shift is preserved and the base key comes from the key code, not the shifted char.
+        XCTAssertEqual(R.describeKey(chars: "T", keyCode: 17, command: true, option: false, control: false, shift: true), .special("cmd+shift+t"))
+        XCTAssertEqual(R.describeKey(chars: "$", keyCode: 21, command: true, option: false, control: false, shift: true), .special("cmd+shift+4"))
+        XCTAssertEqual(R.describeKey(chars: "\r", keyCode: 36, command: false, option: false, control: false, shift: false), .special("enter"))
+        XCTAssertEqual(R.describeKey(chars: "", keyCode: 51, command: false, option: false, control: false, shift: false), .backspace)
+        // Arrow keys arrive as private-use scalars — never "typed text".
+        XCTAssertEqual(R.describeKey(chars: "\u{F700}", keyCode: 126, command: false, option: false, control: false, shift: false), .special("up arrow"))
+        XCTAssertEqual(R.describeKey(chars: "", keyCode: 0, command: false, option: false, control: false, shift: false), .ignore)
+    }
+
+    func testQuartzOriginClampsOversizedWindow() {
+        // A 3000×2000 window onto a 1440×900 display (visible x:0..1440 y:0..860):
+        // the top-left must stay reachable, not centered off-screen.
+        let o = ScreenController.quartzOrigin(centering: CGSize(width: 3000, height: 2000),
+                                              in: CGRect(x: 0, y: 0, width: 1440, height: 860),
+                                              primaryHeight: 900)
+        XCTAssertEqual(o.x, 0)                 // clamped to the left edge
+        // top edge clamped to the visible top (860 Cocoa) → Quartz y = 900-860 = 40
+        XCTAssertEqual(o.y, 40)
+    }
+
+    func testMoveAndWatchKindsDecode() throws {
+        let move = try JSONDecoder().decode(ScreenAction.self,
+            from: Data(#"{"kind":"move_window","target":"VS Code","text":"main display","confidence":1.0}"#.utf8))
+        XCTAssertEqual(move.kind, .moveWindow)
+        XCTAssertEqual(move.text, "main display")
+        let watch = try JSONDecoder().decode(ScreenAction.self,
+            from: Data(#"{"kind":"watch_start","target":"create a session","text":"","confidence":1.0}"#.utf8))
+        XCTAssertEqual(watch.kind, .watchStart)
+    }
+
+    func testDemoStopPhrasesMatchNormalizedSpeech() {
+        // Phrases must be stored in normalized form so real spoken input matches after
+        // normalizedForMatching strips apostrophes ("Mama, I'm done" → "mama i m done").
+        func heard(_ s: String) -> Bool {
+            let tail = AppCoordinator.normalizedForMatching(s)
+            return AppCoordinator.demoStopPhrases.contains { tail.contains($0) }
+        }
+        XCTAssertTrue(heard("Mama done."))
+        XCTAssertTrue(heard("Mama, I'm done"))
+        XCTAssertTrue(heard("okay Mama that's it"))
+        XCTAssertTrue(heard("Mama finished"))
+        // Narration containing "done watching" (no mama) must NOT end the demo.
+        XCTAssertFalse(heard("when I'm done watching the video"))
+        // Every stored phrase is already normalized (no apostrophes) — else it's dead.
+        for p in AppCoordinator.demoStopPhrases {
+            XCTAssertEqual(p, AppCoordinator.normalizedForMatching(p), "unnormalized phrase can never match: \(p)")
+        }
+    }
+
+    func testBargeInRequiresSubstantiveSpeech() {
+        // Real interjections trigger.
+        XCTAssertTrue(AppCoordinator.isBargeInSpeech("option two"))
+        XCTAssertTrue(AppCoordinator.isBargeInSpeech("Hey Mama"))
+        XCTAssertTrue(AppCoordinator.isBargeInSpeech("no, stop that"))
+        // One-syllable fragments / echo remnants / silence do not.
+        XCTAssertFalse(AppCoordinator.isBargeInSpeech("uh"))
+        XCTAssertFalse(AppCoordinator.isBargeInSpeech("the"))
+        XCTAssertFalse(AppCoordinator.isBargeInSpeech(""))
+        XCTAssertFalse(AppCoordinator.isBargeInSpeech("  ."))
+    }
+
     func testRepeatPhraseDetection() {
         XCTAssertTrue(AppCoordinator.isRepeatPhrase("do that again"))
         XCTAssertTrue(AppCoordinator.isRepeatPhrase("Do it again."))

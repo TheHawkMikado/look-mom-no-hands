@@ -1,34 +1,93 @@
 import SwiftUI
 import AppKit
 
-/// The full dashboard window: a searchable copy of every transcript and the
-/// complete activity log. Both are backed by files on disk (see AppStore).
+/// Every dashboard section. Our own tab strip (not TabView) so the navigation
+/// bar is ALWAYS visible on every tab — no child view (NavigationSplitView,
+/// toolbars) can hide or replace it.
+enum DashTab: String, CaseIterable {
+    case memory, live, transcripts, vocabulary, profiles, procedures, paste, activity, settings
+
+    var title: String { rawValue.capitalized }
+    var icon: String {
+        switch self {
+        case .memory: return "brain"
+        case .live: return "waveform"
+        case .transcripts: return "text.book.closed"
+        case .vocabulary: return "character.book.closed"
+        case .profiles: return "slider.horizontal.3"
+        case .procedures: return "list.number"
+        case .paste: return "doc.on.clipboard"
+        case .activity: return "list.bullet.rectangle"
+        case .settings: return "gearshape"
+        }
+    }
+}
+
+/// The full dashboard window. The permanent tab strip lives at the very top of
+/// the window content; the selected section renders below it.
 struct DashboardView: View {
     @ObservedObject var coordinator: AppCoordinator
+    @AppStorage("dashboardTab") private var selected: DashTab = .memory
 
     var body: some View {
-        TabView {
+        VStack(spacing: 0) {
+            tabStrip
+            Divider()
+            content
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+        .frame(minWidth: 760, minHeight: 500)
+    }
+
+    // Always visible, on every tab, 100% of the time.
+    private var tabStrip: some View {
+        HStack(spacing: 2) {
+            ForEach(DashTab.allCases, id: \.self) { tab in
+                Button {
+                    selected = tab
+                } label: {
+                    VStack(spacing: 2) {
+                        Image(systemName: tab.icon).font(.system(size: 14))
+                        Text(tab.title).font(.caption2)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 6)
+                    .background(
+                        RoundedRectangle(cornerRadius: 6)
+                            .fill(selected == tab ? Color.accentColor.opacity(0.18) : Color.clear)
+                    )
+                    .foregroundStyle(selected == tab ? Color.accentColor : Color.primary)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
+    }
+
+    @ViewBuilder private var content: some View {
+        switch selected {
+        case .memory:
             MemoryTab(coordinator: coordinator, environment: coordinator.environment, knowledge: coordinator.knowledge)
-                .tabItem { Label("Memory", systemImage: "brain") }
+        case .live:
             LiveTab(coordinator: coordinator)
-                .tabItem { Label("Live", systemImage: "waveform") }
+        case .transcripts:
             TranscriptsTab(store: coordinator.store)
-                .tabItem { Label("Transcripts", systemImage: "text.book.closed") }
+        case .vocabulary:
             VocabularyTab(vocabulary: coordinator.vocabulary,
                           onChange: { coordinator.refreshContextualPhrases() })
-                .tabItem { Label("Vocabulary", systemImage: "character.book.closed") }
+        case .profiles:
             ProfilesTab(profiles: coordinator.profiles)
-                .tabItem { Label("Profiles", systemImage: "slider.horizontal.3") }
+        case .procedures:
             ProceduresTab(procedures: coordinator.procedures)
-                .tabItem { Label("Procedures", systemImage: "list.number") }
+        case .paste:
             PasteRulesTab(rules: coordinator.insertRules)
-                .tabItem { Label("Paste", systemImage: "doc.on.clipboard") }
+        case .activity:
             ActivityTab(store: coordinator.store)
-                .tabItem { Label("Activity", systemImage: "list.bullet.rectangle") }
+        case .settings:
             SettingsTab(coordinator: coordinator)
-                .tabItem { Label("Settings", systemImage: "gearshape") }
         }
-        .frame(minWidth: 720, minHeight: 480)
     }
 }
 

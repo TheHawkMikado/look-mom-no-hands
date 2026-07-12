@@ -33,6 +33,10 @@ final class VoiceListener {
     var onLevel: ((Float) -> Void)?
     var metering = false
     private var levelSmoothed: Float = 0
+    /// True when OS echo cancellation is active on the mic. The coordinator only
+    /// allows barge-in (listening during our own TTS) when this is on — without it
+    /// the recognizer would hear the assistant's own voice and answer itself.
+    private(set) var echoCancellation = false
 
     private let recognizer = SFSpeechRecognizer(locale: Locale(identifier: "en-US"))
     private let engine = AVAudioEngine()
@@ -102,6 +106,29 @@ final class VoiceListener {
         carryForward = false
 
         let input = engine.inputNode
+        // Acoustic echo cancellation: the voice-processing IO unit subtracts the
+        // Mac's own audio output (our TTS) from the mic, so anything the recognizer
+        // hears while the assistant is talking is the USER — the prerequisite for
+        // conversational barge-in. Non-fatal: without it the coordinator keeps the
+        // old deaf-while-speaking behavior (we'd hear ourselves otherwise).
+        if !input.isVoiceProcessingEnabled {
+            do {
+                try input.setVoiceProcessingEnabled(true)
+                echoCancellation = true
+            } catch {
+                echoCancellation = false
+                onInfo?("echo cancellation unavailable (\(error.localizedDescription)) — barge-in disabled")
+            }
+        } else {
+            echoCancellation = true
+        }
+        if echoCancellation {
+            // The mic is always on — don't let voice processing duck the user's
+            // music/audio all day just because we're listening.
+            input.voiceProcessingOtherAudioDuckingConfiguration =
+                .init(enableAdvancedDucking: false, duckingLevel: .min)
+        }
+        // Read the format AFTER enabling voice processing — enabling it changes it.
         let format = input.outputFormat(forBus: 0)
         input.installTap(onBus: 0, bufferSize: 1024, format: format) { [weak self] buffer, _ in
             guard let self else { return }

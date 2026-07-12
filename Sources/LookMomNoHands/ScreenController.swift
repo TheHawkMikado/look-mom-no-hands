@@ -16,6 +16,7 @@ enum ScreenController {
         case missingDirection
         case appLaunchFailed(String)
         case unknownKeystroke(String)
+        case windowImmovable(String)
 
         var description: String {
             switch self {
@@ -25,6 +26,7 @@ enum ScreenController {
             case .missingDirection: return "scroll command arrived without a direction"
             case .appLaunchFailed(let n): return "couldn't open “\(n)”"
             case .unknownKeystroke(let k): return "don't know the shortcut “\(k)”"
+            case .windowImmovable(let w): return "the window “\(w)” refused to move (full screen or fixed)"
             }
         }
     }
@@ -42,12 +44,12 @@ enum ScreenController {
 
     static func perform(_ action: ScreenAction) throws {
         switch action.kind {
-        case .click, .type, .scroll, .keystroke, .focusWindow, .switchTab:
+        case .click, .type, .scroll, .keystroke, .focusWindow, .moveWindow, .switchTab:
             // macOS silently discards synthetic events from untrusted processes,
             // and window enumeration needs AX — fail loudly instead of logging a
             // success that never happened.
             guard isTrusted else { throw ControlError.notTrusted }
-        case .openApp, .openURL, .dictateStart, .describeScreen, .none:
+        case .openApp, .openURL, .dictateStart, .describeScreen, .watchStart, .none:
             break
         }
         switch action.kind {
@@ -61,9 +63,10 @@ enum ScreenController {
         case .openApp: try openApp(named: action.target)
         case .openURL: try openURL(action.url, inApp: action.target)
         case .focusWindow: try focusWindow(matching: action.target)
+        case .moveWindow: try moveWindow(matching: action.target, to: action.text)
         case .switchTab: try switchTab(to: action.target)
         case .keystroke: try keystroke(action.keys)
-        case .dictateStart, .describeScreen, .none: break // handled by the coordinator, not here
+        case .dictateStart, .describeScreen, .watchStart, .none: break // handled by the coordinator, not here
         }
     }
 
@@ -90,6 +93,129 @@ enum ScreenController {
             }
         }
         return out
+    }
+
+    /// Moves a window to another display, centered in its visible area, and raises
+    /// it. `query` empty = the frontmost app's focused window. This is what makes
+    /// "move it to my main screen" a real capability instead of an improvised
+    /// open_app (which wrongly created a NEW window).
+    static func moveWindow(matching query: String, to destination: String) throws {
+        try Task.checkCancellation()
+        let window: AXUIElement
+        var owner: NSRunningApplication?
+        if query.isEmpty {
+            guard let app = NSWorkspace.shared.frontmostApplication else { throw ControlError.noFrontApp }
+            let axApp = AXUIElementCreateApplication(app.processIdentifier)
+            var ref: CFTypeRef?
+            guard AXUIElementCopyAttributeValue(axApp, kAXFocusedWindowAttribute as CFString, &ref) == .success,
+                  let r = ref, CFGetTypeID(r) == AXUIElementGetTypeID() else {
+                throw ControlError.elementNotFound("focused window")
+            }
+            window = (r as! AXUIElement)
+            owner = app
+        } else {
+            let windows = try openWindows()
+            guard let idx = bestWindowIndex(windows.map { "\($0.app) \($0.title)" }, query: query) else {
+                throw ControlError.elementNotFound(query)
+            }
+            window = windows[idx].window
+            owner = windows[idx].runningApp
+        }
+        let screens = NSScreen.screens
+        guard let destIdx = displayIndex(for: destination, count: screens.count), destIdx < screens.count else {
+            throw ControlError.elementNotFound("display \"\(destination)\"")
+        }
+        let dest = screens[destIdx]
+        var size = CGSize(width: 1000, height: 700)
+        var sizeRef: CFTypeRef?
+        if AXUIElementCopyAttributeValue(window, kAXSizeAttribute as CFString, &sizeRef) == .success,
+           let sr = sizeRef, CFGetTypeID(sr) == AXValueGetTypeID() {
+            AXValueGetValue((sr as! AXValue), .cgSize, &size)
+        }
+        let primaryHeight = screens.first { $0.frame.origin == .zero }?.frame.height ?? dest.frame.height
+        var origin = quartzOrigin(centering: size, in: dest.visibleFrame, primaryHeight: primaryHeight)
+        guard let value = AXValueCreate(.cgPoint, &origin) else { throw ControlError.elementNotFound(destination) }
+        try Task.checkCancellation()
+        // Full-screen and fixed windows reject AX position writes — surface that
+        // instead of reporting a move that never happened.
+        guard AXUIElementSetAttributeValue(window, kAXPositionAttribute as CFString, value) == .success else {
+            throw ControlError.windowImmovable(query.isEmpty ? "current window" : query)
+        }
+        AXUIElementSetAttributeValue(window, kAXMainAttribute as CFString, kCFBooleanTrue)
+        AXUIElementPerformAction(window, kAXRaiseAction as CFString)
+        owner?.activate(options: [])
+    }
+
+    /// Cocoa (y-up) → Quartz (y-down) window origin that centers `size` in a
+    /// screen's visible frame, clamped so the window's TOP-LEFT stays inside the
+    /// destination (a window larger than the display keeps its title bar reachable
+    /// rather than centering off-screen). Pure — unit-tested.
+    nonisolated static func quartzOrigin(centering size: CGSize, in cocoaVisible: CGRect, primaryHeight: CGFloat) -> CGPoint {
+        let x = min(max(cocoaVisible.minX, cocoaVisible.midX - size.width / 2),
+                    max(cocoaVisible.minX, cocoaVisible.maxX - size.width))
+        // Cocoa top of the window (y-up): clamp so the top edge stays at/under the
+        // visible top and at/above the visible bottom.
+        let topWanted = cocoaVisible.midY + size.height / 2
+        let topClamped = min(cocoaVisible.maxY, max(cocoaVisible.minY + size.height, topWanted))
+        return CGPoint(x: x, y: primaryHeight - topClamped)
+    }
+
+    /// Resolves a spoken display description to an NSScreen index. Pure — unit-tested.
+    nonisolated static func displayIndex(for destination: String, count: Int) -> Int? {
+        let d = destination.lowercased()
+        func has(_ words: String...) -> Bool { words.contains { d.contains($0) } }
+        if d.isEmpty || has("main", "primary", "first", "built-in", "laptop") { return 0 }
+        if let digit = d.first(where: \.isNumber), let n = Int(String(digit)), n >= 1, n <= count { return n - 1 }
+        if has("second", "other", "external", "monitor") { return count > 1 ? 1 : nil }
+        if has("third") { return count > 2 ? 2 : nil }
+        return nil
+    }
+
+    /// Whether demonstration recording must REDACT the current typing. Fails CLOSED:
+    /// records only when the focused field is positively confirmed to be a normal,
+    /// non-secure text field. A secure field (by role OR subrole), an unreadable
+    /// focus, or any unclassifiable element all redact — so a password can't leak
+    /// into a saved procedure through an AX blind spot.
+    static func shouldRedactFocusedTyping() -> Bool {
+        let systemWide = AXUIElementCreateSystemWide()
+        AXUIElementSetMessagingTimeout(systemWide, 0.3)   // runs per keystroke on the main actor
+        var ref: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(systemWide, kAXFocusedUIElementAttribute as CFString, &ref) == .success,
+              let el = ref, CFGetTypeID(el) == AXUIElementGetTypeID() else {
+            return true   // can't confirm the field → fail closed
+        }
+        let element = el as! AXUIElement
+        let role = string(element, kAXRoleAttribute)
+        let subrole = string(element, kAXSubroleAttribute)
+        if role == "AXSecureTextField" || subrole == "AXSecureTextField" { return true }
+        // A field whose visible value is bulleted/obscured is a password even when its
+        // role is a plain AXTextField (some web <input type=password> expose it this
+        // way). Redact regardless of role.
+        if let value = string(element, kAXValueAttribute), value.contains("•") || value.contains("●") { return true }
+        // Positively a plain text field/area → safe to record. Everything else
+        // (unknown role, web areas we can't classify) redacts.
+        return !(role == "AXTextField" || role == "AXTextArea" || role == "AXComboBox")
+    }
+
+    /// The UI element under a screen point (Quartz coords): its app, role, and
+    /// label. Demonstration recording uses this to narrate "click the 'Save'
+    /// button in Mail" instead of brittle raw coordinates.
+    static func elementLabel(atQuartz point: CGPoint) -> (app: String, role: String, label: String)? {
+        let systemWide = AXUIElementCreateSystemWide()
+        // Bound the synchronous IPC — a beachballing target must not stall the UI /
+        // voice pipeline (this runs on the main actor during a demonstration).
+        AXUIElementSetMessagingTimeout(systemWide, 0.4)
+        var ref: AXUIElement?
+        guard AXUIElementCopyElementAtPosition(systemWide, Float(point.x), Float(point.y), &ref) == .success,
+              let element = ref else { return nil }
+        AXUIElementSetMessagingTimeout(element, 0.4)
+        var pid: pid_t = 0
+        AXUIElementGetPid(element, &pid)
+        let app = pid > 0 ? (NSRunningApplication(processIdentifier: pid)?.localizedName ?? "the app") : "the app"
+        let role = (string(element, kAXRoleAttribute) ?? "element")
+            .replacingOccurrences(of: "AX", with: "").lowercased()
+        let label = descriptiveText(of: element).map { String($0.prefix(60)) } ?? ""
+        return (app, role.isEmpty ? "element" : role, label)
     }
 
     /// Switches the frontmost browser to the tab whose title best matches. Presses
@@ -120,6 +246,12 @@ enum ScreenController {
     /// tab titles. Cancellable/bounded like `openWindows`. Runs off the main actor.
     static func environmentSnapshot(includeTabs: Bool = true) throws -> EnvSnapshot {
         let front = NSWorkspace.shared.frontmostApplication
+        // Quartz bounds per display (same space as AX positions) so each window can
+        // be tagged with the display it's on — what "move it to my main screen" needs.
+        let displayBounds: [CGRect] = NSScreen.screens.compactMap {
+            ($0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID)
+                .map { CGDisplayBounds($0) }
+        }
         var byApp: [String: EnvApp] = [:]
         var order: [String] = []
         for app in NSWorkspace.shared.runningApplications where app.activationPolicy == .regular {
@@ -149,7 +281,18 @@ enum ScreenController {
                 let title = string(w, kAXTitleAttribute) ?? ""
                 let isFocused = focused.map { CFEqual($0, w) } ?? false
                 let (tabs, active) = browser?(w) ?? ([], nil)
-                envWindows.append(EnvWindow(app: name, title: title, focused: isFocused, tabs: tabs, activeTab: active))
+                // Which display holds this window (by its top-left, nudged inward).
+                var display = 0
+                var posRef: CFTypeRef?
+                if displayBounds.count > 1,
+                   AXUIElementCopyAttributeValue(w, kAXPositionAttribute as CFString, &posRef) == .success,
+                   let pr = posRef, CFGetTypeID(pr) == AXValueGetTypeID() {
+                    var p = CGPoint.zero
+                    AXValueGetValue((pr as! AXValue), .cgPoint, &p)
+                    display = displayBounds.firstIndex { $0.contains(CGPoint(x: p.x + 20, y: p.y + 20)) } ?? 0
+                }
+                envWindows.append(EnvWindow(app: name, title: title, focused: isFocused,
+                                            tabs: tabs, activeTab: active, display: display))
             }
             if byApp[name] == nil { order.append(name) }
             byApp[name] = EnvApp(name: name, bundleID: app.bundleIdentifier,
@@ -159,7 +302,8 @@ enum ScreenController {
         // Frontmost app first, then the rest in discovery order (stable partition —
         // sorted(by:) isn't stable, which would scramble the inactive tail).
         let list = order.compactMap { byApp[$0] }
-        return EnvSnapshot(apps: list.filter { $0.active } + list.filter { !$0.active })
+        return EnvSnapshot(apps: list.filter { $0.active } + list.filter { !$0.active },
+                           displayCount: max(1, displayBounds.count))
     }
 
     /// Browser tab reader for a bundle id, or nil for non-browsers. Reads the

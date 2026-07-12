@@ -21,6 +21,10 @@ final class Speaker: NSObject, AVAudioPlayerDelegate, AVSpeechSynthesizerDelegat
     private var player: AVAudioPlayer?
     private var utterance: AVSpeechUtterance?   // the one currently speaking
     private var continuation: CheckedContinuation<Void, Never>?
+    // Bumped by cancel() and by each speak(). A TTS fetch that resolves after a newer
+    // speak (or a cancel) started is stale — it must not seize player/continuation,
+    // which would strand the newer speak's continuation (a hang) or play over it.
+    private var epoch = 0
 
     // Overridable so a different voice is a env-var change, not a rebuild.
     private static let voiceID =
@@ -36,13 +40,15 @@ final class Speaker: NSObject, AVAudioPlayerDelegate, AVSpeechSynthesizerDelegat
     func speak(_ text: String) async {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
-        if let key = elevenLabsKey, !key.isEmpty, await speakElevenLabs(trimmed, key: key) {
+        epoch += 1
+        let mine = epoch
+        if let key = elevenLabsKey, !key.isEmpty, await speakElevenLabs(trimmed, key: key, epoch: mine) {
             return
         }
-        await speakLocal(trimmed)
+        await speakLocal(trimmed, epoch: mine)
     }
 
-    private func speakElevenLabs(_ text: String, key: String) async -> Bool {
+    private func speakElevenLabs(_ text: String, key: String, epoch mine: Int) async -> Bool {
         guard let url = URL(string: "https://api.elevenlabs.io/v1/text-to-speech/\(Self.voiceID)?output_format=mp3_44100_64") else {
             return false
         }
@@ -60,6 +66,9 @@ final class Speaker: NSObject, AVAudioPlayerDelegate, AVSpeechSynthesizerDelegat
               let player = try? AVAudioPlayer(data: data) else {
             return false   // caller falls back to the local voice
         }
+        // Superseded/cancelled while the fetch was in flight — drop this audio
+        // rather than clobber the current speak's player/continuation.
+        guard mine == epoch else { return true }
         self.player = player
         player.delegate = self
         await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in
@@ -70,7 +79,8 @@ final class Speaker: NSObject, AVAudioPlayerDelegate, AVSpeechSynthesizerDelegat
         return true
     }
 
-    private func speakLocal(_ text: String) async {
+    private func speakLocal(_ text: String, epoch mine: Int) async {
+        guard mine == epoch else { return }
         let u = AVSpeechUtterance(string: text)
         await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in
             continuation = c
@@ -84,6 +94,7 @@ final class Speaker: NSObject, AVAudioPlayerDelegate, AVSpeechSynthesizerDelegat
     /// means the delegate callbacks that follow from stop()/stopSpeaking() don't
     /// match and so can't resume a later utterance's continuation.
     func cancel() {
+        epoch += 1   // invalidate any in-flight fetch so it can't start after this
         player?.stop()
         synth.stopSpeaking(at: .immediate)
         player = nil

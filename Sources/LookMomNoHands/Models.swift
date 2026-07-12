@@ -25,10 +25,12 @@ struct ScreenAction: Decodable, Sendable {
         case openApp = "open_app"             // launch/activate an app by name
         case openURL = "open_url"             // open a website (optionally in a named browser)
         case focusWindow = "focus_window"     // raise a specific open window by its title/app
+        case moveWindow = "move_window"       // move a window to another display
         case switchTab = "switch_tab"         // switch to a browser tab by its title
         case keystroke                        // press a shortcut like "cmd+t"
         case dictateStart = "dictate_start"   // begin a Wisprflow-style dictation session
         case describeScreen = "describe_screen" // read/answer about what's on screen (vision)
+        case watchStart = "watch_start"       // record the user's demonstration as a procedure
         case none                             // nothing actionable
     }
 
@@ -386,6 +388,7 @@ struct EnvWindow: Sendable, Equatable, Identifiable {
     let focused: Bool          // the app's focused/main window
     var tabs: [String] = []    // browser tabs, empty otherwise
     var activeTab: String? = nil
+    var display: Int = 0       // 0 = main display, 1 = second, …
     var id: String { "\(app)›\(title)" }
 }
 
@@ -403,16 +406,20 @@ struct EnvApp: Sendable, Equatable, Identifiable {
 /// "knows" what's available even when it isn't actively listening.
 struct EnvSnapshot: Sendable, Equatable {
     var apps: [EnvApp] = []
+    var displayCount: Int = 1
 
     /// Compact rendering for the planner. Capped — this rides on the latency-
     /// critical command path, so a machine with 30 apps open can't bloat the prompt.
     var promptText: String {
         guard !apps.isEmpty else { return "" }
         var s = "Open apps and windows right now:"
+        if displayCount > 1 {
+            s += " (\(displayCount) displays; windows marked [display N] are on that display, unmarked are on the main one — move_window relocates them)"
+        }
         for app in apps.prefix(14) {
             s += "\n- \(app.name)\(app.active ? " (frontmost)" : "")"
             for w in app.windows.prefix(8) where !w.title.isEmpty {
-                s += "\n    • \(w.title.prefix(100))\(w.focused ? " (focused)" : "")"
+                s += "\n    • \(w.title.prefix(100))\(w.focused ? " (focused)" : "")\(w.display > 0 ? " [display \(w.display + 1)]" : "")"
                 if !w.tabs.isEmpty {
                     let shown = w.tabs.prefix(12).map { $0.prefix(60) }.joined(separator: " | ")
                     s += "\n        tabs: \(shown)\(w.tabs.count > 12 ? " …+\(w.tabs.count - 12)" : "")"
@@ -457,6 +464,7 @@ enum AppPhase: Equatable, Sendable {
     case thinking             // Claude call in flight
     case acting               // executing a screen action
     case clarifying           // asked the user a question; listening for the answer
+    case watching             // recording the user's demonstration of a task
     case error(String)
 
     var label: String {
@@ -468,6 +476,7 @@ enum AppPhase: Equatable, Sendable {
         case .thinking: return "Thinking…"
         case .acting: return "Acting…"
         case .clarifying: return "Waiting for your answer…"
+        case .watching: return "Watching your demonstration — say “Mama done” to finish"
         case .error(let m): return "Error: \(m)"
         }
     }

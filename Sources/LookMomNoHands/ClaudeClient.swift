@@ -66,9 +66,9 @@ final class ClaudeClient: @unchecked Sendable {
             "additionalProperties": false,
             "properties": [
                 "kind": ["type": "string",
-                         "enum": ["click", "type", "scroll", "open_app", "open_url", "focus_window", "switch_tab", "keystroke", "dictate_start", "describe_screen", "none"]],
-                "target": ["type": "string", "description": "UI element / app name; for open_url optionally the browser; for focus_window the window description to match (e.g. \"the look-mom-no-hands VS Code\"); for switch_tab the browser tab title to switch to; for describe_screen the question to answer about the screen (empty = just describe what's shown); empty if unused"],
-                "text": ["type": "string", "description": "text to type; empty if unused"],
+                         "enum": ["click", "type", "scroll", "open_app", "open_url", "focus_window", "move_window", "switch_tab", "keystroke", "dictate_start", "describe_screen", "watch_start", "none"]],
+                "target": ["type": "string", "description": "UI element / app name; for open_url optionally the browser; for focus_window/move_window the window description to match (empty for move_window = the current/context window); for switch_tab the browser tab title; for describe_screen the question to answer about the screen; for watch_start a short name for the task being demonstrated; empty if unused"],
+                "text": ["type": "string", "description": "text to type; for move_window the destination display (\"main display\", \"second display\", \"display 2\"); empty if unused"],
                 "url": ["type": "string", "description": "open_url only: the website, e.g. \"youtube.com\"; empty if unused"],
                 "keys": ["type": "string", "description": "keystroke only: shortcut like \"cmd+t\", \"cmd+shift+t\", \"enter\"; empty if unused"],
                 "direction": ["type": "string", "enum": ["up", "down", "left", "right"],
@@ -117,6 +117,14 @@ final class ClaudeClient: @unchecked Sendable {
             YouTube use YouTube's own search box, not the address bar. Only navigate \
             away if the user explicitly asks to.
 
+            CAPABILITY DISCIPLINE — use the RIGHT kind, never a lookalike. Acting on an \
+            EXISTING window is focus_window (raise/go to) or move_window (relocate to a \
+            display) — NEVER open_app/open_url for those: that creates a NEW window, \
+            which is wrong when the user said "move it" / "put it on my main screen". \
+            "It"/"that window" = the working-context window or the window just acted \
+            on. If the request needs something none of the kinds can do, set \
+            blocked=true and say so plainly — never substitute a similar-looking action.
+
             NEVER REPEAT A FAILED ACTION. If "this task so far" already shows an action \
             and the screen indicates it didn't achieve the goal, do something DIFFERENT \
             (a different element, scroll to find it, or read the page) — never re-issue \
@@ -142,13 +150,13 @@ final class ClaudeClient: @unchecked Sendable {
             teach: set when the user NARRATES how to do a task in words ("here's how to \
             X: first…, then…"). Capture a short name, trigger phrases, and the ordered \
             steps. Don't perform it in the same turn unless they say to do it now. If a \
-            taught procedure in the context matches the request, follow its steps. \
-            IMPORTANT: you CANNOT watch or record the user's screen to learn by \
-            demonstration yet. If they say "watch me", "let me show you by doing it", or \
-            "learn from my screen recording", do NOT set teach, do NOT invent placeholder \
-            steps, and do NOT keep waiting/looping — set goal_complete=true and say once: \
-            "I can't watch your screen yet — tell me the steps in words and I'll remember \
-            them."
+            taught procedure in the context matches the request, follow its steps.
+
+            watch_start: when the user wants to SHOW you a task by doing it ("watch me", \
+            "watch this action", "learn this from my screen"), emit ONE watch_start step \
+            with target = a short name for the task. Their clicks and keystrokes will be \
+            recorded until they say "Mama done" and saved as a procedure. Do not also \
+            set teach, and do not invent steps yourself.
 
             learn: set ONLY when the user EXPLICITLY teaches or corrects you — they use \
             corrective/teaching language ("no, I meant…", "when I say X I mean Y", \

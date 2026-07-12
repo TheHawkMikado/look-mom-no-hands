@@ -51,6 +51,9 @@ final class AppCoordinator: ObservableObject {
     private static let visionKey = "visionClickEnabled"
     private let hotkey = HotkeyMonitor()
     private let pill = RecorderPill()                        // floating recorder HUD
+    private let demo = DemonstrationRecorder()               // watch-me click/key capture
+    @Published private(set) var demonstrating = false
+    private var demoName = ""
     private var recorderOutput: RecorderOutput = .note       // what the current recording produces
     private var starting = false                             // start() in flight (async permission gap)
     private var pendingRecording = false                     // recording requested before the mic was on
@@ -143,6 +146,11 @@ final class AppCoordinator: ObservableObject {
                                                  "mama done dictating", "stop dictating", "you stop dictating"]
     nonisolated static let repeatPhrases = ["do that again", "do it again", "again please",
                                             "repeat that", "one more time", "same thing again"]
+    // Ends a watch-me demonstration. All require "mama" so narrating "…done watching
+    // the video…" mid-demo can't end it early. Stored in NORMALIZED form (matched
+    // against normalizedForMatching, which drops apostrophes → "I'm" becomes "i m").
+    nonisolated static let demoStopPhrases = ["mama done", "mama i m done", "mama stop watching",
+                                              "mama finished", "mama that s it"]
     private var lastActionableCommand: String?   // last non-repeat command, for "do that again"
 
     /// True when a command is just "run the last thing again" — after stripping the
@@ -372,6 +380,7 @@ final class AppCoordinator: ObservableObject {
     /// The push-to-dictate chord/hotkey: toggles insert-mode recording, starting
     /// the mic on demand if the app wasn't already listening.
     func toggleHotkeyDictation() {
+        if demonstrating { return }   // a chord press during a demo would fight the recording
         if mode == .recording {
             stopRecording()
             return
@@ -408,6 +417,8 @@ final class AppCoordinator: ObservableObject {
         flushing = false
         pendingClarification = nil
         pendingRecording = false
+        if demonstrating { _ = demo.stop(); demonstrating = false }
+        screenPrefetch = nil   // a snapshot from the stopped run must not feed the next
         listener.metering = false
         meter.level = 0
         recordingStartedAt = nil
@@ -439,12 +450,36 @@ final class AppCoordinator: ObservableObject {
 
     private func handlePartial(_ text: String) {
         guard isRunning else { return }
-        // Ignore audio captured while we're talking — otherwise the app hears its
-        // own spoken reply and treats it as a command.
-        guard !speaking else { return }
+        if speaking {
+            // Barge-in: with echo cancellation the mic can't hear our own TTS, so a
+            // substantive partial while we're talking is the USER talking over us —
+            // cut the speech and listen, like a real conversation. Without echo
+            // cancellation, stay deaf while talking (we'd answer ourselves).
+            if !bargedIn {
+                guard listener.echoCancellation, Self.isBargeInSpeech(text) else { return }
+                bargedIn = true
+                speaker.cancel()
+                store.log("barge", "user interrupted: …\(text.suffix(48))")
+            }
+            // Already interrupted — fall through and keep recording their words.
+        }
         utterance = text
         lastHeardAt = Date()
         guard !processing else { return }
+
+        // While watching a demonstration, the ONLY spoken input we act on is the
+        // stop phrase — everything else is the user narrating to themselves, and
+        // prefetching would raise windows and fight their demo.
+        if demonstrating {
+            let tail = Self.normalizedForMatching(String(text.suffix(64)))
+            if Self.demoStopPhrases.contains(where: tail.contains) { finishDemonstration() }
+            return
+        }
+
+        // Overlap work with speech: while the user is still talking in a command
+        // session, read the screen in the background so the parse can start the
+        // moment they stop — instead of paying the AX walk after the silence gate.
+        if mode == .command { prefetchScreenIfStale() }
 
         // Phrases only ever arrive at the tail of new speech; scanning the whole
         // growing utterance every partial is O(n²) over a long session. Normalizing
@@ -483,7 +518,11 @@ final class AppCoordinator: ObservableObject {
         case .standby:
             break
         case .command:
-            if !utterance.isEmpty, quiet > commandSilence {
+            if demonstrating { break }   // watching a demo — no silence gates, no idle end
+            // Clarification answers ("option two") are short — snap back fast
+            // instead of making the user sit through the full command gate.
+            let gate = pendingClarification != nil ? 1.1 : commandSilence
+            if !utterance.isEmpty, quiet > gate {
                 finalizeCommand()
             } else if utterance.isEmpty,
                       Date().timeIntervalSince(sessionIdleSince) > sessionIdleLimit {
@@ -524,6 +563,7 @@ final class AppCoordinator: ObservableObject {
 
     private func endSession(reason: String) {
         store.log("wake", "session ended (\(reason)) — back to standby")
+        screenPrefetch = nil   // a snapshot from this session must not feed the next
         mode = .standby
         phase = .listeningWake
         pendingClarification = nil
@@ -573,7 +613,7 @@ final class AppCoordinator: ObservableObject {
         switch mode {
         case .command:
             switch phase {
-            case .error, .clarifying: break
+            case .error, .clarifying, .watching: break   // don't stomp a live state
             default: phase = .capturingCommand
             }
             sessionIdleSince = Date()
@@ -583,8 +623,10 @@ final class AppCoordinator: ObservableObject {
         case .recording:
             return   // still capturing; nothing to settle
         }
-        // Discard anything heard while we were acting (e.g. our own typing sounds).
-        freshUtterance()
+        // Discard anything heard while we were acting (e.g. our own typing sounds) —
+        // EXCEPT while a clarification is pending: the user may already be answering
+        // (barge-in over the question), and wiping here would eat their answer.
+        if case .clarifying = phase {} else { freshUtterance() }
         armCaptureForCurrentMode()
     }
 
@@ -891,7 +933,16 @@ final class AppCoordinator: ObservableObject {
         while round < Self.maxTaskRounds, !complete {
             try Task.checkCancellation()
             phase = .thinking
-            let screen = try await gatherScreen(for: text, round: round)
+            // A fresh speculative snapshot (taken while the user was still talking)
+            // saves the whole AX walk on round 0 — the parse starts immediately.
+            let screen: String
+            if round == 0, let p = screenPrefetch, p.gen == gen, Date().timeIntervalSince(p.at) < 4 {
+                screen = p.text
+                screenPrefetch = nil
+                store.log("screen", "using prefetched snapshot")
+            } else {
+                screen = try await gatherScreen(for: text, round: round)
+            }
             let context = buildPlannerContext(command: text, taskProgress: performedAll)
             let plan = try await claude.parsePlan(text, dialogue: dialogue,
                                                   vocabulary: vocabulary.promptContext,
@@ -949,6 +1000,8 @@ final class AppCoordinator: ObservableObject {
             }
 
             dialogue = []                        // request resolved; next utterance is fresh
+            // Intermediate turns keep `say` empty (per the prompt), so awaiting here
+            // costs nothing on multi-step tasks and avoids concurrent TTS.
             if !plan.say.isEmpty { await speak(plan.say, gen: gen) }
             guard gen == runGeneration, !Task.isCancelled else { return }
 
@@ -1029,6 +1082,47 @@ final class AppCoordinator: ObservableObject {
         }
     }
 
+    // MARK: Watch-me demonstration
+
+    /// Starts recording the user's clicks/keystrokes as a procedure ("watch me do
+    /// this"). Ends on a demo stop phrase; the captured steps become a narrated
+    /// procedure the planner follows next time.
+    private func startDemonstration(name: String) {
+        guard !demonstrating else { return }
+        guard ScreenController.isTrusted else {
+            phase = .error("Watching needs Accessibility")
+            return
+        }
+        demoName = name
+        demonstrating = true
+        demo.start()
+        phase = .watching
+        store.log("teach", "watching demonstration: \(name)")
+        Task { await self.speak("Watching. Show me how, then say Mama done.", gen: self.runGeneration) }
+    }
+
+    private func finishDemonstration() {
+        guard demonstrating else { return }
+        demonstrating = false
+        let actions = demo.stop()
+        phase = mode == .command ? .capturingCommand : .listeningWake
+        sessionIdleSince = Date()   // a long demo must not read as session inactivity
+        freshUtterance()
+        guard !actions.isEmpty else {
+            store.log("teach", "demonstration ended — no actions captured")
+            Task { await self.speak("I didn't catch any clicks or keys. Try again, or tell me the steps in words.", gen: self.runGeneration) }
+            return
+        }
+        let narration = actions.enumerated().map { "\($0.offset + 1). \($0.element)" }.joined(separator: " ")
+        procedures.upsert(Procedure(name: demoName, triggers: [demoName], steps: narration))
+        store.log("teach", "learned by demonstration: \(demoName) (\(actions.count) steps) — review in Procedures tab")
+        // Secure/unclassifiable typing is auto-hidden; the rest is editable in the
+        // Procedures tab, so nudge a review.
+        let sensitive = narration.contains(DemonstrationRecorder.redactionMark)
+        let tail = sensitive ? " I hid some text I couldn't confirm was safe to store — review the steps in the Procedures tab." : " You can review the steps in the Procedures tab."
+        Task { await self.speak("Got it — I learned how to \(self.demoName).\(tail)", gen: self.runGeneration) }
+    }
+
     /// A fingerprint of a round's actions INCLUDING the typed text/url, so that
     /// re-entering different values into the same form (a productive repeat) does NOT
     /// collide — only a byte-identical action does. Paired with the screen hash, this
@@ -1053,6 +1147,9 @@ final class AppCoordinator: ObservableObject {
             case .dictateStart:
                 self.startRecording(output: .note)
                 return (performed, true)
+            case .watchStart:
+                self.startDemonstration(name: step.target.isEmpty ? "demonstrated action" : step.target)
+                return (performed, true)   // the demo owns the session until "Mama done"
             case .describeScreen:
                 try await self.describeScreen(question: step.target, gen: gen)
             case .none:
@@ -1077,14 +1174,38 @@ final class AppCoordinator: ObservableObject {
         return (performed, false)
     }
 
+    // Speculative snapshot taken mid-utterance so the post-silence path skips the
+    // AX walk. Refreshed while the user keeps talking; consumed by round 0 only if
+    // it belongs to the same run generation (a Stop/Start or session change must
+    // not feed a new command last session's screen).
+    private var screenPrefetch: (text: String, at: Date, gen: Int)?
+    private var prefetching = false
+
+    private func prefetchScreenIfStale() {
+        guard !utterance.isEmpty, Self.needsScreenContext(utterance) else { return }
+        if let p = screenPrefetch, Date().timeIntervalSince(p.at) < 1.5 { return }
+        guard !prefetching else { return }
+        prefetching = true
+        let gen = runGeneration
+        Task {
+            defer { self.prefetching = false }
+            // raise:false — the prefetch reads the screen but must not steal focus /
+            // raise a window while the user is mid-sentence or a step is acting.
+            let text = (try? await self.gatherScreen(for: self.utterance, round: 0, raise: false)) ?? ""
+            guard gen == self.runGeneration, !text.isEmpty else { return }
+            self.screenPrefetch = (text, Date(), gen)
+        }
+    }
+
     /// Reads the focused window (raising the sticky-context window first). Round 0
     /// skips the AX walk for simple commands; later rounds always observe results.
-    private func gatherScreen(for text: String, round: Int) async throws -> String {
+    private func gatherScreen(for text: String, round: Int, raise: Bool = true) async throws -> String {
         guard round > 0 || Self.needsScreenContext(text) else { return "" }
         // Establish the sticky window only on the first round. Re-raising it every
         // round would dismiss a menu/palette/overlay a prior round opened — the loop
-        // must read (and act in) whatever the last action produced.
-        if round == 0, let win = workingContext.window {
+        // must read (and act in) whatever the last action produced. `raise` is false
+        // for the speculative prefetch (reads only, never steals focus mid-utterance).
+        if raise, round == 0, let win = workingContext.window {
             let labels = environment.snapshot.apps.flatMap { a in a.windows.map { "\(a.name) \($0.title)" } }
             if ScreenController.bestWindowIndex(labels, query: win) != nil {
                 try? await withThrowingTaskGroup(of: Void.self) { group in
@@ -1155,6 +1276,9 @@ final class AppCoordinator: ObservableObject {
                 ctx.app = labels[idx].0
             }
             workingContext = ctx
+        case .moveWindow:
+            // The moved window is now the working focus (if it was named).
+            if !step.target.isEmpty { workingContext.window = step.target }
         case .switchTab:
             workingContext.tab = step.target
         default:
@@ -1229,20 +1353,43 @@ final class AppCoordinator: ObservableObject {
         }
     }
 
-    /// Speaks a reply with recognition muted so the app can't hear itself, then
-    /// flushes whatever the mic captured meanwhile. `gen` guards against a Stop→
-    /// Start that supersedes this run mid-utterance: the stale completion must
-    /// not clear the new session's `speaking` flag or reset its live listener.
+    private var speakEpoch = 0     // the latest speak() owns the state cleanup
+    private var bargedIn = false   // the user talked over the TTS — keep their words
+
+    /// Speaks a reply. With echo cancellation on, recognition KEEPS running and the
+    /// user can talk over her (barge-in, handled in handlePartial); without it,
+    /// recognition is effectively muted (the `speaking` guard) so we can't hear
+    /// ourselves. Latest speak wins: starting a new one cuts the previous. `gen`
+    /// guards against a Stop→Start that supersedes this run mid-utterance.
     private func speak(_ text: String, gen: Int) async {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
+        speaker.cancel()            // a stale utterance must not hold the floor
+        speakEpoch += 1
+        let epoch = speakEpoch
+        bargedIn = false
         speaking = true
+        freshUtterance()            // zero the stream: anything heard from here on is the user
         store.log("say", trimmed)
         await speaker.speak(trimmed)
-        guard gen == runGeneration else { return }
+        guard gen == runGeneration, epoch == speakEpoch else { return }
         speaking = false
-        freshUtterance()   // drop anything heard while talking
+        if bargedIn {
+            bargedIn = false
+            // The interjection is kept in `utterance`. It's reliably finalized when a
+            // clarification was pending (settleSessionPhase preserves it there and the
+            // short answer-gate finalizes it); over a plain report the session settles
+            // back and it's dropped — barge still cut her off, and the user restates.
+        } else {
+            freshUtterance()        // drop any echo remnants heard while talking
+        }
         lastHeardAt = Date()
+    }
+
+    /// A partial during TTS counts as the user talking over her only when it has
+    /// real content — a couple of words, not a one-syllable noise/echo fragment.
+    nonisolated static func isBargeInSpeech(_ text: String) -> Bool {
+        normalizedForMatching(text).split(separator: " ").count >= 2
     }
 
     // Verbs/deictics that mean "act on what's on screen" — gate the AX snapshot
