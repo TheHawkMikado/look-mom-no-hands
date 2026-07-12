@@ -132,6 +132,14 @@ final class ClaudeClient: @unchecked Sendable {
             on. If the request needs something none of the kinds can do, set \
             blocked=true and say so plainly — never substitute a similar-looking action.
 
+            CORRECTIONS come first. If the new request is a correction — "no", "not \
+            X", "I said Y", "that's wrong", "I meant Y" — the user is fixing your LAST \
+            action (see recent actions). Do the CORRECTED thing with the right term, \
+            and undo/redo the wrong result (e.g. re-run the search with the corrected \
+            words). Do NOT repeat the mistaken action, and do NOT ask a clarify \
+            question that re-triggers the same mistake — just act on the correction. \
+            The corrected words the user says now override anything in recent actions.
+
             NEVER REPEAT A FAILED ACTION. If "this task so far" already shows an action \
             and the screen indicates it didn't achieve the goal, do something DIFFERENT \
             (a different element, scroll to find it, or read the page) — never re-issue \
