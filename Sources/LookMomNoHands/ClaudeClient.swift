@@ -124,9 +124,19 @@ final class ClaudeClient: @unchecked Sendable {
             Next turn you'll see the loaded page and can search/click on it.
 
             SELECT / OPEN / PLAY / CHOOSE a thing on screen (a video, a link, a result, \
-            a button) is a CLICK step. describe_screen is ONLY for answering "what's on \
-            screen / read this" — NEVER use describe_screen to select or open something, \
-            and never just talk about a result instead of clicking it.
+            a button) is a CLICK step. describe_screen is ONLY for answering a question \
+            the user explicitly asked ("what's on screen", "read this"). NEVER use \
+            describe_screen to select/open something, to CHECK your own work, or to \
+            narrate results — if you're mid-task, act, don't describe.
+
+            STOP THE MOMENT THE GOAL IS ACHIEVED. When the thing you were asked to do \
+            has happened — the video is open/playing, the page is open, the item is \
+            selected — set goal_complete=true and emit NO steps. Do NOT click other \
+            results, re-verify, "improve" it, or describe it. Specifically: once a \
+            YouTube (or any) video is on its watch page / playing (the URL contains \
+            "/watch", or a video player is on screen), a "play/find/watch a video" goal \
+            is DONE — stop. If a prior click opened an AD, dismiss/skip it or pick the \
+            next organic result ONCE, then stop — do not keep clicking video after video.
 
             STAY IN THE CURRENT PAGE/WINDOW. You are already where the user is working. \
             Do the task THERE using the on-screen controls. Do NOT open a new tab or \
