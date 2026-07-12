@@ -243,6 +243,25 @@ final class ActionDecodingTests: XCTestCase {
         }
     }
 
+    func testAddressBarFilteredFromSnapshot() {
+        let snap = ScreenController.Snapshot(app: "Google Chrome", title: "YouTube", url: "youtube.com",
+            elements: [("AXTextField", "Address and search bar"), ("AXTextArea", "Search"), ("AXButton", "Sign in")])
+        let s = snap.promptText
+        XCTAssertFalse(s.contains("Address and search bar"))   // browser chrome hidden
+        XCTAssertTrue(s.contains("Search"))                    // the page's own search stays
+        XCTAssertTrue(s.contains("Sign in"))
+        XCTAssertTrue(ScreenController.Snapshot.isBrowserAddressBar("Smart Search Field"))
+        XCTAssertFalse(ScreenController.Snapshot.isBrowserAddressBar("Search"))
+    }
+
+    func testDomainLabelForLoadMatching() {
+        XCTAssertEqual(AppCoordinator.domainLabel("youtube.com"), "youtube")
+        XCTAssertEqual(AppCoordinator.domainLabel("https://www.google.com/search?q=x"), "google")
+        XCTAssertEqual(AppCoordinator.domainLabel("docs.google.com"), "docs")
+        XCTAssertEqual(AppCoordinator.domainLabel("github.com"), "github")
+        XCTAssertEqual(AppCoordinator.domainLabel(""), "")
+    }
+
     func testEndsMidThoughtGatesTheClauseTiming() {
         // Continues → wait (don't act on a half-spoken clause).
         XCTAssertTrue(AppCoordinator.endsMidThought("open youtube and"))

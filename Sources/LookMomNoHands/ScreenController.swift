@@ -420,11 +420,21 @@ enum ScreenController {
             if !url.isEmpty { s += " (\(url))" }
             guard !elements.isEmpty else { return s }
             s += "\nClickable/visible elements (to click one, emit a click step with its exact label):"
-            for e in elements {
+            for e in elements where !Self.isBrowserAddressBar(e.label) {
                 let role = e.role.replacingOccurrences(of: "AX", with: "").lowercased()
                 s += "\n- \(role): \(e.label)"
             }
             return s
+        }
+
+        // The browser URL/address bar must never be offered as a click/search target —
+        // typing a query there navigates the whole tab (to a Google search) instead of
+        // searching the current site. Navigation is done via open_url, not this field.
+        static func isBrowserAddressBar(_ label: String) -> Bool {
+            let l = label.lowercased()
+            return l.contains("address and search") || l.contains("address bar")
+                || l.contains("search or enter address") || l.contains("smart search")
+                || l == "address field" || l == "location"
         }
     }
 

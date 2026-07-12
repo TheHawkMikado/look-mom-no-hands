@@ -1094,13 +1094,13 @@ final class AppCoordinator: ObservableObject {
             round += 1
             if !complete, round < Self.maxTaskRounds {
                 if navigated {
-                    // Opening a site/app: wait (up to 4s) for it to finish loading so the
-                    // next round sees YouTube's real search box, not the old page.
-                    await waitForPageSettle(gen: gen, maxWait: 4.0)
+                    // Opening a site/app: wait until it has actually loaded (changed to
+                    // the destination and settled) so the next round sees the real page.
+                    await waitForPage(toHost: lastNavHost, requireChange: true, gen: gen, maxWait: 6.0)
                 } else if didAct {
-                    // Any other action can also change the page (submitting a search,
-                    // clicking a link) — let it settle, but cap short for a plain click.
-                    await waitForPageSettle(gen: gen, maxWait: 1.8)
+                    // Any other action can change the page (submitting a search, clicking
+                    // a link) — let it settle, but cap short for a plain click.
+                    await waitForPage(toHost: nil, requireChange: false, gen: gen, maxWait: 2.0)
                 } else {
                     try? await Task.sleep(nanoseconds: 300_000_000)
                 }
@@ -1219,6 +1219,9 @@ final class AppCoordinator: ObservableObject {
                 // run against the LOADED page. Without this it reads the OLD page and
                 // clicks the address bar → searches Google instead of YouTube.
                 if step.kind == .openURL || step.kind == .openApp {
+                    // Remember where we're going so the loop can wait until the page
+                    // actually becomes that site (open_url has the url; open_app has none).
+                    lastNavHost = step.kind == .openURL ? Self.domainLabel(step.url.isEmpty ? step.target : step.url) : nil
                     if i < plan.steps.count - 1 { self.store.log("action", "navigated — deferring \(plan.steps.count - 1 - i) step(s) until the page loads") }
                     return (performed, false, true)
                 }
@@ -1227,24 +1230,42 @@ final class AppCoordinator: ObservableObject {
         return (performed, false, false)
     }
 
-    /// Waits for the frontmost window to stop changing (a page/app finished loading)
-    /// before the loop observes again — the user's "wait for the page to load".
-    /// Polls the focused window; returns when its URL+title+element-count are stable
-    /// across two reads, or at a hard cap. Bounded, cancellable.
-    private func waitForPageSettle(gen: Int, maxWait: TimeInterval = 4.0) async {
-        var last = ""
+    /// Waits for the frontmost window to finish loading before the loop observes
+    /// again — the user's "wait for the page to load." For a navigation it waits
+    /// until the page has actually CHANGED from the pre-nav page and then settled
+    /// (and, if we know the destination host, until the URL reflects it) — so it
+    /// can't declare the still-showing OLD page "loaded" just because it briefly
+    /// looked stable. For a plain UI update it just waits for stability. Bounded,
+    /// cancellable, off the main actor.
+    private func waitForPage(toHost host: String?, requireChange: Bool, gen: Int, maxWait: TimeInterval) async {
         let start = Date()
+        var initial: String? = nil
+        var last = ""
         while Date().timeIntervalSince(start) < maxWait {
-            try? await Task.sleep(nanoseconds: 300_000_000)
+            try? await Task.sleep(nanoseconds: 350_000_000)
             guard gen == runGeneration, !Task.isCancelled else { return }
             let snap = try? await withThrowingTaskGroup(of: ScreenController.Snapshot?.self) { group in
                 group.addTask { try? ScreenController.focusedWindowSnapshot(maxElements: 25) }
                 return try await group.next() ?? nil
             }
-            let sig = "\(snap?.url ?? "")|\(snap?.title ?? "")|\(snap?.elements.count ?? 0)"
-            if sig == last, !sig.isEmpty { return }   // two matching reads in a row → settled
+            let url = (snap?.url ?? "").lowercased()
+            let sig = "\(url)|\(snap?.title ?? "")|\(snap?.elements.count ?? 0)"
+            let stable = (sig == last && !sig.isEmpty)
+            // Strong signal: the URL is now the destination and has settled.
+            if let host, !host.isEmpty, url.contains(host), stable { return }
+            if initial == nil { initial = sig; last = sig; continue }   // baseline (pre-load)
+            // General: the page has changed from the pre-nav baseline AND settled.
+            if stable, (!requireChange || sig != initial) { return }
             last = sig
         }
+    }
+
+    /// The distinctive domain word of a URL for load-matching ("youtube.com" →
+    /// "youtube", "https://www.google.com/x" → "google"). Pure/tested.
+    nonisolated static func domainLabel(_ url: String) -> String {
+        let skip: Set<String> = ["http", "https", "www", "com", "org", "net", "io", "co", "app", "gov", "edu"]
+        let tokens = url.lowercased().split { !$0.isLetter && !$0.isNumber }.map(String.init)
+        return tokens.first { $0.count > 2 && !skip.contains($0) } ?? ""
     }
 
     // Speculative snapshot taken mid-utterance so the post-silence path skips the
@@ -1253,6 +1274,7 @@ final class AppCoordinator: ObservableObject {
     // not feed a new command last session's screen).
     private var screenPrefetch: (text: String, at: Date, gen: Int)?
     private var prefetching = false
+    private var lastNavHost: String?   // destination domain word of the last open_url, for load-waiting
 
     private func prefetchScreenIfStale() {
         guard !utterance.isEmpty, Self.needsScreenContext(utterance) else { return }
