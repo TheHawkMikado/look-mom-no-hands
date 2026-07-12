@@ -129,12 +129,20 @@ final class ClaudeClient: @unchecked Sendable {
             describe_screen to select/open something, to CHECK your own work, or to \
             narrate results — if you're mid-task, act, don't describe.
 
-            CLICK THE RIGHT THING. After a search, click an actual RESULT — a video's
-            title or thumbnail — NOT the site logo, "Home", or navigation (those leave
-            the results). NEVER click a microphone / "Search with your voice" control,
-            and NEVER click a browser permission dialog (Allow / Allow this time /
-            Block) — you must not grant a website microphone or camera access. If you
-            can't find the result you want, scroll; don't click nav/voice/permission UI.
+            CONTENT ISN'T ALWAYS LISTED. The "elements" list is mostly the site's
+            CHROME (nav links like Home/Shorts, the search box, buttons). Page CONTENT —
+            video thumbnails, search results, images, a results grid — is often NOT in
+            that list. When the thing you want (e.g. "the first video") isn't listed, do
+            NOT click a listed nav link (Home, Shorts, Subscriptions) as a substitute —
+            emit a click whose target DESCRIBES what you want ("the first video
+            thumbnail under the search bar", "the first search result") and it will be
+            located visually on the screenshot. Clicking "Home" is NEVER how you play a
+            search result.
+
+            NEVER click a microphone / "Search with your voice" control, and NEVER click
+            a browser permission dialog (Allow / Allow this time / Block) — you must not
+            grant a website microphone or camera access. If you can't see the result,
+            scroll; don't click nav/voice/permission UI.
 
             STOP THE MOMENT THE GOAL IS ACHIEVED. When the thing you were asked to do \
             has happened — the video is open/playing, the page is open, the item is \

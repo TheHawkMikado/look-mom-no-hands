@@ -1332,7 +1332,9 @@ final class AppCoordinator: ObservableObject {
             }
         }
         let snap = try await withThrowingTaskGroup(of: ScreenController.Snapshot?.self) { group in
-            group.addTask { try? ScreenController.focusedWindowSnapshot() }
+            // Higher cap so content-heavy pages (a YouTube results grid) surface real
+            // targets — video links — not just the site's nav chrome.
+            group.addTask { try? ScreenController.focusedWindowSnapshot(maxElements: 100) }
             return try await group.next() ?? nil
         }
         guard let snap else { return "" }
