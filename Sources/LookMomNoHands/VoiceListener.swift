@@ -106,29 +106,11 @@ final class VoiceListener {
         carryForward = false
 
         let input = engine.inputNode
-        // Acoustic echo cancellation: the voice-processing IO unit subtracts the
-        // Mac's own audio output (our TTS) from the mic, so anything the recognizer
-        // hears while the assistant is talking is the USER — the prerequisite for
-        // conversational barge-in. Non-fatal: without it the coordinator keeps the
-        // old deaf-while-speaking behavior (we'd hear ourselves otherwise).
-        if !input.isVoiceProcessingEnabled {
-            do {
-                try input.setVoiceProcessingEnabled(true)
-                echoCancellation = true
-            } catch {
-                echoCancellation = false
-                onInfo?("echo cancellation unavailable (\(error.localizedDescription)) — barge-in disabled")
-            }
-        } else {
-            echoCancellation = true
-        }
-        if echoCancellation {
-            // The mic is always on — don't let voice processing duck the user's
-            // music/audio all day just because we're listening.
-            input.voiceProcessingOtherAudioDuckingConfiguration =
-                .init(enableAdvancedDucking: false, duckingLevel: .min)
-        }
-        // Read the format AFTER enabling voice processing — enabling it changes it.
+        // NOTE: OS voice-processing (AEC) was tried here to enable barge-in, but
+        // enabling it reconfigures the input node's format and broke SFSpeechRecognizer
+        // (the wake word stopped firing). Recognition reliability wins — we stay on the
+        // plain tap and the "deaf while speaking" behavior. echoCancellation stays false,
+        // so the coordinator's barge-in path is inert.
         let format = input.outputFormat(forBus: 0)
         input.installTap(onBus: 0, bufferSize: 1024, format: format) { [weak self] buffer, _ in
             guard let self else { return }

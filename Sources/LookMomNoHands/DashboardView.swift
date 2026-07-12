@@ -354,9 +354,13 @@ private struct ProceduresTab: View {
     @State private var steps = ""
 
     var body: some View {
-        HSplitView {
+        HStack(spacing: 0) {
             VStack(spacing: 0) {
                 List(selection: $selection) {
+                    if procedures.procedures.isEmpty {
+                        Text("No procedures yet. Say “watch this” and demonstrate, or add one.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
                     ForEach(procedures.procedures) { p in
                         VStack(alignment: .leading, spacing: 1) {
                             Text(p.name.isEmpty ? "(unnamed)" : p.name)
@@ -370,12 +374,17 @@ private struct ProceduresTab: View {
                 }
                 Divider()
                 Button { newProcedure() } label: { Label("New procedure", systemImage: "plus") }
-                    .buttonStyle(.borderless).padding(6)
+                    .buttonStyle(.borderless).padding(8).frame(maxWidth: .infinity, alignment: .leading)
             }
-            .frame(minWidth: 200)
+            .frame(width: 250)
 
-            editor.frame(minWidth: 340).padding()
+            Divider()
+
+            editor
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                .padding()
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .onChange(of: selection) { _ in loadDraft() }
     }
 
@@ -390,7 +399,7 @@ private struct ProceduresTab: View {
                     .textFieldStyle(.roundedBorder)
                 Text("Steps").font(.caption).foregroundStyle(.secondary)
                 TextEditor(text: $steps)
-                    .font(.body).frame(minHeight: 140)
+                    .font(.body).frame(maxHeight: .infinity)
                     .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.secondary.opacity(0.3)))
                 HStack {
                     Spacer()
@@ -398,7 +407,12 @@ private struct ProceduresTab: View {
                 }
             }
         } else {
-            Text("Select or add a procedure").foregroundStyle(.secondary)
+            VStack {
+                Spacer()
+                Text("Select a procedure, or add one").foregroundStyle(.secondary)
+                Spacer()
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
     }
 
@@ -433,7 +447,7 @@ private struct ProfilesTab: View {
     @State private var editingID: String?
 
     var body: some View {
-        HSplitView {
+        HStack(spacing: 0) {
             List(selection: Binding(get: { profiles.activeID }, set: { profiles.activeID = $0 ?? profiles.activeID })) {
                 ForEach(profiles.profiles) { p in
                     HStack {
@@ -452,12 +466,15 @@ private struct ProfilesTab: View {
                 Button { addProfile() } label: { Label("New profile", systemImage: "plus") }
                     .buttonStyle(.borderless)
             }
-            .frame(minWidth: 200)
+            .frame(width: 250)
+
+            Divider()
 
             editor
-                .frame(minWidth: 320)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                 .padding()
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .onAppear(perform: loadDraft)
         .onChange(of: profiles.activeID) { _ in loadDraft() }
     }
@@ -664,40 +681,52 @@ private struct TranscriptsTab: View {
         }
     }
 
-    // HSplitView (not NavigationSplitView): a NavigationSplitView inside the TabView
-    // takes over the window chrome and hides the tab bar, so you couldn't switch tabs.
+    // Plain HStack (not NavigationSplitView/HSplitView): a NavigationSplitView inside
+    // the tab strip took over the window chrome; HSplitView left panes mis-sized. A
+    // fixed sidebar + a filling detail is predictable.
     var body: some View {
-        HSplitView {
+        HStack(spacing: 0) {
             VStack(spacing: 6) {
                 TextField("Search transcripts", text: $search)
                     .textFieldStyle(.roundedBorder)
                     .padding([.horizontal, .top], 8)
-                List(filtered, selection: $selection) { rec in
-                    VStack(alignment: .leading, spacing: 2) {
-                        HStack {
-                            Image(systemName: rec.kind == "dictation" ? "note.text" : "cursorarrow.rays")
-                            Text(rec.summary ?? rec.transcript).lineLimit(1)
-                            Spacer()
-                        }
-                        Text(rec.date.formatted(date: .abbreviated, time: .shortened))
-                            .font(.caption2).foregroundStyle(.secondary)
+                List(selection: $selection) {
+                    if filtered.isEmpty {
+                        Text(store.transcripts.isEmpty ? "No transcripts yet." : "No matches.")
+                            .font(.caption).foregroundStyle(.secondary)
                     }
-                    .tag(rec.id)
+                    ForEach(filtered) { rec in
+                        VStack(alignment: .leading, spacing: 2) {
+                            HStack {
+                                Image(systemName: rec.kind == "dictation" ? "note.text" : "cursorarrow.rays")
+                                Text(rec.summary ?? rec.transcript).lineLimit(1)
+                                Spacer()
+                            }
+                            Text(rec.date.formatted(date: .abbreviated, time: .shortened))
+                                .font(.caption2).foregroundStyle(.secondary)
+                        }
+                        .tag(rec.id)
+                    }
                 }
             }
-            .frame(minWidth: 260)
+            .frame(width: 280)
+
+            Divider()
 
             Group {
                 if let id = selection, let rec = store.transcripts.first(where: { $0.id == id }) {
                     TranscriptDetail(record: rec)
                 } else {
-                    ContentUnavailableView("No transcript selected",
-                                           systemImage: "text.book.closed",
-                                           description: Text("\(store.transcripts.count) stored"))
+                    VStack {
+                        Spacer()
+                        Text("Select a transcript · \(store.transcripts.count) stored").foregroundStyle(.secondary)
+                        Spacer()
+                    }
                 }
             }
-            .frame(minWidth: 340, maxWidth: .infinity, maxHeight: .infinity)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
 
