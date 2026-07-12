@@ -119,9 +119,9 @@ final class AppCoordinator: ObservableObject {
     let knowledge: KnowledgeStore
     let insertRules: InsertRulesStore
 
-    // Longer than the old 1.2s: a spoken request can be several action items, so
-    // don't cut it off on a mid-sentence breath.
-    private let commandSilence: TimeInterval = 2.2
+    // Balance: long enough not to cut a compound request on a mid-sentence breath,
+    // short enough to feel responsive (the user wants it to act, not wait).
+    private let commandSilence: TimeInterval = 1.5
     // Seconds of silence that ends a recording. Editable + persisted. 0 = never
     // auto-end (you stop with the chord, a stop phrase, or the pill). Default 60s
     // so a thinking pause doesn't cut a note short. Chunk-flush uses a separate
@@ -502,6 +502,23 @@ final class AppCoordinator: ObservableObject {
         }
     }
 
+    // Words/short fragments that signal the user is mid-thought — don't act yet.
+    nonisolated static let continuationWords: Set<String> = [
+        "and", "then", "so", "to", "the", "a", "an", "of", "for", "with", "or", "but",
+        "plus", "also", "now", "next", "after", "before", "when", "that", "which", "on",
+        "in", "at", "my", "your", "this", "into", "onto", "up"
+    ]
+
+    /// True when the utterance ends on a word that implies more is coming (a
+    /// conjunction/article/preposition), or is too short to be a whole command — so
+    /// the silence gate waits instead of acting on a half-spoken clause. Pure/tested.
+    nonisolated static func endsMidThought(_ text: String) -> Bool {
+        let words = normalizedForMatching(text).split(separator: " ").map(String.init)
+        guard let last = words.last else { return false }
+        if words.count < 2 { return true }
+        return continuationWords.contains(last)
+    }
+
     /// Lowercase, reduced to space-separated alphanumeric runs.
     nonisolated static func normalizedForMatching(_ text: String) -> String {
         let mapped = String(text.lowercased().map { $0.isLetter || $0.isNumber ? $0 : " " })
@@ -519,9 +536,15 @@ final class AppCoordinator: ObservableObject {
             break
         case .command:
             if demonstrating { break }   // watching a demo — no silence gates, no idle end
-            // Clarification answers ("option two") are short — snap back fast
-            // instead of making the user sit through the full command gate.
-            let gate = pendingClarification != nil ? 1.1 : commandSilence
+            // Act on each clause as you pause, not after the whole sentence: a short
+            // gate (1s) fires on a natural clause pause so "open YouTube [pause] search
+            // cats [pause] play the first one" executes step-by-step live. But if the
+            // phrase clearly continues ("…and", "…then to"), wait longer so a
+            // mid-thought breath isn't cut. Clarification answers snap back fastest.
+            let gate: TimeInterval
+            if pendingClarification != nil { gate = 1.1 }
+            else if Self.endsMidThought(utterance) { gate = 2.2 }
+            else { gate = 1.0 }
             if !utterance.isEmpty, quiet > gate {
                 finalizeCommand()
             } else if utterance.isEmpty,
@@ -623,10 +646,12 @@ final class AppCoordinator: ObservableObject {
         case .recording:
             return   // still capturing; nothing to settle
         }
-        // Discard anything heard while we were acting (e.g. our own typing sounds) —
-        // EXCEPT while a clarification is pending: the user may already be answering
-        // (barge-in over the question), and wiping here would eat their answer.
-        if case .clarifying = phase {} else { freshUtterance() }
+        // Keep whatever's in the utterance when settling a command: the user may have
+        // spoken the NEXT clause while this one was executing ("open YouTube" running
+        // while they say "…now search cats") — wiping it would drop that clause. It's
+        // safe because finalizeCommand already cleared the finished clause, and screen
+        // actions are synthetic (no mic noise). Only clear on the way to standby.
+        if mode == .standby { freshUtterance() }
         armCaptureForCurrentMode()
     }
 

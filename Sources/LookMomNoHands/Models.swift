@@ -159,11 +159,9 @@ struct Clarification: Decodable, Sendable {
 
     private enum CodingKeys: String, CodingKey { case question, options }
 
-    /// Question plus its options, phrased for text-to-speech.
-    var spoken: String {
-        guard !options.isEmpty else { return question }
-        return question + " Options: " + options.joined(separator: ", ") + "."
-    }
+    /// Spoken form: just the question. The options are shown on the clarify panel —
+    /// reading them all aloud is the "blah blah blah" that makes her feel long-winded.
+    var spoken: String { question }
 }
 
 enum ScrollDirection: String, Decodable, Sendable {

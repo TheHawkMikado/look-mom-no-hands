@@ -243,6 +243,18 @@ final class ActionDecodingTests: XCTestCase {
         }
     }
 
+    func testEndsMidThoughtGatesTheClauseTiming() {
+        // Continues → wait (don't act on a half-spoken clause).
+        XCTAssertTrue(AppCoordinator.endsMidThought("open youtube and"))
+        XCTAssertTrue(AppCoordinator.endsMidThought("go to the store then"))
+        XCTAssertTrue(AppCoordinator.endsMidThought("search for the"))
+        XCTAssertTrue(AppCoordinator.endsMidThought("chrome"))          // too short to be a whole command
+        // A complete clause → act on the pause.
+        XCTAssertFalse(AppCoordinator.endsMidThought("open youtube"))
+        XCTAssertFalse(AppCoordinator.endsMidThought("search for pit bull puppies"))
+        XCTAssertFalse(AppCoordinator.endsMidThought("play the first video"))
+    }
+
     func testBargeInRequiresSubstantiveSpeech() {
         // Real interjections trigger.
         XCTAssertTrue(AppCoordinator.isBargeInSpeech("option two"))
@@ -418,7 +430,9 @@ final class PlanDecodingTests: XCTestCase {
         let plan = try JSONDecoder().decode(ActionPlan.self, from: Data(json.utf8))
         XCTAssertTrue(plan.steps.isEmpty)
         XCTAssertEqual(plan.clarify?.options, ["Chrome", "Safari"])
-        XCTAssertTrue(plan.clarify?.spoken.contains("Chrome") ?? false)
+        // Spoken form is JUST the question — options aren't read aloud (they show on
+        // the panel), so she isn't long-winded.
+        XCTAssertEqual(plan.clarify?.spoken, "Which browser?")
     }
 
     func testPlanWithMissingOptionalFieldsDecodes() throws {

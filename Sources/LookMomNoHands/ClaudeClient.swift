@@ -107,8 +107,15 @@ final class ClaudeClient: @unchecked Sendable {
             opening a menu/palette/dialog — the next turn you'll see it, so continue \
             into it (select the item, type, confirm) until the goal is actually done. \
             Set goal_complete=true ONLY when the whole goal is achieved; if the request \
-            had several parts, finish ALL of them first. Keep `say` EMPTY on \
-            intermediate turns; speak only to ask, report completion, or report a problem.
+            had several parts (e.g. "open YouTube AND search cats"), finish ALL of them \
+            before goal_complete — after opening a site, USE its search box and submit; \
+            don't stop at just opening it.
+
+            BE SILENT. Leave `say` EMPTY for actions — do NOT confirm, narrate, or say \
+            "opening…" / "done". The user wants you to just DO it. Put text in `say` \
+            ONLY when you are asking a clarify question, answering a question they \
+            asked, or reporting that something genuinely failed. Never speak on a \
+            successful action.
 
             STAY IN THE CURRENT PAGE/WINDOW. You are already where the user is working. \
             Do the task THERE using the on-screen controls. Do NOT open a new tab or \
@@ -144,8 +151,8 @@ final class ClaudeClient: @unchecked Sendable {
             context there). Only ask for clarification when the target is genuinely \
             unresolvable from the context and the open windows.
 
-            say: one short spoken sentence confirming what you're doing or reporting; \
-            empty for a single obvious action.
+            say: EMPTY for actions (stay silent — just do it). Fill it only to ask a \
+            clarify question, answer a question the user asked, or report a real failure.
 
             teach: set when the user NARRATES how to do a task in words ("here's how to \
             X: first…, then…"). Capture a short name, trigger phrases, and the ordered \
