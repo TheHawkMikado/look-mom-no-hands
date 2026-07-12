@@ -674,7 +674,10 @@ final class AppCoordinator: ObservableObject {
             store.log("recorder", "ignored — note output needs Claude")
             return
         }
-        guard !processing, mode != .recording else { return }
+        guard mode != .recording else { return }   // already recording
+        // Dictation takes priority: stop an in-flight command from acting on the
+        // screen while you dictate. The session resumes normally after you finish.
+        cancelCommandInFlight()
         if !isRunning { pendingRecording = true; pendingRecordingOutput = output; start(); return }
         recorderOutput = output
         recorderReturnMode = (mode == .command) ? .command : .standby
@@ -697,6 +700,23 @@ final class AppCoordinator: ObservableObject {
         let anchorApp = insertTargetApp ?? lastExternalApp ?? NSWorkspace.shared.frontmostApplication
         pill.show(coordinator: self, near: ScreenController.windowFrame(for: anchorApp))
         store.log("recorder", "started (\(output))")
+    }
+
+    /// Cancels an in-flight command action so it stops touching the screen — a
+    /// dictation is taking over. Keeps the mic on and the session mode as-is, so the
+    /// main assistant resumes once the dictation finishes.
+    private func cancelCommandInFlight() {
+        guard processing else { return }
+        runGeneration += 1            // a stale command task's completion must not touch new state
+        actionTask?.cancel(); actionTask = nil
+        speaker.cancel()
+        speaking = false
+        processing = false
+        pendingClarification = nil
+        dialogue = []
+        screenPrefetch = nil
+        if case .clarifying = phase { phase = .capturingCommand }
+        store.log("app", "command interrupted for dictation")
     }
 
     /// Ends the recording and applies its output. Kicks a task that waits for the

@@ -420,7 +420,7 @@ enum ScreenController {
             if !url.isEmpty { s += " (\(url))" }
             guard !elements.isEmpty else { return s }
             s += "\nClickable/visible elements (to click one, emit a click step with its exact label):"
-            for e in elements where !Self.isBrowserAddressBar(e.label) {
+            for e in elements where !Self.isDistractorElement(e.label) {
                 let role = e.role.replacingOccurrences(of: "AX", with: "").lowercased()
                 s += "\n- \(role): \(e.label)"
             }
@@ -435,6 +435,21 @@ enum ScreenController {
             return l.contains("address and search") || l.contains("address bar")
                 || l.contains("search or enter address") || l.contains("smart search")
                 || l == "address field" || l == "location"
+        }
+
+        // Elements the assistant must never be offered to click: the address bar, a
+        // voice-search / microphone control (clicking it triggers a mic-permission
+        // prompt), and site permission dialogs (it must NOT grant a site camera/mic
+        // access). Hiding them from the plan is the structural guardrail.
+        static func isDistractorElement(_ label: String) -> Bool {
+            if isBrowserAddressBar(label) { return true }
+            let l = label.lowercased()
+            if l.contains("search with your voice") || l.contains("voice search") { return true }
+            if l.contains("allow this time") || l.contains("allow while")
+                || l.contains("allow on every") || l.contains("while visiting")
+                || l.contains("don't allow") || l.contains("never allow")
+                || l.contains("allow microphone") || l.contains("allow camera") { return true }
+            return false
         }
     }
 

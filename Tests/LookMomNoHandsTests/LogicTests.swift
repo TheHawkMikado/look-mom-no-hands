@@ -243,15 +243,19 @@ final class ActionDecodingTests: XCTestCase {
         }
     }
 
-    func testAddressBarFilteredFromSnapshot() {
+    func testDistractorElementsFilteredFromSnapshot() {
         let snap = ScreenController.Snapshot(app: "Google Chrome", title: "YouTube", url: "youtube.com",
-            elements: [("AXTextField", "Address and search bar"), ("AXTextArea", "Search"), ("AXButton", "Sign in")])
+            elements: [("AXTextField", "Address and search bar"), ("AXButton", "Search with your voice"),
+                       ("AXButton", "Allow this time"), ("AXTextArea", "Search"), ("AXButton", "Sign in")])
         let s = snap.promptText
-        XCTAssertFalse(s.contains("Address and search bar"))   // browser chrome hidden
-        XCTAssertTrue(s.contains("Search"))                    // the page's own search stays
-        XCTAssertTrue(s.contains("Sign in"))
-        XCTAssertTrue(ScreenController.Snapshot.isBrowserAddressBar("Smart Search Field"))
-        XCTAssertFalse(ScreenController.Snapshot.isBrowserAddressBar("Search"))
+        XCTAssertFalse(s.contains("Address and search bar"))   // address bar hidden
+        XCTAssertFalse(s.contains("Search with your voice"))   // mic/voice hidden
+        XCTAssertFalse(s.contains("Allow this time"))          // permission prompt hidden
+        XCTAssertTrue(s.contains("Sign in"))                   // normal controls stay
+        XCTAssertTrue(s.contains("- textarea: Search"))        // the page's own search stays
+        XCTAssertTrue(ScreenController.Snapshot.isDistractorElement("Smart Search Field"))
+        XCTAssertTrue(ScreenController.Snapshot.isDistractorElement("Allow while visiting"))
+        XCTAssertFalse(ScreenController.Snapshot.isDistractorElement("Search"))
     }
 
     func testDomainLabelForLoadMatching() {
