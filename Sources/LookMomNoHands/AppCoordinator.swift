@@ -119,9 +119,12 @@ final class AppCoordinator: ObservableObject {
     let knowledge: KnowledgeStore
     let insertRules: InsertRulesStore
 
-    // Balance: long enough not to cut a compound request on a mid-sentence breath,
-    // short enough to feel responsive (the user wants it to act, not wait).
-    private let commandSilence: TimeInterval = 1.5
+    // Clause-pause gate: act this soon after a natural pause so a compound request
+    // runs step-by-step; wait longer when the phrase clearly continues; snap back
+    // fastest on a clarification answer.
+    private let clausePause: TimeInterval = 1.0
+    private let midThoughtPause: TimeInterval = 2.2
+    private let clarifyAnswerPause: TimeInterval = 1.1
     // Seconds of silence that ends a recording. Editable + persisted. 0 = never
     // auto-end (you stop with the chord, a stop phrase, or the pill). Default 60s
     // so a thinking pause doesn't cut a note short. Chunk-flush uses a separate
@@ -542,9 +545,9 @@ final class AppCoordinator: ObservableObject {
             // phrase clearly continues ("…and", "…then to"), wait longer so a
             // mid-thought breath isn't cut. Clarification answers snap back fastest.
             let gate: TimeInterval
-            if pendingClarification != nil { gate = 1.1 }
-            else if Self.endsMidThought(utterance) { gate = 2.2 }
-            else { gate = 1.0 }
+            if pendingClarification != nil { gate = clarifyAnswerPause }
+            else if Self.endsMidThought(utterance) { gate = midThoughtPause }
+            else { gate = clausePause }
             if !utterance.isEmpty, quiet > gate {
                 finalizeCommand()
             } else if utterance.isEmpty,
