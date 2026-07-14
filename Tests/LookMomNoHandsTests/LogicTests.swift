@@ -301,9 +301,17 @@ final class ActionDecodingTests: XCTestCase {
         // You talking over her — new words not in her speech — IS a barge-in.
         XCTAssertTrue(AppCoordinator.isBargeOverTTS(partial: "play corgi puppies", tts: tts))
         XCTAssertTrue(AppCoordinator.isBargeOverTTS(partial: "no stop that", tts: tts))
-        // A single stray/echo word isn't enough (needs two novel content words).
+        // How people ACTUALLY cut in — a single short interrupt word she isn't
+        // saying — must fire even though the ">2 chars, need 2" content rule misses it.
+        XCTAssertTrue(AppCoordinator.isBargeOverTTS(partial: "stop", tts: tts))
+        XCTAssertTrue(AppCoordinator.isBargeOverTTS(partial: "no no", tts: tts))
+        XCTAssertTrue(AppCoordinator.isBargeOverTTS(partial: "wait", tts: tts))
+        XCTAssertTrue(AppCoordinator.isBargeOverTTS(partial: "mama", tts: tts))
+        // A single novel CONTENT word (not an interrupt word) still isn't enough.
         XCTAssertFalse(AppCoordinator.isBargeOverTTS(partial: "what would corgi", tts: tts))
         XCTAssertFalse(AppCoordinator.isBargeOverTTS(partial: "", tts: tts))
+        // An interrupt word she IS saying (echo) doesn't count — only novel ones.
+        XCTAssertFalse(AppCoordinator.isBargeOverTTS(partial: "would you like", tts: "no wait would you like me to stop"))
     }
 
     func testRepeatPhraseDetection() {

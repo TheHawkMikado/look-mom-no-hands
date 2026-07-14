@@ -122,7 +122,11 @@ final class AppCoordinator: ObservableObject {
     // Clause-pause gate: act this soon after a natural pause so a compound request
     // runs step-by-step; wait longer when the phrase clearly continues; snap back
     // fastest on a clarification answer.
-    private let clausePause: TimeInterval = 1.0
+    // 1.5s, not 1.0: a deliberate speaker pauses mid-sentence ("...puppy [breath]
+    // videos on YouTube..."); too short a gate finalizes a FRAGMENT and drops the
+    // rest (which then arrives during processing and is lost). Err toward hearing
+    // the whole clause over acting a beat sooner.
+    private let clausePause: TimeInterval = 1.5
     private let midThoughtPause: TimeInterval = 2.2
     private let clarifyAnswerPause: TimeInterval = 1.1
     // Seconds of silence that ends a recording. Editable + persisted. 0 = never
@@ -1548,12 +1552,23 @@ final class AppCoordinator: ObservableObject {
         lastHeardAt = Date()
     }
 
-    /// True when a partial heard DURING her TTS is you talking over her: it contains
-    /// two or more real words that aren't in what she's saying (so it isn't just the
-    /// recognizer echoing her own voice). Pure/tested.
+    // How people actually cut in mid-sentence — short words the ">2 chars, need 2"
+    // content heuristic would miss entirely. Any ONE of these (that she isn't
+    // saying) stops her immediately.
+    nonisolated static let bargeInterruptWords: Set<String> = [
+        "no", "nope", "stop", "wait", "hold", "hang", "cancel", "quiet", "hush",
+        "shush", "enough", "mama", "mom", "nevermind", "actually", "hey"
+    ]
+
+    /// True when a partial heard DURING her TTS is you talking over her. Fires on
+    /// either (a) an explicit interrupt word she isn't saying — "no", "stop",
+    /// "wait", "Mama" — since that's how people actually barge in, or (b) two+
+    /// novel content words (a new instruction spoken over her), which the echo of
+    /// her own voice can't produce. Pure/tested.
     nonisolated static func isBargeOverTTS(partial: String, tts: String) -> Bool {
         let herWords = Set(normalizedForMatching(tts).split(separator: " ").map(String.init))
         let heard = normalizedForMatching(partial).split(separator: " ").map(String.init)
+        if heard.contains(where: { bargeInterruptWords.contains($0) && !herWords.contains($0) }) { return true }
         let novel = heard.filter { $0.count > 2 && !herWords.contains($0) }
         return novel.count >= 2
     }
