@@ -123,6 +123,13 @@ final class ClaudeClient: @unchecked Sendable {
             those would hit the OLD page (e.g. typing into Google instead of YouTube). \
             Next turn you'll see the loaded page and can search/click on it.
 
+            ALREADY THERE? DON'T RE-OPEN. If the current page/window is ALREADY the \
+            site or app you need, do NOT emit open_url/open_app for it again — a second \
+            open spawns a DUPLICATE tab and throws away the search results or scroll \
+            position already on screen. This includes "start over" / "do it again": to \
+            redo a search on a site you're already on, just clear the search box \
+            (click it, cmd+a) and type the new query — do NOT re-open the site.
+
             SELECT / OPEN / PLAY / CHOOSE a thing on screen (a video, a link, a result, \
             a button) is a CLICK step. describe_screen is ONLY for answering a question \
             the user explicitly asked ("what's on screen", "read this"). NEVER use \

@@ -266,6 +266,21 @@ final class ActionDecodingTests: XCTestCase {
         XCTAssertEqual(AppCoordinator.domainLabel(""), "")
     }
 
+    func testRedundantOpenSkippedWhenAlreadyOnSite() {
+        // Already on the site → skip the open (would spawn a duplicate tab).
+        XCTAssertEqual(AppCoordinator.redundantOpenHost(url: "youtube.com",
+                                                        currentURL: "https://www.youtube.com/results?q=puppies"), "youtube")
+        XCTAssertEqual(AppCoordinator.redundantOpenHost(url: "youtube.com",
+                                                        currentURL: "https://www.youtube.com/"), "youtube")
+        // Different site → open (don't skip).
+        XCTAssertNil(AppCoordinator.redundantOpenHost(url: "youtube.com",
+                                                      currentURL: "https://www.google.com/"))
+        // No current URL (not a browser / blank) → open.
+        XCTAssertNil(AppCoordinator.redundantOpenHost(url: "youtube.com", currentURL: ""))
+        // Unparseable target → never claims redundant.
+        XCTAssertNil(AppCoordinator.redundantOpenHost(url: "", currentURL: "https://www.youtube.com/"))
+    }
+
     func testEndsMidThoughtGatesTheClauseTiming() {
         // Continues → wait (don't act on a half-spoken clause).
         XCTAssertTrue(AppCoordinator.endsMidThought("open youtube and"))

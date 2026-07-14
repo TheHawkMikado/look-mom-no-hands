@@ -979,6 +979,7 @@ final class AppCoordinator: ObservableObject {
         var lastState = ""                      // (exact action + screen) of the prior round
         var consecutiveRepeats = 0              // back-to-back identical no-progress rounds
         var emptyRounds = 0                     // consecutive rounds that did nothing real
+        var navAttempts: [String: Int] = [:]    // real (non-idempotent) opens per host this goal
         var brokeOut = false                    // stopped early (loop/spin/blocked) — already spoke
         while round < Self.maxTaskRounds, !complete {
             try Task.checkCancellation()
@@ -1085,6 +1086,18 @@ final class AppCoordinator: ObservableObject {
                 navigated = result.navigated
                 didAct = !result.performed.isEmpty
                 if result.stop { return }       // dictate_start handed the session to the recorder
+                // Backstop for the tab-explosion loop: count opens that ACTUALLY spawned
+                // a tab (idempotent skips don't set navigated). If a site won't come up
+                // after a few real opens, stop instead of burying the user in tabs.
+                if navigated, let h = lastNavHost, !h.isEmpty {
+                    navAttempts[h, default: 0] += 1
+                    if navAttempts[h]! >= 3 {
+                        store.log("command", "opened \(h) \(navAttempts[h]!)× without it settling — stopping to avoid spawning more tabs")
+                        await speak("I keep opening \(h) but it isn't coming up, so I'll stop instead of opening more tabs. Open it yourself and say Mama when it's ready.", gen: gen)
+                        brokeOut = true
+                        break
+                    }
+                }
                 // Spin guard: two rounds in a row with no real action AND no observation
                 // (e.g. the model keeps "waiting" for something it can't do) — stop.
                 let observed = plan.steps.contains { $0.kind == .describeScreen }
@@ -1222,6 +1235,17 @@ final class AppCoordinator: ObservableObject {
                 continue
             default:
                 self.phase = .acting
+                // Idempotent navigation: `open <url>` spawns a NEW browser tab every
+                // time — it never reuses the tab already on that site. So if we're
+                // already on the target host, re-opening would bury the user in
+                // duplicate tabs AND wipe the search/scroll state we just built. Skip
+                // the open and keep working the live page. (This is what turned "start
+                // over" into 5 blank YouTube tabs.)
+                if step.kind == .openURL, let cur = try? await Self.frontURL(),
+                   let host = Self.redundantOpenHost(url: step.url.isEmpty ? step.target : step.url, currentURL: cur) {
+                    self.store.log("action", "already on \(host) — skipping open (would duplicate the tab)")
+                    continue
+                }
                 if step.kind == .click {
                     try await self.performClick(target: step.target, gen: gen)
                 } else {
@@ -1280,6 +1304,25 @@ final class AppCoordinator: ObservableObject {
             if stable, (!requireChange || sig != initial) { return }
             last = sig
         }
+    }
+
+    /// The frontmost window's current URL, lowercased ("" if none / not a browser).
+    /// Used to make open_url idempotent — don't re-open a site we're already on.
+    private static func frontURL() async throws -> String {
+        let snap = try? await withThrowingTaskGroup(of: ScreenController.Snapshot?.self) { group in
+            group.addTask { try? ScreenController.focusedWindowSnapshot(maxElements: 1) }
+            return try await group.next() ?? nil
+        }
+        return (snap?.url ?? "").lowercased()
+    }
+
+    /// Returns the target host if opening `url` would be redundant because the
+    /// front window is already on it (so the open should be skipped to avoid a
+    /// duplicate tab), else nil. Pure/tested.
+    nonisolated static func redundantOpenHost(url: String, currentURL: String) -> String? {
+        let host = domainLabel(url)
+        guard !host.isEmpty, currentURL.lowercased().contains(host) else { return nil }
+        return host
     }
 
     /// The distinctive domain word of a URL for load-matching ("youtube.com" →
