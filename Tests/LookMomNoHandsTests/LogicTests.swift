@@ -278,16 +278,17 @@ final class ActionDecodingTests: XCTestCase {
         XCTAssertFalse(AppCoordinator.endsMidThought("play the first video"))
     }
 
-    func testBargeInRequiresSubstantiveSpeech() {
-        // Real interjections trigger.
-        XCTAssertTrue(AppCoordinator.isBargeInSpeech("option two"))
-        XCTAssertTrue(AppCoordinator.isBargeInSpeech("Hey Mama"))
-        XCTAssertTrue(AppCoordinator.isBargeInSpeech("no, stop that"))
-        // One-syllable fragments / echo remnants / silence do not.
-        XCTAssertFalse(AppCoordinator.isBargeInSpeech("uh"))
-        XCTAssertFalse(AppCoordinator.isBargeInSpeech("the"))
-        XCTAssertFalse(AppCoordinator.isBargeInSpeech(""))
-        XCTAssertFalse(AppCoordinator.isBargeInSpeech("  ."))
+    func testBargeOverTTSDetectsDivergentSpeech() {
+        let tts = "What would you like me to do on YouTube?"
+        // The recognizer echoing her own words back is NOT a barge-in.
+        XCTAssertFalse(AppCoordinator.isBargeOverTTS(partial: "what would you like", tts: tts))
+        XCTAssertFalse(AppCoordinator.isBargeOverTTS(partial: "you like me to do", tts: tts))
+        // You talking over her — new words not in her speech — IS a barge-in.
+        XCTAssertTrue(AppCoordinator.isBargeOverTTS(partial: "play corgi puppies", tts: tts))
+        XCTAssertTrue(AppCoordinator.isBargeOverTTS(partial: "no stop that", tts: tts))
+        // A single stray/echo word isn't enough (needs two novel content words).
+        XCTAssertFalse(AppCoordinator.isBargeOverTTS(partial: "what would corgi", tts: tts))
+        XCTAssertFalse(AppCoordinator.isBargeOverTTS(partial: "", tts: tts))
     }
 
     func testRepeatPhraseDetection() {

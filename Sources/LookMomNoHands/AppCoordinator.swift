@@ -454,17 +454,19 @@ final class AppCoordinator: ObservableObject {
     private func handlePartial(_ text: String) {
         guard isRunning else { return }
         if speaking {
-            // Barge-in: with echo cancellation the mic can't hear our own TTS, so a
-            // substantive partial while we're talking is the USER talking over us —
-            // cut the speech and listen, like a real conversation. Without echo
-            // cancellation, stay deaf while talking (we'd answer ourselves).
+            // Software barge-in (no hardware echo cancellation): the mic hears our own
+            // TTS, so the recognizer transcribes what SHE is saying. A partial that
+            // DIVERGES from her spoken text — has new words that aren't in it — means
+            // YOU are talking over her. Stop talking and listen, like a real
+            // conversation. Until divergence, ignore the echo of her own voice.
             if !bargedIn {
-                guard listener.echoCancellation, Self.isBargeInSpeech(text) else { return }
+                guard Self.isBargeOverTTS(partial: text, tts: speakingText) else { return }
                 bargedIn = true
-                speaker.cancel()
-                store.log("barge", "user interrupted: …\(text.suffix(48))")
+                speaker.cancel()      // she stops immediately
+                freshUtterance()      // drop the garbled TTS+you overlap; capture you cleanly next
+                store.log("barge", "you interrupted — stopping")
             }
-            // Already interrupted — fall through and keep recording their words.
+            return   // wait for speak() to settle; clean partials resume once she's silent
         }
         utterance = text
         lastHeardAt = Date()
@@ -1471,12 +1473,12 @@ final class AppCoordinator: ObservableObject {
     }
 
     private var speakEpoch = 0     // the latest speak() owns the state cleanup
-    private var bargedIn = false   // the user talked over the TTS — keep their words
+    private var bargedIn = false   // the user talked over the TTS
+    private var speakingText = ""  // what she's currently saying, for barge-in divergence
 
-    /// Speaks a reply. With echo cancellation on, recognition KEEPS running and the
-    /// user can talk over her (barge-in, handled in handlePartial); without it,
-    /// recognition is effectively muted (the `speaking` guard) so we can't hear
-    /// ourselves. Latest speak wins: starting a new one cuts the previous. `gen`
+    /// Speaks a reply while recognition KEEPS running (continuous listening). The
+    /// mic hears her own TTS, so handlePartial ignores the echo of her words but cuts
+    /// her off the moment your speech diverges (barge-in). Latest speak wins; `gen`
     /// guards against a Stop→Start that supersedes this run mid-utterance.
     private func speak(_ text: String, gen: Int) async {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1486,27 +1488,31 @@ final class AppCoordinator: ObservableObject {
         let epoch = speakEpoch
         bargedIn = false
         speaking = true
-        freshUtterance()            // zero the stream: anything heard from here on is the user
+        speakingText = trimmed      // barge-in compares your words against these
+        freshUtterance()            // zero the stream: anything heard from here on is you
         store.log("say", trimmed)
         await speaker.speak(trimmed)
         guard gen == runGeneration, epoch == speakEpoch else { return }
         speaking = false
+        speakingText = ""
         if bargedIn {
             bargedIn = false
-            // The interjection is kept in `utterance`. It's reliably finalized when a
-            // clarification was pending (settleSessionPhase preserves it there and the
-            // short answer-gate finalizes it); over a plain report the session settles
-            // back and it's dropped — barge still cut her off, and the user restates.
+            // You interrupted: handlePartial already reset the stream, and your
+            // continued speech is captured cleanly now that she's silent.
         } else {
             freshUtterance()        // drop any echo remnants heard while talking
         }
         lastHeardAt = Date()
     }
 
-    /// A partial during TTS counts as the user talking over her only when it has
-    /// real content — a couple of words, not a one-syllable noise/echo fragment.
-    nonisolated static func isBargeInSpeech(_ text: String) -> Bool {
-        normalizedForMatching(text).split(separator: " ").count >= 2
+    /// True when a partial heard DURING her TTS is you talking over her: it contains
+    /// two or more real words that aren't in what she's saying (so it isn't just the
+    /// recognizer echoing her own voice). Pure/tested.
+    nonisolated static func isBargeOverTTS(partial: String, tts: String) -> Bool {
+        let herWords = Set(normalizedForMatching(tts).split(separator: " ").map(String.init))
+        let heard = normalizedForMatching(partial).split(separator: " ").map(String.init)
+        let novel = heard.filter { $0.count > 2 && !herWords.contains($0) }
+        return novel.count >= 2
     }
 
     // Verbs/deictics that mean "act on what's on screen" — gate the AX snapshot

@@ -33,10 +33,6 @@ final class VoiceListener {
     var onLevel: ((Float) -> Void)?
     var metering = false
     private var levelSmoothed: Float = 0
-    /// True when OS echo cancellation is active on the mic. The coordinator only
-    /// allows barge-in (listening during our own TTS) when this is on — without it
-    /// the recognizer would hear the assistant's own voice and answer itself.
-    private(set) var echoCancellation = false
 
     private let recognizer = SFSpeechRecognizer(locale: Locale(identifier: "en-US"))
     private let engine = AVAudioEngine()
@@ -106,11 +102,11 @@ final class VoiceListener {
         carryForward = false
 
         let input = engine.inputNode
-        // NOTE: OS voice-processing (AEC) was tried here to enable barge-in, but
-        // enabling it reconfigures the input node's format and broke SFSpeechRecognizer
-        // (the wake word stopped firing). Recognition reliability wins — we stay on the
-        // plain tap and the "deaf while speaking" behavior. echoCancellation stays false,
-        // so the coordinator's barge-in path is inert.
+        // NOTE: OS voice-processing (hardware AEC) was tried here but reconfigured the
+        // input format and broke SFSpeechRecognizer (the wake word stopped firing), so
+        // we stay on the plain always-on tap. Barge-in is done in SOFTWARE instead: the
+        // coordinator keeps listening during TTS and detects your voice by transcript
+        // divergence from what it's saying (see isBargeOverTTS).
         let format = input.outputFormat(forBus: 0)
         input.installTap(onBus: 0, bufferSize: 1024, format: format) { [weak self] buffer, _ in
             guard let self else { return }
