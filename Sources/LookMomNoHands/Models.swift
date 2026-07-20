@@ -31,6 +31,7 @@ struct ScreenAction: Decodable, Sendable {
         case dictateStart = "dictate_start"   // begin a Wisprflow-style dictation session
         case describeScreen = "describe_screen" // read/answer about what's on screen (vision)
         case watchStart = "watch_start"       // record the user's demonstration as a procedure
+        case spawnBackgroundAgent = "spawn_background_agent" // runs a headless background agent
         case none                             // nothing actionable
     }
 
@@ -39,6 +40,7 @@ struct ScreenAction: Decodable, Sendable {
     let text: String                    // text to type ("" when unused)
     let url: String                     // open_url only ("" when unused)
     let keys: String                    // keystroke only, e.g. "cmd+shift+t"
+    let prompt: String                  // spawn_background_agent only ("" when unused)
     let direction: ScrollDirection?     // scroll only; the tool schema requires it
 
     // Tolerant decoding: tool-use inputs aren't strictly schema-enforced server
@@ -51,11 +53,12 @@ struct ScreenAction: Decodable, Sendable {
         text = (try? c.decodeIfPresent(String.self, forKey: .text)) ?? ""
         url = (try? c.decodeIfPresent(String.self, forKey: .url)) ?? ""
         keys = (try? c.decodeIfPresent(String.self, forKey: .keys)) ?? ""
+        prompt = (try? c.decodeIfPresent(String.self, forKey: .prompt)) ?? ""
         let raw = (try? c.decodeIfPresent(String.self, forKey: .direction)) ?? nil
         direction = raw.flatMap { ScrollDirection(rawValue: $0.lowercased()) }
     }
 
-    private enum CodingKeys: String, CodingKey { case kind, target, text, url, keys, direction }
+    private enum CodingKeys: String, CodingKey { case kind, target, text, url, keys, prompt, direction }
 }
 
 /// The model's full response to one spoken request: an ordered list of steps,

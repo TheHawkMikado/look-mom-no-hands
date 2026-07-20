@@ -66,18 +66,19 @@ final class ClaudeClient: @unchecked Sendable {
             "additionalProperties": false,
             "properties": [
                 "kind": ["type": "string",
-                         "enum": ["click", "type", "scroll", "open_app", "open_url", "focus_window", "move_window", "switch_tab", "keystroke", "dictate_start", "describe_screen", "watch_start", "none"]],
+                         "enum": ["click", "type", "scroll", "open_app", "open_url", "focus_window", "move_window", "switch_tab", "keystroke", "dictate_start", "describe_screen", "watch_start", "spawn_background_agent", "none"]],
                 "target": ["type": "string", "description": "UI element / app name; for open_url optionally the browser; for focus_window/move_window the window description to match (empty for move_window = the current/context window); for switch_tab the browser tab title; for describe_screen the question to answer about the screen; for watch_start a short name for the task being demonstrated; empty if unused"],
                 "text": ["type": "string", "description": "text to type; for move_window the destination display (\"main display\", \"second display\", \"display 2\"); empty if unused"],
                 "url": ["type": "string", "description": "open_url only: the website, e.g. \"youtube.com\"; empty if unused"],
                 "keys": ["type": "string", "description": "keystroke only: shortcut like \"cmd+t\", \"cmd+shift+t\", \"enter\"; empty if unused"],
+                "prompt": ["type": "string", "description": "spawn_background_agent only: the explicit instruction for the background agent to execute, like \"build a react app in ~/dev/myapp\"; empty if unused"],
                 "direction": ["type": "string", "enum": ["up", "down", "left", "right"],
                               "description": "Scroll direction. For scroll this controls the action; for every other kind emit \"down\" (ignored)."]
             ],
             // Everything required: without strict mode the model may omit
             // non-required fields, and execution needs the ""-when-unused
             // convention to hold.
-            "required": ["kind", "target", "text", "url", "keys", "direction"]
+            "required": ["kind", "target", "text", "url", "keys", "prompt", "direction"]
         ]
 
         let tool: [String: Any] = [
@@ -92,8 +93,9 @@ final class ClaudeClient: @unchecked Sendable {
             app shortcuts (new tab = cmd+t; submit/send = enter), type to enter text, \
             click/type/scroll for direct screen control. To type into a named window, \
             emit focus_window first, then type, then keystroke "enter" if they say submit/ \
-            send. Use a single dictate_start step for note-taking. Use a single none step \
-            when nothing is actionable.
+            send. Use a single dictate_start step for note-taking. Use spawn_background_agent \
+            for long-running, non-UI tasks (like writing code, terminal work, "build an app"). \
+            Use a single none step when nothing is actionable.
 
             If the request is ambiguous or you are not confident what the user wants, \
             emit NO steps and set clarify with one concise question and 2-4 short \

@@ -17,6 +17,7 @@ enum ScreenController {
         case appLaunchFailed(String)
         case unknownKeystroke(String)
         case windowImmovable(String)
+        case notImplemented(String)
 
         var description: String {
             switch self {
@@ -27,6 +28,7 @@ enum ScreenController {
             case .appLaunchFailed(let n): return "couldn't open “\(n)”"
             case .unknownKeystroke(let k): return "don't know the shortcut “\(k)”"
             case .windowImmovable(let w): return "the window “\(w)” refused to move (full screen or fixed)"
+            case .notImplemented(let f): return "\(f) isn't available yet"
             }
         }
     }
@@ -49,7 +51,7 @@ enum ScreenController {
             // and window enumeration needs AX — fail loudly instead of logging a
             // success that never happened.
             guard isTrusted else { throw ControlError.notTrusted }
-        case .openApp, .openURL, .dictateStart, .describeScreen, .watchStart, .none:
+        case .openApp, .openURL, .dictateStart, .describeScreen, .watchStart, .spawnBackgroundAgent, .none:
             break
         }
         switch action.kind {
@@ -67,6 +69,9 @@ enum ScreenController {
         case .switchTab: try switchTab(to: action.target)
         case .keystroke: try keystroke(action.keys)
         case .dictateStart, .describeScreen, .watchStart, .none: break // handled by the coordinator, not here
+        // Schema'd ahead of its executor; failing beats reporting a spawn that
+        // never happened.
+        case .spawnBackgroundAgent: throw ControlError.notImplemented("background agents")
         }
     }
 
@@ -517,6 +522,7 @@ enum ScreenController {
                 up.keyboardSetUnicodeString(stringLength: units.count, unicodeString: &units)
                 up.post(tap: .cghidEventTap)
             }
+            usleep(5_000)
         }
     }
 
@@ -801,8 +807,13 @@ enum ScreenController {
         // Placeholder before value so an *empty* field (a chat box, a search box)
         // is still identifiable by its prompt ("Ask Copilot…") rather than vanishing
         // — that's exactly the field a "type in the chat" command targets.
-        for attr in [kAXTitleAttribute, kAXDescriptionAttribute, kAXPlaceholderValueAttribute, kAXValueAttribute] {
-            if let s = string(element, attr), !s.isEmpty { return s }
+        let attrs = [kAXTitleAttribute, kAXDescriptionAttribute, kAXPlaceholderValueAttribute, kAXValueAttribute] as CFArray
+        var valuesRef: CFArray?
+        guard AXUIElementCopyMultipleAttributeValues(element, attrs, AXCopyMultipleAttributeOptions(), &valuesRef) == .success,
+              let values = valuesRef as? [Any] else { return nil }
+        // Failed attributes come back as non-string sentinels; the cast skips them.
+        for value in values {
+            if let s = value as? String, !s.isEmpty { return s }
         }
         return nil
     }
@@ -850,6 +861,7 @@ enum ScreenController {
             .post(tap: .cghidEventTap)
         CGEvent(mouseEventSource: source, mouseType: .leftMouseDown, mouseCursorPosition: point, mouseButton: .left)?
             .post(tap: .cghidEventTap)
+        usleep(10_000)
         CGEvent(mouseEventSource: source, mouseType: .leftMouseUp, mouseCursorPosition: point, mouseButton: .left)?
             .post(tap: .cghidEventTap)
     }
