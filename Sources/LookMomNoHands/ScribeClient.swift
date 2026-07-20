@@ -25,12 +25,14 @@ struct ScribeClient: Sendable {
     private static let model = "scribe_v1"
 
     /// Transcribes a WAV clip. Throws on any failure so the caller can fall back
-    /// to the Apple transcript.
-    func transcribe(wav: Data) async throws -> String {
+    /// to the Apple transcript. The default timeout suits short command clips;
+    /// recorder chunks (60–90s of audio) pass a longer one — the server can sit
+    /// well past 30s before answering, and timing out used to lose the chunk.
+    func transcribe(wav: Data, timeout: TimeInterval = 30) async throws -> String {
         let boundary = "lmnh-\(UInt64(wav.count))-boundary"
         var req = URLRequest(url: Self.endpoint)
         req.httpMethod = "POST"
-        req.timeoutInterval = 30
+        req.timeoutInterval = timeout
         req.setValue(apiKey, forHTTPHeaderField: "xi-api-key")
         req.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "content-type")
         req.httpBody = Self.multipartBody(wav: wav, boundary: boundary)

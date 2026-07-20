@@ -88,6 +88,13 @@ final class AppCoordinator: ObservableObject {
     private var lastFlushAt = Date()
     private var flushing = false
     private var liveGeneration = 0   // bumped each live session; stale flush tasks compare against it
+    // Chunk WAVs whose Scribe transcription failed, oldest first. Retried in order
+    // at the next flush and again at stop; whatever still fails is saved to disk.
+    // Failed chunks used to be silently discarded — that is how a 30-minute
+    // recording once shrank to its final sentence.
+    private var unsentChunks: [Data] = []
+    private static let unsentChunksMax = 20   // ~30 min of audio; beyond that spill to disk
+    private var scribeMissedAudio = false     // audio existed that Scribe never transcribed
     nonisolated static let liveChunkSecondsForTest: TimeInterval = 60    // aim to flush after this…
     nonisolated static let liveChunkSilenceForTest: TimeInterval = 1.5   // …at the next pause (sentence end)
     nonisolated static let liveChunkMaxForTest: TimeInterval = 90        // …but flush anyway by here
@@ -126,9 +133,9 @@ final class AppCoordinator: ObservableObject {
     // videos on YouTube..."); too short a gate finalizes a FRAGMENT and drops the
     // rest (which then arrives during processing and is lost). Err toward hearing
     // the whole clause over acting a beat sooner.
-    private let clausePause: TimeInterval = 1.5
-    private let midThoughtPause: TimeInterval = 2.2
-    private let clarifyAnswerPause: TimeInterval = 1.1
+    private let clausePause: TimeInterval = 0.8
+    private let midThoughtPause: TimeInterval = 1.5
+    private let clarifyAnswerPause: TimeInterval = 0.8
     // Seconds of silence that ends a recording. Editable + persisted. 0 = never
     // auto-end (you stop with the chord, a stop phrase, or the pill). Default 60s
     // so a thinking pause doesn't cut a note short. Chunk-flush uses a separate
@@ -431,6 +438,15 @@ final class AppCoordinator: ObservableObject {
         recordingStartedAt = nil
         pill.hide()
         liveActive = false
+        if !unsentChunks.isEmpty {
+            // Disabling listening mid-outage must not vaporize untranscribed speech.
+            let orphans = unsentChunks
+            Task {
+                for wav in orphans { await self.store.saveAudioAndWait(wav) }
+                self.store.log("scribe", "\(orphans.count) untranscribed chunk(s) saved in \(self.store.directory.path)")
+            }
+        }
+        unsentChunks = []
         dialogue = []
         isRunning = false
         mode = .standby
@@ -504,6 +520,9 @@ final class AppCoordinator: ObservableObject {
             else if Self.liveStartPhrases.contains(where: tail.contains) { startRecording(output: .note) }
             else if Self.dictateStartPhrases.contains(where: tail.contains) { startInsertByVoice() }
         case .recording:
+            // On the isolated meter object: partials arrive several times a second
+            // and must not re-render every coordinator-observing view.
+            meter.heard = String(text.suffix(200))
             // Either a dictation or a live stop phrase ends the recording; otherwise
             // capture continues (chunks accumulate) until a long pause or the pill.
             if Self.dictateStopPhrases.contains(where: tail.contains)
@@ -681,6 +700,12 @@ final class AppCoordinator: ObservableObject {
             return
         }
         guard mode != .recording else { return }   // already recording
+        // The previous recording is still transcribing: starting now would race its
+        // finalize for the mic capture and cross-pollinate the two transcripts.
+        guard !finalizingRecording else {
+            store.log("recorder", "ignored — still processing the previous recording")
+            return
+        }
         // Dictation takes priority: stop an in-flight command from acting on the
         // screen while you dictate. The session resumes normally after you finish.
         cancelCommandInFlight()
@@ -689,6 +714,9 @@ final class AppCoordinator: ObservableObject {
         recorderReturnMode = (mode == .command) ? .command : .standby
         liveGeneration += 1   // invalidates any still-in-flight chunk from a prior recording
         liveTranscript = ""
+        meter.heard = ""
+        unsentChunks = []
+        scribeMissedAudio = false
         liveActive = true
         mode = .recording
         phase = .recording
@@ -747,6 +775,7 @@ final class AppCoordinator: ObservableObject {
         mode = recorderReturnMode
         liveActive = false
         liveTranscript = ""
+        unsentChunks = []
         listener.carryForward = false
         listener.metering = false
         listener.captureAudio = false
@@ -758,15 +787,23 @@ final class AppCoordinator: ObservableObject {
         store.log("recorder", "cancelled")
     }
 
+    private var finalizingRecording = false   // a stop's transcription is in flight
+
     private func finishRecording(output: RecorderOutput) {
         processing = true
+        finalizingRecording = true
         phase = .thinking
         let gen = runGeneration
+        let liveGen = liveGeneration
         actionTask = Task {
             // Gen-guard the hide: a superseded task must not hide a *newer*
             // recording's pill (Stop→retry overlapping an in-flight transcription).
-            defer { self.finishProcessing(gen); if gen == self.runGeneration { self.pill.hide() } }
-            let raw = await self.finalizeRecorderTranscript()
+            defer {
+                self.finalizingRecording = false
+                self.finishProcessing(gen)
+                if gen == self.runGeneration { self.pill.hide() }
+            }
+            let raw = await self.finalizeRecorderTranscript(gen: gen, liveGen: liveGen)
             let text = Self.stripDictationTriggers(raw).trimmingCharacters(in: .whitespacesAndNewlines)
             guard !text.isEmpty else {
                 // Silence reads as success in a hands-free app — say so instead.
@@ -805,47 +842,117 @@ final class AppCoordinator: ObservableObject {
         }
     }
 
-    /// Waits for any in-flight periodic chunk, transcribes the trailing audio, and
-    /// returns the complete transcript. Prefers Scribe's accumulated text but falls
-    /// back to Apple's on-device transcript — a Scribe outage must never lose a note.
-    private func finalizeRecorderTranscript() async -> String {
+    /// Waits for any in-flight periodic chunk, transcribes the retry queue plus the
+    /// trailing audio, and returns the complete transcript. Prefers Scribe's text
+    /// but falls back to Apple's on-device transcript — a Scribe outage must never
+    /// lose a note, and audio nobody could transcribe is persisted, not dropped.
+    private func finalizeRecorderTranscript(gen: Int, liveGen: Int) async -> String {
         await flushTask?.value   // let the last periodic chunk land before the tail
-        var tailWav: Data?
-        if scribeForRecording, let key = elevenLabsKey, let wav = listener.takeCapturedWAV() {
-            tailWav = wav
-            let tail = ((try? await ScribeClient(apiKey: key).transcribe(wav: wav)) ?? "")
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            if !tail.isEmpty { liveTranscript += (liveTranscript.isEmpty ? "" : " ") + tail }
+        // Guard with the generations captured BEFORE the await: if a new session
+        // started while we waited, the mic capture and live transcript belong to
+        // it now — touching either would steal its audio or wipe its text.
+        guard gen == runGeneration, liveGen == liveGeneration else { return "" }
+        if scribeForRecording, let key = elevenLabsKey {
+            let lost = await transcribeInOrder(drainPendingAudio(), key: key,
+                                               gen: gen, liveGen: liveGen)
+            // Speech no engine will ever hear again — save the audio for recovery
+            // and say so loudly instead of quietly returning a fragment.
+            for wav in lost { await store.saveAudioAndWait(wav) }
+            if !lost.isEmpty, gen == runGeneration, liveGen == liveGeneration {
+                scribeMissedAudio = true
+                store.log("recorder", "⚠︎ \(lost.count) chunk(s) untranscribed — audio saved in \(store.directory.path)")
+            }
         }
+        // Re-check after the transcription awaits for the same reason as above.
+        guard gen == runGeneration, liveGen == liveGeneration else { return "" }
         listener.captureAudio = false
         let scribe = liveTranscript.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !scribe.isEmpty { return scribe }
-        // Scribe produced nothing (offline / rate-limited / disabled) — use Apple's.
-        if !utterance.isEmpty { return utterance }
-        // Both engines silent but we had audio: persist the tail so it's recoverable.
-        if let tailWav { await store.saveAudioAndWait(tailWav) }
-        return ""
+        let chosen = Self.chooseTranscript(scribe: scribe, apple: utterance,
+                                           scribeLostAudio: scribeMissedAudio)
+        if !scribe.isEmpty, chosen != scribe {
+            store.log("recorder", "kept on-device transcript (\(chosen.count) chars) — Scribe only heard \(scribe.count)")
+            liveTranscript = chosen   // the Live panel/tools should see what the note sees
+        }
+        return chosen
     }
 
-    /// Transcribes one ~chunk of audio via Scribe and appends it — never holding
-    /// more than a chunk in memory (what makes multi-hour recording safe).
+    /// Picks the final transcript: Scribe (higher accuracy) when it heard the whole
+    /// recording; the on-device transcript when Scribe verifiably lost audio and
+    /// Apple heard more — everything at lower accuracy beats a fragment at high
+    /// accuracy. Pure/tested.
+    nonisolated static func chooseTranscript(scribe: String, apple: String, scribeLostAudio: Bool) -> String {
+        let s = scribe.trimmingCharacters(in: .whitespacesAndNewlines)
+        let a = apple.trimmingCharacters(in: .whitespacesAndNewlines)
+        if s.isEmpty { return a }
+        if scribeLostAudio, a.count > s.count { return a }
+        return s
+    }
+
+    /// Atomically takes everything Scribe still owes us: the retry queue plus the
+    /// audio captured since the last flush, in spoken order.
+    private func drainPendingAudio() -> [Data] {
+        var queue = unsentChunks
+        unsentChunks = []
+        if let wav = listener.takeCapturedWAV() { queue.append(wav) }
+        return queue
+    }
+
+    /// Transcribes WAVs in spoken order, appending each result to the live
+    /// transcript as it lands. Stops at the first failure and returns the
+    /// untranscribed remainder (order preserved) so the caller can retry or
+    /// persist it. Genuine silence (success, no text) is skipped, not retried.
+    private func transcribeInOrder(_ queue: [Data], key: String, gen: Int, liveGen: Int) async -> [Data] {
+        for (i, wav) in queue.enumerated() {
+            guard gen == runGeneration, liveGen == liveGeneration else { return Array(queue[i...]) }
+            do {
+                let text = try await ScribeClient(apiKey: key).transcribe(wav: wav, timeout: 60)
+                guard gen == runGeneration, liveGen == liveGeneration else { return Array(queue[i...]) }
+                if !text.isEmpty {
+                    liveTranscript += (liveTranscript.isEmpty ? "" : " ") + text
+                    store.log("recorder", "chunk +\(text.count) chars")
+                }
+            } catch ScribeClient.ScribeError.noText {
+                continue
+            } catch {
+                store.log("scribe", "chunk failed (\(wav.count / 1024)KB, kept for retry): \(error)")
+                return Array(queue[i...])
+            }
+        }
+        return []
+    }
+
+    /// Flushes the captured audio (plus any chunks awaiting retry) through Scribe —
+    /// never holding more than the retry queue in memory. A chunk that fails goes
+    /// back on the queue; it is never dropped.
     private func flushLiveChunk(final: Bool) {
         guard let key = elevenLabsKey else { return }
-        guard let wav = listener.takeCapturedWAV() else { lastFlushAt = Date(); return }
+        let queue = drainPendingAudio()
+        guard !queue.isEmpty else { lastFlushAt = Date(); return }
         flushing = true
         lastFlushAt = Date()
         let gen = runGeneration
         let liveGen = liveGeneration
         flushTask = Task {
-            let text = ((try? await ScribeClient(apiKey: key).transcribe(wav: wav)) ?? "")
-                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let remaining = await self.transcribeInOrder(queue, key: key, gen: gen, liveGen: liveGen)
             self.flushing = false
-            // Drop only if the app was hard-stopped or a *new* recording started; a
-            // graceful stop leaves both generations so the tail still lands.
-            guard gen == self.runGeneration, liveGen == self.liveGeneration else { return }
-            guard !text.isEmpty else { return }
-            self.liveTranscript += (self.liveTranscript.isEmpty ? "" : " ") + text
-            self.store.log("recorder", "\(final ? "final " : "")chunk +\(text.count) chars")
+            // The session this audio belongs to ended while we were transcribing
+            // (stopped, cancelled, or a new recording started). Don't guess which —
+            // park the audio on disk; recovery files are cheap and pruned.
+            guard gen == self.runGeneration, liveGen == self.liveGeneration else {
+                for wav in remaining { await self.store.saveAudioAndWait(wav) }
+                if !remaining.isEmpty {
+                    self.store.log("scribe", "\(remaining.count) chunk(s) from an ended recording saved in \(self.store.directory.path)")
+                }
+                return
+            }
+            self.unsentChunks = remaining + self.unsentChunks
+            // Bound memory on a long outage: spill the oldest audio to disk.
+            while self.unsentChunks.count > Self.unsentChunksMax {
+                let oldest = self.unsentChunks.removeFirst()
+                self.scribeMissedAudio = true
+                await self.store.saveAudioAndWait(oldest)
+                self.store.log("scribe", "retry queue full — chunk saved in \(self.store.directory.path)")
+            }
         }
     }
 
@@ -1291,8 +1398,10 @@ final class AppCoordinator: ObservableObject {
         let start = Date()
         var initial: String? = nil
         var last = ""
+        var sleepNs: UInt64 = 50_000_000
         while Date().timeIntervalSince(start) < maxWait {
-            try? await Task.sleep(nanoseconds: 350_000_000)
+            try? await Task.sleep(nanoseconds: sleepNs)
+            sleepNs = min(sleepNs * 2, 250_000_000)
             guard gen == runGeneration, !Task.isCancelled else { return }
             let snap = try? await withThrowingTaskGroup(of: ScreenController.Snapshot?.self) { group in
                 group.addTask { try? ScreenController.focusedWindowSnapshot(maxElements: 25) }
@@ -1713,12 +1822,23 @@ final class AppCoordinator: ObservableObject {
         // pass when cleanup is on OR a paste rule applies — so configured rules aren't
         // silently ignored just because the cleanup toggle is off. Failure → raw text.
         let rules = insertRules.instructions(forApp: insertTargetApp?.localizedName)
-        let final: String
-        if let claude, (cleanUpInsertedText || !rules.isEmpty) {
-            final = (try? await claude.cleanUpDictation(raw, vocabulary: vocabulary.promptContext,
-                                                        instructions: rules, cleanup: cleanUpInsertedText)) ?? raw
-        } else {
-            final = raw
+        var final = raw
+        if let claude, cleanUpInsertedText || !rules.isEmpty {
+            // Cleanup is for short dictations: past ~8k chars the model's output cap
+            // truncates and Haiku drifts into condensing — never risk content for polish.
+            if raw.count > 8000 {
+                store.log("dictation", "long dictation (\(raw.count) chars) — pasted raw, no cleanup pass")
+            } else {
+                let cleaned = (try? await claude.cleanUpDictation(raw, vocabulary: vocabulary.promptContext,
+                                                                  instructions: rules, cleanup: cleanUpInsertedText)) ?? raw
+                // Filler removal shrinks a little; halving means it summarized. Only a
+                // paste rule (an explicit reformat) is allowed to shrink that much.
+                if rules.isEmpty, raw.count > 400, cleaned.count < raw.count / 2 {
+                    store.log("dictation", "cleanup shrank \(raw.count)→\(cleaned.count) chars — pasting raw")
+                } else {
+                    final = cleaned
+                }
+            }
         }
         try Task.checkCancellation()
         guard gen == runGeneration else { return }

@@ -182,6 +182,15 @@ final class VoiceListener {
         min(1, max(0, rms * 12))
     }
 
+    /// The text a finished request contributes to the utterance. The recognizer
+    /// can finalize with an EMPTY or truncated transcription (seen at the on-device
+    /// request cap) — plain `final ?? lastPartial` dropped a whole request's worth
+    /// of speech whenever that happened, because "" is non-nil. Pure — unit-tested.
+    static func bestSegment(final: String?, lastPartial: String) -> String {
+        guard let final, final.count >= lastPartial.count else { return lastPartial }
+        return final
+    }
+
     /// Builds a canonical 16-bit mono PCM WAV. Pure function — unit-tested.
     static func wav(from samples: [Int16], sampleRate: Double) -> Data {
         let rate = UInt32(sampleRate)
@@ -261,12 +270,22 @@ final class VoiceListener {
                 // second end-callback for the same request commit nothing.
                 if failed || isFinal {
                     if self.carryForward {
-                        let segment = isFinal ? (text ?? self.lastPartial) : self.lastPartial
+                        let segment = Self.bestSegment(final: isFinal ? text : nil,
+                                                       lastPartial: self.lastPartial)
                         if !segment.isEmpty { self.committed += segment + " " }
                     }
                     self.lastPartial = ""
-                    let delay = self.restartDelay
-                    self.restartDelay = min(self.restartDelay * 2, 2.0)
+                    // The tap keeps feeding the DEAD request until the next one is
+                    // installed, so every ms of delay here is speech the new request
+                    // never hears — a backoff'd restart after a silence was eating the
+                    // first words the user spoke next. Restart clean finalizations
+                    // immediately; back off only on errors (that's what the backoff is
+                    // for — a broken recognizer spinning), and cap it hard while
+                    // dictating, where a dead-request window is recorded speech lost.
+                    let delay = failed ? self.restartDelay : 0.05
+                    if failed {
+                        self.restartDelay = min(self.restartDelay * 2, self.carryForward ? 0.5 : 2.0)
+                    }
                     DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
                         guard let self, self.running, gen == self.generation else { return }
                         self.beginRequest()

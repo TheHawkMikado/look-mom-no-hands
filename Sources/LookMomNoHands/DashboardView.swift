@@ -245,6 +245,13 @@ private struct LiveTab: View {
             .background(Color(nsColor: .textBackgroundColor))
             .clipShape(RoundedRectangle(cornerRadius: 6))
 
+            // Instant proof the mic is capturing: the on-device recognizer's tail,
+            // live — Scribe chunks above only land every 60–90s. A separate child
+            // view so the per-partial churn re-renders only this caption.
+            if coordinator.liveActive {
+                HearingCaption(meter: coordinator.meter)
+            }
+
             HStack(spacing: 8) {
                 TextField("Ask a question about this transcript…", text: $question)
                     .textFieldStyle(.roundedBorder)
@@ -288,6 +295,22 @@ private struct LiveTab: View {
 
 /// How dictated text is formatted before it's pasted: a general instruction plus
 /// per-app rules (e.g. VS Code gets one style, Slack another).
+// Observes only the meter, so the several-per-second partial updates re-render
+// this one caption instead of the whole Live tab.
+private struct HearingCaption: View {
+    @ObservedObject var meter: RecorderMeter
+
+    var body: some View {
+        if !meter.heard.isEmpty {
+            Text("Hearing: …\(meter.heard)")
+                .font(.caption).italic()
+                .foregroundStyle(.secondary)
+                .lineLimit(2)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+}
+
 private struct PasteRulesTab: View {
     @ObservedObject var rules: InsertRulesStore
     @State private var newApp = ""

@@ -110,8 +110,10 @@ final class AppStore: ObservableObject {
     }
 
     /// Recovered-audio retention: raw mic clips are sensitive and each can be
-    /// several MB, so only the most recent few are kept.
-    private static let maxRecoveredNotes = 20
+    /// several MB — but during a transcription outage a single long recording
+    /// spills one clip per ~90s chunk, so the cap must cover well over an hour
+    /// of audio or the pruner deletes clips the log just promised were saved.
+    private static let maxRecoveredNotes = 60
 
     /// Persists a captured clip when transcription failed, so a spoken note is
     /// recoverable instead of silently lost. Awaited (so the note is durable

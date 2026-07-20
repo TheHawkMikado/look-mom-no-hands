@@ -891,6 +891,58 @@ final class WavAndScribeTests: XCTestCase {
     }
 }
 
+final class RecorderTranscriptLossTests: XCTestCase {
+    // The recognizer can finalize with an EMPTY (non-nil) transcription; plain
+    // `final ?? lastPartial` committed "" and dropped the whole request's speech —
+    // one of the ways a 30-minute recording came back as its final sentence.
+    func testEmptyFinalKeepsLastPartial() {
+        XCTAssertEqual(VoiceListener.bestSegment(final: "", lastPartial: "a minute of speech"),
+                       "a minute of speech")
+    }
+
+    func testTruncatedFinalKeepsLongerPartial() {
+        XCTAssertEqual(VoiceListener.bestSegment(final: "a min", lastPartial: "a minute of speech"),
+                       "a minute of speech")
+    }
+
+    func testCompleteFinalWins() {
+        XCTAssertEqual(VoiceListener.bestSegment(final: "A minute of speech.", lastPartial: "a minute of speech"),
+                       "A minute of speech.")
+    }
+
+    func testErrorPathUsesLastPartial() {
+        XCTAssertEqual(VoiceListener.bestSegment(final: nil, lastPartial: "kept"), "kept")
+    }
+
+    func testChooseTranscriptPrefersScribeNormally() {
+        XCTAssertEqual(AppCoordinator.chooseTranscript(scribe: "high accuracy text", apple: "high acuracy text",
+                                                       scribeLostAudio: false),
+                       "high accuracy text")
+    }
+
+    func testChooseTranscriptFallsBackWhenScribeEmpty() {
+        XCTAssertEqual(AppCoordinator.chooseTranscript(scribe: "  ", apple: "on-device text", scribeLostAudio: false),
+                       "on-device text")
+    }
+
+    // Scribe chunks failed (network/API), leaving a fragment; the on-device
+    // transcript that heard everything must win over a high-accuracy fragment.
+    func testChooseTranscriptPrefersAppleWhenScribeLostChunks() {
+        let apple = String(repeating: "words spoken for thirty minutes ", count: 20)
+        XCTAssertEqual(AppCoordinator.chooseTranscript(scribe: "just the tail", apple: apple, scribeLostAudio: true),
+                       apple.trimmingCharacters(in: .whitespacesAndNewlines))
+    }
+
+    // Scribe legitimately produces shorter text (it drops filler); without proof
+    // of lost audio the higher-accuracy transcript keeps winning.
+    func testChooseTranscriptKeepsScribeWhenNothingWasLost() {
+        let apple = String(repeating: "um so like words with filler ", count: 20)
+        XCTAssertEqual(AppCoordinator.chooseTranscript(scribe: "words without filler", apple: apple,
+                                                       scribeLostAudio: false),
+                       "words without filler")
+    }
+}
+
 final class URLAndKeystrokeTests: XCTestCase {
     func testBareHostGetsHTTPS() {
         XCTAssertEqual(ScreenController.normalizedURL("youtube.com"), "https://youtube.com")

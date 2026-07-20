@@ -1,11 +1,13 @@
 import SwiftUI
 import AppKit
 
-/// Holds just the ~43 Hz mic level, separate from AppCoordinator so the high-rate
-/// updates invalidate only the pill's waveform — not the menu bar and dashboard.
+/// Holds the high-rate recording signals — the ~43 Hz mic level and the
+/// per-partial "what I'm hearing" tail — separate from AppCoordinator so they
+/// invalidate only the views that show them, not the menu bar and dashboard.
 @MainActor
 final class RecorderMeter: ObservableObject {
     @Published var level: Float = 0
+    @Published var heard = ""
 }
 
 /// A small floating HUD shown only while recording/processing (like Wisprflow's
@@ -29,7 +31,7 @@ final class RecorderPill {
     func hide() { panel?.orderOut(nil) }
 
     private func makePanel(coordinator: AppCoordinator) -> NSPanel {
-        let panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 232, height: 46),
+        let panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 232, height: 66),
                             styleMask: [.borderless, .nonactivatingPanel],
                             backing: .buffered, defer: false)
         panel.isFloatingPanel = true
@@ -73,35 +75,47 @@ private struct RecorderPillView: View {
     private let clock = Timer.publish(every: 0.5, on: .main, in: .common).autoconnect()
 
     var body: some View {
-        HStack(spacing: 8) {
+        VStack(spacing: 2) {
+            HStack(spacing: 8) {
+                if coordinator.phase == .recording {
+                    Button(action: { coordinator.cancelRecording() }) {
+                        Image(systemName: "xmark").font(.system(size: 9, weight: .bold))
+                            .foregroundColor(.white).frame(width: 20, height: 20)
+                            .background(Circle().fill(Color.white.opacity(0.18)))
+                    }
+                    .buttonStyle(.plain)
+
+                    waveform
+                        .frame(maxWidth: .infinity)
+
+                    Text(elapsed).font(.system(size: 11, design: .monospaced)).foregroundColor(.white.opacity(0.85))
+
+                    Button(action: { coordinator.stopRecording() }) {
+                        Image(systemName: "stop.fill").font(.system(size: 9, weight: .bold))
+                            .foregroundColor(.white).frame(width: 22, height: 22)
+                            .background(Circle().fill(Color.red))
+                    }
+                    .buttonStyle(.plain)
+                } else {
+                    // Processing state.
+                    ProgressView().controlSize(.small).tint(.white)
+                    Text("Processing…").foregroundColor(.white.opacity(0.9)).font(.caption)
+                    Spacer()
+                }
+            }
+            .frame(height: 36)
+            // Live tail of what's being heard — frozen text here means the
+            // recognizer isn't capturing, which used to be invisible until stop.
             if coordinator.phase == .recording {
-                Button(action: { coordinator.cancelRecording() }) {
-                    Image(systemName: "xmark").font(.system(size: 9, weight: .bold))
-                        .foregroundColor(.white).frame(width: 20, height: 20)
-                        .background(Circle().fill(Color.white.opacity(0.18)))
-                }
-                .buttonStyle(.plain)
-
-                waveform
-                    .frame(maxWidth: .infinity)
-
-                Text(elapsed).font(.system(size: 11, design: .monospaced)).foregroundColor(.white.opacity(0.85))
-
-                Button(action: { coordinator.stopRecording() }) {
-                    Image(systemName: "stop.fill").font(.system(size: 9, weight: .bold))
-                        .foregroundColor(.white).frame(width: 22, height: 22)
-                        .background(Circle().fill(Color.red))
-                }
-                .buttonStyle(.plain)
-            } else {
-                // Processing state.
-                ProgressView().controlSize(.small).tint(.white)
-                Text("Processing…").foregroundColor(.white.opacity(0.9)).font(.caption)
-                Spacer()
+                Text(meter.heard.isEmpty ? "listening…" : meter.heard)
+                    .font(.system(size: 10)).foregroundColor(.white.opacity(0.65))
+                    .lineLimit(1).truncationMode(.head)
+                    .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
         .padding(.horizontal, 10)
-        .frame(height: 46)
+        .padding(.vertical, 6)
+        .frame(height: 56)
         .background(
             RoundedRectangle(cornerRadius: 15, style: .continuous)
                 .fill(Color.black.opacity(0.82))
