@@ -245,9 +245,14 @@ private struct LiveTab: View {
             .background(Color(nsColor: .textBackgroundColor))
             .clipShape(RoundedRectangle(cornerRadius: 6))
 
+            if let trouble = coordinator.transcriptionTrouble {
+                Label(trouble, systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption).foregroundStyle(.orange)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
             // Instant proof the mic is capturing: the on-device recognizer's tail,
-            // live — Scribe chunks above only land every 60–90s. A separate child
-            // view so the per-partial churn re-renders only this caption.
+            // live — Scribe chunks land every ~12-25s. A separate child view so
+            // the per-partial churn re-renders only this caption.
             if coordinator.liveActive {
                 HearingCaption(meter: coordinator.meter)
             }
@@ -639,6 +644,23 @@ private struct SettingsTab: View {
                 Picker("Engine", selection: $coordinator.speechEngine) {
                     ForEach(SpeechEngine.allCases, id: \.self) { Text($0.label).tag($0) }
                 }
+                Picker("Microphone", selection: Binding(
+                    get: { coordinator.micUID },
+                    set: { coordinator.selectMicrophone(uid: $0) }
+                )) {
+                    Text("System default").tag(String?.none)
+                    // Keep a disconnected selection visible instead of a blank
+                    // picker — capture silently falls back to the default mic.
+                    if let uid = coordinator.micUID,
+                       !coordinator.inputDevices.contains(where: { $0.uid == uid }) {
+                        Text("Selected mic (disconnected)").tag(String?.some(uid))
+                    }
+                    ForEach(coordinator.inputDevices) { device in
+                        Text(device.name).tag(String?.some(device.uid))
+                    }
+                }
+                Text("Pick a dedicated mic to leave your other mics free for a second recorder running in parallel.")
+                    .font(.caption).foregroundStyle(.secondary)
                 LabeledContent("Anthropic key") { statusPill(coordinator.hasKey) }
                 LabeledContent("ElevenLabs key") { statusPill(coordinator.hasElevenLabsKey) }
                 Text("Add or change keys from the menu-bar icon.")
@@ -681,6 +703,9 @@ private struct SettingsTab: View {
             }
         }
         .formStyle(.grouped)
+        // Devices can (un)plug at any time; the list is cheap to rebuild and
+        // only needs to be fresh while the user is looking at it.
+        .onAppear { coordinator.refreshInputDevices() }
     }
 
     private func statusPill(_ ok: Bool) -> some View {

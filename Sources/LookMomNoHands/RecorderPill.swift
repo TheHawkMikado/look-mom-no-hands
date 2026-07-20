@@ -106,11 +106,20 @@ private struct RecorderPillView: View {
             .frame(height: 36)
             // Live tail of what's being heard — frozen text here means the
             // recognizer isn't capturing, which used to be invisible until stop.
+            // A transcription failure takes over the line in orange: the very
+            // first failed chunk is visible, not discovered at stop.
             if coordinator.phase == .recording {
-                Text(meter.heard.isEmpty ? "listening…" : meter.heard)
-                    .font(.system(size: 10)).foregroundColor(.white.opacity(0.65))
-                    .lineLimit(1).truncationMode(.head)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                if let trouble = coordinator.transcriptionTrouble {
+                    Text(trouble)
+                        .font(.system(size: 10, weight: .semibold)).foregroundColor(.orange)
+                        .lineLimit(1).truncationMode(.tail)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                } else {
+                    Text(meter.heard.isEmpty ? "listening…" : meter.heard)
+                        .font(.system(size: 10)).foregroundColor(.white.opacity(0.65))
+                        .lineLimit(1).truncationMode(.head)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
             }
         }
         .padding(.horizontal, 10)

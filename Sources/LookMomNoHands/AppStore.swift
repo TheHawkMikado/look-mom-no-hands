@@ -130,6 +130,14 @@ final class AppStore: ObservableObject {
         if ok { await Task.detached { Self.pruneRecoveredAudio(in: dir) }.value }
     }
 
+    /// Crash insurance for a recording in progress: rewritten after every chunk,
+    /// so a crash/force-quit/power loss loses at most one chunk of text. The
+    /// previous session's file is only overwritten by the next recording.
+    func writeLiveTranscript(_ text: String) {
+        let url = directory.appendingPathComponent("live-session.txt")
+        Task.detached { try? text.write(to: url, atomically: true, encoding: .utf8) }
+    }
+
     nonisolated private static func pruneRecoveredAudio(in directory: URL) {
         let fm = FileManager.default
         guard let files = try? fm.contentsOfDirectory(

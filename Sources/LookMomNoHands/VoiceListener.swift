@@ -1,6 +1,16 @@
 import Foundation
 import AVFoundation
 import Speech
+import CoreAudio
+import AudioToolbox
+
+/// An input device the user can pick in Settings. UID is the stable identity
+/// (device IDs change across reconnects); nil selection = follow system default.
+struct AudioInputDevice: Identifiable, Hashable {
+    let id: AudioDeviceID
+    let uid: String
+    let name: String
+}
 
 /// Single always-on speech pipeline. The audio engine + mic tap run continuously;
 /// only the recognition request is cycled (on utterance boundaries, on errors, and
@@ -61,6 +71,70 @@ final class VoiceListener {
     /// standby and single commands.
     var carryForward = false
 
+    /// UID of the input device to capture from; nil follows the system default.
+    /// Applied at engine start (the tap's format depends on the device, so a
+    /// change while running requires a stop/start — the coordinator handles that).
+    var preferredInputUID: String?
+
+    // MARK: Input devices (CoreAudio — AVAudioEngine has no macOS device picker)
+
+    /// Every device with input streams, for the Settings picker.
+    static func inputDevices() -> [AudioInputDevice] {
+        var addr = AudioObjectPropertyAddress(mSelector: kAudioHardwarePropertyDevices,
+                                              mScope: kAudioObjectPropertyScopeGlobal,
+                                              mElement: kAudioObjectPropertyElementMain)
+        var size: UInt32 = 0
+        guard AudioObjectGetPropertyDataSize(AudioObjectID(kAudioObjectSystemObject), &addr, 0, nil, &size) == noErr,
+              size > 0 else { return [] }
+        var ids = [AudioDeviceID](repeating: 0, count: Int(size) / MemoryLayout<AudioDeviceID>.size)
+        guard AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &addr, 0, nil, &size, &ids) == noErr
+        else { return [] }
+        return ids.compactMap { id in
+            guard hasInputStreams(id),
+                  let uid = stringProperty(id, kAudioDevicePropertyDeviceUID),
+                  let name = stringProperty(id, kAudioObjectPropertyName) else { return nil }
+            return AudioInputDevice(id: id, uid: uid, name: name)
+        }
+    }
+
+    private static func hasInputStreams(_ device: AudioDeviceID) -> Bool {
+        var addr = AudioObjectPropertyAddress(mSelector: kAudioDevicePropertyStreams,
+                                              mScope: kAudioDevicePropertyScopeInput,
+                                              mElement: kAudioObjectPropertyElementMain)
+        var size: UInt32 = 0
+        return AudioObjectGetPropertyDataSize(device, &addr, 0, nil, &size) == noErr && size > 0
+    }
+
+    private static func stringProperty(_ device: AudioDeviceID, _ selector: AudioObjectPropertySelector) -> String? {
+        var addr = AudioObjectPropertyAddress(mSelector: selector,
+                                              mScope: kAudioObjectPropertyScopeGlobal,
+                                              mElement: kAudioObjectPropertyElementMain)
+        var value: Unmanaged<CFString>?
+        var size = UInt32(MemoryLayout<Unmanaged<CFString>?>.size)
+        let err = withUnsafeMutablePointer(to: &value) {
+            AudioObjectGetPropertyData(device, &addr, 0, nil, &size, $0)
+        }
+        guard err == noErr, let value else { return nil }
+        return value.takeRetainedValue() as String
+    }
+
+    /// Points the engine's input AUHAL at the preferred device. Must run before
+    /// the tap is installed — the tap format is the device's format. Falls back
+    /// to the system default (and says so) when the device isn't connected.
+    private func applyPreferredInputDevice() {
+        guard let uid = preferredInputUID else { return }   // system default
+        guard let device = Self.inputDevices().first(where: { $0.uid == uid }) else {
+            onInfo?("selected mic not connected — using system default")
+            return
+        }
+        guard let unit = engine.inputNode.audioUnit else { return }
+        var id = device.id
+        let err = AudioUnitSetProperty(unit, kAudioOutputUnitProperty_CurrentDevice,
+                                       kAudioUnitScope_Global, 0, &id,
+                                       UInt32(MemoryLayout<AudioDeviceID>.size))
+        onInfo?(err == noErr ? "mic: \(device.name)" : "couldn't select mic \(device.name) (err \(err)) — using default")
+    }
+
     // Raw PCM capture for re-transcription through Scribe. Gated on `captureAudio`
     // so we only buffer when a higher-quality transcript is actually wanted (never
     // in always-on standby). Appended on the audio thread under captureLock; read
@@ -102,6 +176,7 @@ final class VoiceListener {
         carryForward = false
 
         let input = engine.inputNode
+        applyPreferredInputDevice()   // before the tap: its format is the device's
         // NOTE: OS voice-processing (hardware AEC) was tried here but reconfigured the
         // input format and broke SFSpeechRecognizer (the wake word stopped firing), so
         // we stay on the plain always-on tap. Barge-in is done in SOFTWARE instead: the

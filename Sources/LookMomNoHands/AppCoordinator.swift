@@ -37,6 +37,18 @@ final class AppCoordinator: ObservableObject {
             hotkey.setChord(dictationChord.flags)
         }
     }
+    /// Selected input device UID (nil = system default). Persisted. Lets the
+    /// user record from a different mic than other transcription tools, so a
+    /// second recorder can run in parallel as a backup.
+    @Published private(set) var micUID: String?
+    @Published private(set) var inputDevices: [AudioInputDevice] = []
+    private static let micKey = "inputMicUID"
+
+    /// Visible transcription-failure state (pill + Live tab). The 30-minute loss
+    /// happened because 30 consecutive failures were invisible — this makes the
+    /// very first one show on screen. Cleared when a flush fully succeeds.
+    @Published private(set) var transcriptionTrouble: String?
+
     /// Clean up push-to-dictate text with the model before pasting. Persisted.
     @Published var cleanUpInsertedText = true {
         didSet { UserDefaults.standard.set(cleanUpInsertedText, forKey: Self.cleanupKey) }
@@ -95,9 +107,13 @@ final class AppCoordinator: ObservableObject {
     private var unsentChunks: [Data] = []
     private static let unsentChunksMax = 20   // ~30 min of audio; beyond that spill to disk
     private var scribeMissedAudio = false     // audio existed that Scribe never transcribed
-    nonisolated static let liveChunkSecondsForTest: TimeInterval = 60    // aim to flush after this…
-    nonisolated static let liveChunkSilenceForTest: TimeInterval = 1.5   // …at the next pause (sentence end)
-    nonisolated static let liveChunkMaxForTest: TimeInterval = 90        // …but flush anyway by here
+    // Short chunks on purpose: the live transcript visibly moves every few
+    // seconds of speech, and a failure can only ever cost one small chunk —
+    // 60–90s chunks once turned a transcription outage into a 30-minute loss.
+    // Scribe bills by audio duration, so more/smaller requests cost the same.
+    nonisolated static let liveChunkSecondsForTest: TimeInterval = 12    // aim to flush after this…
+    nonisolated static let liveChunkSilenceForTest: TimeInterval = 0.8   // …at the next pause (phrase end)
+    nonisolated static let liveChunkMaxForTest: TimeInterval = 25        // …but flush anyway by here
     private var liveChunkSeconds: TimeInterval { Self.liveChunkSecondsForTest }
     private var liveChunkSilence: TimeInterval { Self.liveChunkSilenceForTest }
     private var liveChunkMax: TimeInterval { Self.liveChunkMaxForTest }
@@ -201,6 +217,8 @@ final class AppCoordinator: ObservableObject {
         if UserDefaults.standard.object(forKey: Self.visionKey) != nil {
             visionClickEnabled = UserDefaults.standard.bool(forKey: Self.visionKey)
         }
+        micUID = UserDefaults.standard.string(forKey: Self.micKey)
+        listener.preferredInputUID = micUID
         refreshContextualPhrases()
         listener.onPartial = { [weak self] text in self?.handlePartial(text) }
         listener.onInfo = { [weak self] msg in self?.store.log("speech", msg) }
@@ -717,6 +735,7 @@ final class AppCoordinator: ObservableObject {
         meter.heard = ""
         unsentChunks = []
         scribeMissedAudio = false
+        transcriptionTrouble = nil
         liveActive = true
         mode = .recording
         phase = .recording
@@ -788,6 +807,7 @@ final class AppCoordinator: ObservableObject {
     }
 
     private var finalizingRecording = false   // a stop's transcription is in flight
+    private var micChangePending = false      // mic switched mid-recording; apply at stop
 
     private func finishRecording(output: RecorderOutput) {
         processing = true
@@ -801,7 +821,13 @@ final class AppCoordinator: ObservableObject {
             defer {
                 self.finalizingRecording = false
                 self.finishProcessing(gen)
-                if gen == self.runGeneration { self.pill.hide() }
+                if gen == self.runGeneration {
+                    self.pill.hide()
+                    if self.micChangePending {
+                        self.micChangePending = false
+                        self.selectMicrophone(uid: self.micUID)
+                    }
+                }
             }
             let raw = await self.finalizeRecorderTranscript(gen: gen, liveGen: liveGen)
             let text = Self.stripDictationTriggers(raw).trimmingCharacters(in: .whitespacesAndNewlines)
@@ -860,6 +886,7 @@ final class AppCoordinator: ObservableObject {
             for wav in lost { await store.saveAudioAndWait(wav) }
             if !lost.isEmpty, gen == runGeneration, liveGen == liveGeneration {
                 scribeMissedAudio = true
+                transcriptionTrouble = "⚠︎ \(lost.count) chunk(s) couldn't be transcribed — audio saved to disk"
                 store.log("recorder", "⚠︎ \(lost.count) chunk(s) untranscribed — audio saved in \(store.directory.path)")
             }
         }
@@ -910,15 +937,29 @@ final class AppCoordinator: ObservableObject {
                 if !text.isEmpty {
                     liveTranscript += (liveTranscript.isEmpty ? "" : " ") + text
                     store.log("recorder", "chunk +\(text.count) chars")
+                    // Crash insurance: the growing transcript survives a crash,
+                    // force-quit, or power loss — not just a graceful stop.
+                    store.writeLiveTranscript(liveTranscript)
                 }
             } catch ScribeClient.ScribeError.noText {
                 continue
             } catch {
+                transcriptionTrouble = Self.scribeTroubleMessage(error)
                 store.log("scribe", "chunk failed (\(wav.count / 1024)KB, kept for retry): \(error)")
                 return Array(queue[i...])
             }
         }
         return []
+    }
+
+    /// What the pill shows the moment transcription starts failing. Auth failures
+    /// name the likely culprit — a silent 401 once cost a 30-minute recording.
+    nonisolated static func scribeTroubleMessage(_ error: Error) -> String {
+        let desc = "\(error)"
+        if desc.contains("401") || desc.contains("403") {
+            return "⚠︎ ElevenLabs rejected the API key (billing or key issue) — audio safe, on-device transcript still running"
+        }
+        return "⚠︎ transcription failing — audio safe, retrying"
     }
 
     /// Flushes the captured audio (plus any chunks awaiting retry) through Scribe —
@@ -945,6 +986,7 @@ final class AppCoordinator: ObservableObject {
                 }
                 return
             }
+            if remaining.isEmpty { self.transcriptionTrouble = nil }   // recovered
             self.unsentChunks = remaining + self.unsentChunks
             // Bound memory on a long outage: spill the oldest audio to disk.
             while self.unsentChunks.count > Self.unsentChunksMax {
@@ -1733,6 +1775,36 @@ final class AppCoordinator: ObservableObject {
             insertTargetApp = front
         } else {
             insertTargetApp = lastExternalApp
+        }
+    }
+
+    // MARK: Microphone selection
+
+    func refreshInputDevices() {
+        inputDevices = VoiceListener.inputDevices()
+    }
+
+    /// Switches the capture device. The tap's format is device-specific, so a
+    /// live engine restarts; during a recording the change waits for the stop
+    /// (restarting mid-take would drop the mic for a beat).
+    func selectMicrophone(uid: String?) {
+        micUID = uid
+        if let uid { UserDefaults.standard.set(uid, forKey: Self.micKey) }
+        else { UserDefaults.standard.removeObject(forKey: Self.micKey) }
+        listener.preferredInputUID = uid
+        let name = uid.flatMap { u in inputDevices.first { $0.uid == u }?.name } ?? "system default"
+        store.log("mic", "selected: \(name)")
+        guard isRunning else { return }
+        guard mode != .recording else {
+            micChangePending = true
+            store.log("mic", "change applies after this recording ends")
+            return
+        }
+        listener.stop()
+        do { try listener.start() } catch {
+            isRunning = false
+            phase = .error("\(error)")
+            store.log("error", "mic switch failed: \(error)")
         }
     }
 
