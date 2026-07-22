@@ -45,7 +45,10 @@ final class VoiceListener {
     private var levelSmoothed: Float = 0
 
     private let recognizer = SFSpeechRecognizer(locale: Locale(identifier: "en-US"))
-    private let engine = AVAudioEngine()
+    // Rebuilt on every start(): AVAudioEngine binds its input node to a device
+    // and format on first use and keeps them — overriding the device on a used
+    // engine (mic picker → virtual mics like Krisp) captures only silence.
+    private var engine = AVAudioEngine()
     // The mic tap appends on a realtime audio thread while the main thread swaps
     // requests; the lock is what keeps that from being a data race (appending to
     // a request whose endAudio() already ran, or a torn pointer read).
@@ -175,6 +178,7 @@ final class VoiceListener {
         committed = ""
         carryForward = false
 
+        engine = AVAudioEngine()      // fresh graph — see the property comment
         let input = engine.inputNode
         applyPreferredInputDevice()   // before the tap: its format is the device's
         // NOTE: OS voice-processing (hardware AEC) was tried here but reconfigured the
@@ -183,6 +187,12 @@ final class VoiceListener {
         // coordinator keeps listening during TTS and detects your voice by transcript
         // divergence from what it's saying (see isBargeOverTTS).
         let format = input.outputFormat(forBus: 0)
+        // A dead/misbound device (e.g. a virtual mic whose app isn't running)
+        // yields a zero format — fail visibly instead of listening to silence.
+        guard format.sampleRate > 0, format.channelCount > 0 else {
+            throw ListenError.engineStartFailed("mic has no usable format — is its app running?")
+        }
+        onInfo?("mic format: \(Int(format.sampleRate)) Hz, \(format.channelCount) ch")
         input.installTap(onBus: 0, bufferSize: 1024, format: format) { [weak self] buffer, _ in
             guard let self else { return }
             // Append INSIDE the lock: swapRequest calls endAudio() under the same
