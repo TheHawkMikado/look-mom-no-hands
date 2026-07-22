@@ -121,21 +121,33 @@ final class VoiceListener {
         return value.takeRetainedValue() as String
     }
 
-    /// Points the engine's input AUHAL at the preferred device. Must run before
-    /// the tap is installed — the tap format is the device's format. Falls back
-    /// to the system default (and says so) when the device isn't connected.
+    /// Points the engine's input at the preferred device. Must run before the
+    /// tap is installed — the tap format is the device's format. Falls back to
+    /// the system default (and says so) when the device isn't connected.
+    /// Uses AUAudioUnit.setDeviceID, which reinitializes the unit around the
+    /// change: raw AudioUnitSetProperty on the engine's already-initialized
+    /// AUHAL returned noErr but never rebound (the tap kept reading the default
+    /// mic while the log claimed the picked one — Krisp showed no usage).
     private func applyPreferredInputDevice() {
         guard let uid = preferredInputUID else { return }   // system default
         guard let device = Self.inputDevices().first(where: { $0.uid == uid }) else {
             onInfo?("selected mic not connected — using system default")
             return
         }
-        guard let unit = engine.inputNode.audioUnit else { return }
-        var id = device.id
-        let err = AudioUnitSetProperty(unit, kAudioOutputUnitProperty_CurrentDevice,
-                                       kAudioUnitScope_Global, 0, &id,
-                                       UInt32(MemoryLayout<AudioDeviceID>.size))
-        onInfo?(err == noErr ? "mic: \(device.name)" : "couldn't select mic \(device.name) (err \(err)) — using default")
+        do {
+            try engine.inputNode.auAudioUnit.setDeviceID(device.id)
+        } catch {
+            onInfo?("couldn't select mic \(device.name): \(error) — using default")
+            return
+        }
+        // Trust the read-back, not the call: log what the unit is REALLY bound to.
+        let bound = engine.inputNode.auAudioUnit.deviceID
+        if bound == device.id {
+            onInfo?("mic: \(device.name)")
+        } else {
+            let actual = Self.inputDevices().first { $0.id == bound }?.name ?? "device \(bound)"
+            onInfo?("⚠︎ asked for \(device.name), engine bound to \(actual)")
+        }
     }
 
     // Raw PCM capture for re-transcription through Scribe. Gated on `captureAudio`
