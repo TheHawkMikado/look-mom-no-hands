@@ -22,6 +22,16 @@ enum KeychainStore {
         SecItemAdd(add as CFDictionary, nil)
     }
 
+    /// Removes only the item this app wrote — the manual-entry fallbacks that
+    /// `load` consults are the user's own keychain items, not ours to delete.
+    static func delete(account: String) {
+        SecItemDelete([
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account
+        ] as CFDictionary)
+    }
+
     static func load(account: String = defaultAccount) -> String? {
         // 1. The item this app writes via save().
         if let key = read(service: service, account: account) { return key }

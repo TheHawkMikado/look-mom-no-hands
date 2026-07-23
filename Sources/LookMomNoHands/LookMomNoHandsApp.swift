@@ -3,35 +3,77 @@ import SwiftUI
 @main
 struct LookMomNoHandsApp: App {
     @StateObject private var coordinator = AppCoordinator()
+    @StateObject private var license = LicenseStore()
 
     var body: some Scene {
         MenuBarExtra {
-            PanelView(coordinator: coordinator, store: coordinator.store)
+            PanelView(coordinator: coordinator, store: coordinator.store, license: license)
         } label: {
-            // slash = off, outline = standby (wake listening), filled = active session
-            Image(systemName: coordinator.isActive ? "waveform.circle.fill"
-                            : coordinator.isRunning ? "waveform.circle"
-                            : "waveform.slash")
+            // slash = off, dimmed = standby (wake listening), solid = live session
+            Image(nsImage: .brandMark(height: 15,
+                                      slashed: !coordinator.isRunning,
+                                      dimmed: coordinator.isRunning && !coordinator.isActive))
         }
         .menuBarExtraStyle(.window)
 
-        Window("\(AppIdentity.displayName) — Dashboard", id: "dashboard") {
+        Window(Self.dashboardTitle, id: "dashboard") {
             DashboardView(coordinator: coordinator)
+                .onAppear { DockPresence.dashboardOpened() }
         }
+    }
+
+    static let dashboardTitle = "\(AppIdentity.displayName) — Dashboard"
+}
+
+/// The app ships as an `LSUIElement` — menu-bar only, no Dock tile — because
+/// that's right for something you talk to rather than switch to. The dashboard
+/// is a real window though, so give the app a real Dock presence for as long as
+/// it's open and drop back to accessory when it closes.
+@MainActor
+enum DockPresence {
+    private static var observer: NSObjectProtocol?
+
+    static func dashboardOpened() {
+        apply(.regular)
+
+        // `onDisappear` on a Window's root view doesn't reliably fire when the
+        // window is closed from the red button, so the close notification is the
+        // authority. Matching on title because SwiftUI doesn't hand us the
+        // NSWindow for a scene.
+        guard observer == nil else { return }
+        observer = NotificationCenter.default.addObserver(
+            forName: NSWindow.willCloseNotification, object: nil, queue: .main
+        ) { note in
+            guard (note.object as? NSWindow)?.title == LookMomNoHandsApp.dashboardTitle else { return }
+            MainActor.assumeIsolated { apply(.accessory) }
+        }
+    }
+
+    private static func apply(_ policy: NSApplication.ActivationPolicy) {
+        guard NSApp.activationPolicy() != policy else { return }
+        NSApp.setActivationPolicy(policy)
+        // Going regular mid-flight doesn't focus the app on its own, and going
+        // back to accessory can leave the menu bar owned by nobody.
+        if policy == .regular { NSApp.activate(ignoringOtherApps: true) }
     }
 }
 
 struct PanelView: View {
     @ObservedObject var coordinator: AppCoordinator
     @ObservedObject var store: AppStore
+    @ObservedObject var license: LicenseStore
     @Environment(\.openWindow) private var openWindow
     @State private var keyField = ""
     @State private var elevenField = ""
     @State private var showVoiceSetup = false
+    @State private var licenseField = ""
+    @State private var showLicenseEntry = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             header
+
+            licenseSection
 
             if !coordinator.hasKey {
                 keyEntry
@@ -169,6 +211,74 @@ struct PanelView: View {
         }
     }
 
+    /// Licence state. Deliberately quiet while things are fine — a paid customer
+    /// sees one caption line, and only a blocked app gets the full banner.
+    @ViewBuilder
+    private var licenseSection: some View {
+        if license.status.allowsUse && license.status.isPaid && !showLicenseEntry {
+            HStack(spacing: 6) {
+                Image(systemName: "checkmark.seal.fill").foregroundStyle(.green)
+                Text(license.status.label).font(.caption).foregroundStyle(.secondary)
+                Spacer()
+                Button("Manage") { showLicenseEntry = true }.font(.caption)
+            }
+        } else {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 6) {
+                    Image(systemName: license.status.allowsUse ? "clock.badge" : "lock.fill")
+                        .foregroundStyle(license.status.allowsUse ? .orange : .red)
+                    Text(license.status.label).font(.callout.weight(.medium))
+                    Spacer()
+                    if showLicenseEntry && license.status.allowsUse {
+                        Button("Close") { showLicenseEntry = false }.font(.caption)
+                    }
+                }
+
+                if !license.status.allowsUse {
+                    Text("Your \(license.status == .trialExpired ? "trial has ended" : "licence has lapsed"). Enter a licence key to keep going.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+
+                HStack {
+                    TextField("NOHANDS-XXXX-XXXX-XXXX", text: $licenseField)
+                        .textFieldStyle(.roundedBorder)
+                        .disabled(license.isActivating)
+                    Button(license.isActivating ? "Checking…" : "Activate") {
+                        Task {
+                            await license.activate(key: licenseField)
+                            if license.status.isPaid {
+                                licenseField = ""
+                                showLicenseEntry = false
+                            }
+                        }
+                    }
+                    .disabled(licenseField.isEmpty || license.isActivating)
+                }
+
+                if let err = license.lastError {
+                    Text(err).font(.caption2).foregroundStyle(.red)
+                }
+
+                HStack(spacing: 12) {
+                    Button("Buy a licence") { NSWorkspace.shared.open(LicenseConfig.purchaseURL) }
+                        .font(.caption)
+                    if license.status.isPaid {
+                        Button("Deactivate this Mac") {
+                            license.deactivate()
+                            showLicenseEntry = false
+                        }
+                        .font(.caption)
+                    }
+                    Spacer()
+                }
+            }
+            .padding(10)
+            .background((license.status.allowsUse ? Color.orange : Color.red).opacity(0.08),
+                        in: RoundedRectangle(cornerRadius: 8))
+        }
+        Divider()
+    }
+
     private var keyEntry: some View {
         VStack(alignment: .leading, spacing: 6) {
             Text("Anthropic API key").font(.caption).foregroundStyle(.secondary)
@@ -192,7 +302,7 @@ struct PanelView: View {
                 Button("Stop listening") { coordinator.stop() }
             } else {
                 Button("Start listening") { coordinator.start() }
-                    .disabled(!coordinator.hasKey)
+                    .disabled(!coordinator.hasKey || !license.status.allowsUse)
             }
             Button("Dashboard") {
                 openWindow(id: "dashboard")
@@ -219,7 +329,7 @@ struct PanelView: View {
                 } label: {
                     Label("Record a note", systemImage: "mic.circle.fill")
                 }
-                .disabled(!coordinator.isRunning || !coordinator.hasKey)
+                .disabled(!coordinator.isRunning || !coordinator.hasKey || !license.status.allowsUse)
                 Spacer()
             }
         }

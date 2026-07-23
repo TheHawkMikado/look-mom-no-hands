@@ -1,11 +1,14 @@
-# Look Ma, No Hands
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="Assets/png/lockup-dark@2x.png">
+  <img src="Assets/png/lockup-light@2x.png" alt="Look Ma, No Hands" width="440">
+</picture>
 
 A voice-first macOS app that controls your screen entirely by voice — built for
 hands-free use. Say a wake word, then dictate a note or issue a screen command.
 
-Native SwiftUI menu-bar app for Apple Silicon (macOS 14+). Speech is recognized
-**on-device** (Apple Speech); the intelligence (command routing, summaries) runs
-through the **Anthropic Messages API** (Claude).
+Native SwiftUI menu-bar app for macOS 14+, universal (Apple Silicon and Intel).
+Speech is recognized **on-device** (Apple Speech); the intelligence (command
+routing, summaries) runs through the **Anthropic Messages API** (Claude).
 
 ## What it does
 
@@ -38,6 +41,12 @@ through the **Anthropic Messages API** (Claude).
 | [DashboardView.swift](Sources/LookMomNoHands/DashboardView.swift) | Dashboard window: transcripts + activity tabs |
 | [Models.swift](Sources/LookMomNoHands/Models.swift) | Shared value types + frozen app-identity strings |
 | [KeychainStore.swift](Sources/LookMomNoHands/KeychainStore.swift) | API key storage |
+| [BrandMark.swift](Sources/LookMomNoHands/BrandMark.swift) | The mark as a drawn `Shape` + the menu-bar template image |
+
+Logo, app icon and brand rules live in [Assets/](Assets/README.md);
+`./Scripts/render_icon.sh` regenerates every raster from the SVG masters.
+| [LicenseStore.swift](Sources/LookMomNoHands/LicenseStore.swift) | Trial clock + offline Ed25519 licence verification |
+| [web/](web/) | nohandsapp.com — marketing site, Stripe checkout, licence API |
 
 ## Data & dashboard
 

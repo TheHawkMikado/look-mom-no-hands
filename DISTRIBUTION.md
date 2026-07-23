@@ -50,9 +50,25 @@ NOTARY_PROFILE="LookMaNotary" \
 The script signs with hardened runtime, submits the DMG to Apple, waits for the
 ticket, and staples it. The result is a DMG anyone can download and open cleanly.
 
-> Notarization requires full **Xcode** (for `notarytool`/`stapler`). You currently
-> have only Command Line Tools — installing Xcode from the App Store covers this.
-> The universal *build* itself works fine on Command Line Tools.
+> `notarytool` and `stapler` both ship with the Command Line Tools (verified at
+> notarytool 1.1.2) — full Xcode is not required for packaging or notarization.
+> Xcode is still the easiest place to *create* the Developer ID certificate:
+> Settings → Accounts → Manage Certificates → `+` → Developer ID Application.
+
+## Not an option: the Mac App Store
+
+Every App Store submission must set `com.apple.security.app-sandbox` to `true`.
+This app sets it to `false` on purpose ([App/LookMomNoHands.entitlements](App/LookMomNoHands.entitlements)):
+driving other applications means `AXUIElementCreateApplication` /
+`AXUIElementPerformAction` against their accessibility trees plus `CGEvent`
+posting, and the sandbox grants no entitlement for either. There is no
+paperwork, price, or review-notes path around it — the capability simply does
+not exist inside the sandbox.
+
+This is why Keyboard Maestro, BetterTouchTool, Raycast, Alfred and Karabiner all
+ship direct rather than through the store. Tier 2 above is the equivalent
+experience: a notarized DMG opens with no warnings anywhere, and the Apple
+Developer membership is what pays for it.
 
 ## Where to host the download
 
