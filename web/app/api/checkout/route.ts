@@ -41,9 +41,12 @@ export async function POST(req: NextRequest) {
       success_url: `${origin}/success?session_id={CHECKOUT_SESSION_ID}`,
       cancel_url: `${origin}/#pricing`,
       allow_promotion_codes: true,
-      // Stripe Tax handles VAT/sales-tax calculation; you still own registration
-      // and remittance in each jurisdiction (see web/README.md).
-      automatic_tax: { enabled: true },
+      // Off unless explicitly switched on: Stripe rejects the whole session if
+      // automatic tax is enabled before an origin address and registrations
+      // exist, which would turn "we haven't done tax setup yet" into "nobody can
+      // buy anything". Set STRIPE_TAX=1 once Stripe Tax is configured. Note it
+      // only *calculates* — you still own registration and remittance.
+      automatic_tax: { enabled: process.env.STRIPE_TAX === "1" },
     });
     return NextResponse.json({ url: session.url });
   } catch (err) {
