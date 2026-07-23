@@ -67,10 +67,28 @@ No migration step: `ensureSchema()` creates the tables on first request.
 
 ### 4. Vercel
 
-Import the repo and set **Root Directory** to `web` — the Swift app lives in the
-same repo and Vercel should not try to build it. Add every variable from
-`.env.example`, then point `nohandsapp.com` at the project in Vercel's Domains
-tab and update your registrar's nameservers or A/CNAME records as instructed.
+Live as the **`nohandsapp`** project, root directory **`web`** — the Swift app
+shares this repo and Vercel must not try to build it. Add every variable from
+`.env.example` under Settings → Environment Variables.
+
+Three things that cost time the first time round:
+
+- **Deployment Protection blocks Stripe.** New projects default to
+  `ssoProtection: all_except_custom_domains`, so `*.vercel.app` URLs answer
+  `401` to everyone — including Stripe's webhooks. Custom domains are exempt, so
+  production is fine, but never point a webhook at a preview URL. To exercise a
+  protected deployment from a script, create an automation bypass
+  (`vercel project protection enable --protection-bypass`) and send the secret as
+  an `x-vercel-protection-bypass` header.
+- **Cloudflare must not proxy the apex.** DNS lives on Cloudflare; Vercel's
+  record is returned with `disableProxy: true`, meaning grey cloud / DNS-only.
+  Leaving the orange cloud on puts two CDNs in series and breaks certificate
+  issuance.
+- **Push-to-deploy needs the Vercel GitHub App.** A project can hold a valid git
+  link — and Vercel can still clone and build from it via the API — while no
+  webhook exists, so pushes appear to do nothing. If a push doesn't produce a
+  deployment, install/authorise the Vercel app for the repo in GitHub rather
+  than re-linking the project.
 
 ### 5. Download hosting
 
