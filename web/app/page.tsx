@@ -1,7 +1,6 @@
-"use client";
-
-import { useState } from "react";
 import { Lockup, Mark } from "@/components/Logo";
+import { Pricing } from "@/components/Pricing";
+import { storefront } from "@/lib/catalogue";
 
 /**
  * Landing page. Everything the buyer needs to decide, on one scroll: what it
@@ -13,30 +12,10 @@ const DOWNLOAD_URL =
   process.env.NEXT_PUBLIC_DOWNLOAD_URL ??
   "https://github.com/TheHawkMikado/look-mom-no-hands/releases/latest";
 
-export default function Home() {
-  const [busy, setBusy] = useState<string | null>(null);
-  const [error, setError] = useState("");
+export const dynamic = "force-dynamic";
 
-  async function buy(plan: string) {
-    setBusy(plan);
-    setError("");
-    try {
-      const res = await fetch("/api/checkout", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ plan }),
-      });
-      const data = await res.json();
-      if (data.url) {
-        window.location.href = data.url;
-        return;
-      }
-      setError(data.error ?? "Could not start checkout. Try again in a moment.");
-    } catch {
-      setError("Network error — check your connection and try again.");
-    }
-    setBusy(null);
-  }
+export default async function Home() {
+  const plans = await storefront();
 
   return (
     <>
@@ -49,6 +28,7 @@ export default function Home() {
           <a href="#pricing">Pricing</a>
           <a href="#faq">FAQ</a>
           <a href={DOWNLOAD_URL}>Download</a>
+          <a href="/account">Sign in</a>
         </nav>
 
         <header className="hero">
@@ -145,71 +125,11 @@ export default function Home() {
           <p className="sub">
             Try it free for 7 days — no card. Billed weekly, cancel any time.
           </p>
-          <div className="prices">
-            <div className="price">
-              <span className="tag">Solo</span>
-              <div className="amount">
-                $3 <span>/ week</span>
-              </div>
-              <ul>
-                <li>2 Computers</li>
-                <li>1 Phone</li>
-                <li>Every update while active</li>
-                <li>Cancel any time</li>
-              </ul>
-              <button
-                className="btn btn-ghost"
-                disabled={busy !== null}
-                onClick={() => buy("solo")}
-              >
-                {busy === "solo" ? "Opening checkout…" : "Get Solo"}
-              </button>
-            </div>
+          <Pricing plans={plans} />
 
-            <div className="price featured">
-              <span className="tag">Family · most popular</span>
-              <div className="amount">
-                $9 <span>/ week</span>
-              </div>
-              <ul>
-                <li>9 Computers</li>
-                <li>9 Phones</li>
-                <li>Every update while active</li>
-                <li>Cancel any time</li>
-              </ul>
-              <button
-                className="btn btn-primary"
-                disabled={busy !== null}
-                onClick={() => buy("family")}
-              >
-                {busy === "family" ? "Opening checkout…" : "Get Family"}
-              </button>
-            </div>
-
-            <div className="price">
-              <span className="tag">Unlimited · resell rights</span>
-              <div className="amount">
-                $27 <span>/ week</span>
-              </div>
-              <ul>
-                <li>Unlimited* Computers &amp; Phones</li>
-                <li>Resell rights</li>
-                <li>Includes 27 Solo sub-users</li>
-                <li>Then $1 / week per extra user</li>
-              </ul>
-              <button
-                className="btn btn-ghost"
-                disabled={busy !== null}
-                onClick={() => buy("unlimited")}
-              >
-                {busy === "unlimited" ? "Opening checkout…" : "Get Unlimited"}
-              </button>
-            </div>
-          </div>
           <p className="footnote">
             *Unlimited includes 27 Solo sub-users. Each additional user is $1 / week.
           </p>
-          <p className="err">{error}</p>
         </div>
       </section>
 

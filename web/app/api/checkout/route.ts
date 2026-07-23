@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
-import { PRICE_ENV, planByName, stripe } from "@/lib/stripe";
+import { stripe } from "@/lib/stripe";
+import { priceIdForPlan } from "@/lib/catalogue";
 
 /**
  * POST /api/checkout  { plan } -> { url }
@@ -14,16 +15,15 @@ export const runtime = "nodejs";
 export async function POST(req: NextRequest) {
   const { plan = "solo" } = await req.json().catch(() => ({ plan: "solo" }));
 
-  const envName = PRICE_ENV[plan];
-  if (!envName || !planByName(plan)) {
+  if (typeof plan !== "string" || !/^[a-z0-9_-]{1,40}$/.test(plan)) {
     return NextResponse.json({ error: `Unknown plan "${plan}".` }, { status: 400 });
   }
-  // A known plan with no price id means the deployment is missing config, not
-  // that the buyer asked for something silly. Worth separating: the first is a
-  // 500 you need to go fix, the second is a 400 you can ignore.
-  const priceId = process.env[envName];
+  // A visible plan with no price id means the storefront is half-configured,
+  // not that the buyer asked for something silly. Worth separating: the first is
+  // something you need to go fix, the second is noise.
+  const priceId = await priceIdForPlan(plan);
   if (!priceId) {
-    console.error(`${envName} is not set — cannot sell the "${plan}" plan`);
+    console.error(`no Stripe price for plan "${plan}"`);
     return NextResponse.json(
       { error: "This plan isn't available for purchase yet. Try again shortly." },
       { status: 503 },

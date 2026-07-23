@@ -33,21 +33,21 @@ const CATALOGUE = [
   {
     key: "solo",
     env: "STRIPE_PRICE_SOLO",
-    name: "Look Ma, No Hands — Solo",
+    name: "Look Ma No Hands App - Solo",
     description: "2 computers and 1 phone. Billed weekly, cancel any time.",
     cents: 300,
   },
   {
     key: "family",
     env: "STRIPE_PRICE_FAMILY",
-    name: "Look Ma, No Hands — Family",
+    name: "Look Ma No Hands App - Family",
     description: "9 computers and 9 phones. Billed weekly, cancel any time.",
     cents: 900,
   },
   {
     key: "unlimited",
     env: "STRIPE_PRICE_UNLIMITED",
-    name: "Look Ma, No Hands — Unlimited",
+    name: "Look Ma No Hands App - Unlimited",
     description:
       "Unlimited computers and phones, plus resell rights. Includes 27 Solo " +
       "sub-users; each additional user is $1/week. Billed weekly.",

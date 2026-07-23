@@ -7,7 +7,8 @@ import {
   licenceForSession,
 } from "@/lib/db";
 import { mintLicenceKey } from "@/lib/licence";
-import { planForPrice, stripe } from "@/lib/stripe";
+import { stripe } from "@/lib/stripe";
+import { entitlementsForPrice } from "@/lib/catalogue";
 import { sendLicenceEmail } from "@/lib/email";
 
 /**
@@ -93,7 +94,7 @@ async function onCheckoutCompleted(session: any) {
   if (!email) throw new Error(`session ${session.id} has no email`);
 
   const items = await stripe().checkout.sessions.listLineItems(session.id, { limit: 1 });
-  const spec = planForPrice(items.data[0]?.price?.id ?? "");
+  const spec = await entitlementsForPrice(items.data[0]?.price?.id ?? "");
 
   const subscriptionId =
     typeof session.subscription === "string" ? session.subscription : session.subscription?.id;
