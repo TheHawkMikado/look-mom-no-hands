@@ -1,0 +1,24 @@
+<!-- Horizontal lockup: mark + wordmark, for the README, a site header, the DMG
+     background. Everything is currentColor, so it works on light or dark by
+     setting `color` on the parent (or `fill` on the <svg>).
+     The wordmark is live text in the system UI font — it renders as designed on
+     Apple platforms and falls back gracefully elsewhere. If you ever need it
+     pixel-identical everywhere (print, Windows, a design tool), convert the
+     text to outlines. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1485 340"
+     width="1485" height="340" fill="currentColor"
+     role="img" aria-label="Look Ma, No Hands">
+  <!-- Mark: geometry copied from mark.svg, halved and set on the wordmark's
+       optical centre line (spans x 40-336, y 70-270). -->
+  <g transform="translate(-68.5 -96) scale(0.5)"
+     fill="none" stroke="currentColor" stroke-width="76" stroke-linecap="round">
+    <path d="M344 654 L255 486"/>
+    <path d="M434 430 V654"/>
+    <path d="M546 370 V654"/>
+    <path d="M658 410 V654"/>
+    <path d="M770 490 V654"/>
+  </g>
+  <text x="400" y="216"
+        font-family="-apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Helvetica Neue', Helvetica, Arial, sans-serif"
+        font-size="128" font-weight="600" letter-spacing="-3">Look Ma, No Hands</text>
+</svg>

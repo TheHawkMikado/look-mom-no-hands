@@ -1,0 +1,15 @@
+<!-- "Look Ma, No Hands" — the mark.
+     Five capsules: four fingers rising in an arc plus a thumb tilted off to the
+     left. Read one way it's a raised hand, read the other it's an audio level
+     meter — which is the whole product in one shape.
+     Uses currentColor, so drop it anywhere and it inherits the text colour. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="197 312 614 400"
+     width="614" height="400" role="img" aria-label="Look Ma, No Hands">
+  <g fill="none" stroke="currentColor" stroke-width="76" stroke-linecap="round">
+    <path d="M344 654 L255 486"/>  <!-- thumb  -->
+    <path d="M434 430 V654"/>      <!-- index  -->
+    <path d="M546 370 V654"/>      <!-- middle -->
+    <path d="M658 410 V654"/>      <!-- ring   -->
+    <path d="M770 490 V654"/>      <!-- pinky  -->
+  </g>
+</svg>

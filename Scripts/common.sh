@@ -9,12 +9,19 @@ DEV_IDENTITY="Look Ma Dev"            # stable self-signed cert (dev_signing_set
 DMG_BASENAME="LookMaNoHands"          # frozen so download names stay stable
 
 # assemble_app <binary> <app-path> — minimal bundle around a single binary
+# The .icns is committed (Scripts/render_icon.sh regenerates it from
+# Assets/icon.svg), so building never depends on a rasteriser being installed.
 assemble_app() {
     local bin="$1" app="$2"
     rm -rf "${app}"
-    mkdir -p "${app}/Contents/MacOS"
+    mkdir -p "${app}/Contents/MacOS" "${app}/Contents/Resources"
     cp "${bin}" "${app}/Contents/MacOS/${NAME}"
     cp App/Info.plist "${app}/Contents/Info.plist"
+    if [ -f Assets/AppIcon.icns ]; then
+        cp Assets/AppIcon.icns "${app}/Contents/Resources/AppIcon.icns"
+    else
+        echo "  ! Assets/AppIcon.icns missing — run Scripts/render_icon.sh" >&2
+    fi
 }
 
 # sign_app <app-path> <identity> [extra codesign flags...] — identity "-" = ad-hoc.

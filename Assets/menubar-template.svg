@@ -1,0 +1,15 @@
+<!-- Menu-bar template image. Pure black on transparent: macOS recolours a
+     template automatically for light/dark menu bars and for the highlighted
+     state, so never give this one colour or a gradient.
+     Strokes are thinner than Assets/mark.svg so the five bars stay separated
+     at 16-18pt. Export as LookMomNoHandsTemplate.pdf (or @1x/@2x PNG). -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="197 312 614 400"
+     width="27.63" height="18" role="img" aria-label="Look Ma, No Hands">
+  <g fill="none" stroke="#000" stroke-width="62" stroke-linecap="round">
+    <path d="M344 654 L255 486"/>
+    <path d="M434 430 V654"/>
+    <path d="M546 370 V654"/>
+    <path d="M658 410 V654"/>
+    <path d="M770 490 V654"/>
+  </g>
+</svg>

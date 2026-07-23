@@ -10,6 +10,10 @@
     <string>com.lookmomnohands.app</string>
     <key>CFBundleExecutable</key>
     <string>LookMomNoHands</string>
+    <!-- No Dock icon (LSUIElement below), but this is still what Finder, the
+         About box, notifications, the privacy panes and the DMG all show. -->
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>

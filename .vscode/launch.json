@@ -1,0 +1,24 @@
+{
+    "configurations": [
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:look-mom-no-hands}",
+            "name": "Debug LookMomNoHands",
+            "target": "LookMomNoHands",
+            "configuration": "debug",
+            "preLaunchTask": "swift: Build Debug LookMomNoHands"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:look-mom-no-hands}",
+            "name": "Release LookMomNoHands",
+            "target": "LookMomNoHands",
+            "configuration": "release",
+            "preLaunchTask": "swift: Build Release LookMomNoHands"
+        }
+    ]
+}
