@@ -234,7 +234,13 @@ final class ClaudeClient: @unchecked Sendable {
                 "type": "object",
                 "additionalProperties": false,
                 "properties": [
-                    "say": ["type": "string"],
+                    // Every character here is spoken aloud and billed per character
+                    // by the TTS provider, so length is a running cost, not just a
+                    // style choice. Confirmations are also heard while the action is
+                    // already happening — the user wants to know it landed, not to
+                    // sit through a recap of what they just asked for.
+                    "say": ["type": "string",
+                            "description": "What to speak aloud. Keep it under 12 words. Confirm in the fewest words that carry the outcome (\"Opening YouTube\", \"Done\", \"Sent\") — never restate the request, never narrate the steps, never list what you are about to do. Only go longer when answering a question the user actually asked, or when `blocked` is true and they need to know why."],
                     "steps": ["type": "array", "items": step],
                     "clarify": [
                         "type": "object",
@@ -278,15 +284,45 @@ final class ClaudeClient: @unchecked Sendable {
         var messages: [[String: Any]] = dialogue.map { ["role": $0.role, "content": $0.content] }
         messages.append(["role": "user", "content": "Spoken request: \"\(transcript)\""])
 
+        // Prompt caching. Render order is tools -> system -> messages, and caching is
+        // a prefix match: one changed byte invalidates everything after it. The tool
+        // definition above is by far the largest thing we send and never varies, so a
+        // breakpoint on it turns ~3.7k tokens of input from full price into a cache
+        // read (~0.1x) on every command after the first.
+        //
+        // This is why `vocabulary` (the user's stable word list and durable facts) is
+        // kept in its own leading system block while `context` and `screen` — which
+        // change every single turn — follow it. Interleaving them, as this did before,
+        // put per-turn bytes ahead of the stable ones and made the whole prefix
+        // uncacheable.
+        //
+        // Caveat worth knowing: claude-haiku-4-5 only caches prefixes of 4096+ tokens
+        // and silently declines below that — no error, just full price forever. The
+        // tool sits close to that line, so verify with usage.cache_read_input_tokens
+        // rather than assuming this is working.
+        var cachedTool = tool
+        cachedTool["cache_control"] = ["type": "ephemeral"]
+
         // No effort/thinking on this path regardless of model — latency-critical.
         var body: [String: Any] = [
             "model": model.rawValue,
             "max_tokens": 2048,
-            "tools": [tool],
+            "tools": [cachedTool],
             "tool_choice": ["type": "tool", "name": "emit_plan"],
             "messages": messages
         ]
-        let system = [vocabulary, context, screen].filter { !$0.isEmpty }.joined(separator: "\n\n")
+
+        var system: [[String: Any]] = []
+        if !vocabulary.isEmpty {
+            // Stable across turns, so it extends the cached prefix rather than
+            // breaking it. The breakpoint goes here, covering tools + this block.
+            system.append(["type": "text", "text": vocabulary,
+                           "cache_control": ["type": "ephemeral"]])
+        }
+        let perTurn = [context, screen].filter { !$0.isEmpty }.joined(separator: "\n\n")
+        if !perTurn.isEmpty {
+            system.append(["type": "text", "text": perTurn])
+        }
         if !system.isEmpty { body["system"] = system }
         return body
     }

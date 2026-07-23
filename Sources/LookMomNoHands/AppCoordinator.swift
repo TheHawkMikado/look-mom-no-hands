@@ -1148,8 +1148,14 @@ final class AppCoordinator: ObservableObject {
                 screen = try await gatherScreen(for: text, round: round)
             }
             let context = buildPlannerContext(command: text, taskProgress: performedAll)
+            // `vocabulary` is the cached half of the prompt, so only genuinely stable
+            // things belong here — the word list and durable facts about the user.
+            // Anything that changes between turns goes in `context`/`screen` instead,
+            // or it invalidates the cache on every command.
+            let stable = [vocabulary.promptContext, knowledge.promptContext]
+                .filter { !$0.isEmpty }.joined(separator: "\n\n")
             let plan = try await claude.parsePlan(text, dialogue: dialogue,
-                                                  vocabulary: vocabulary.promptContext,
+                                                  vocabulary: stable,
                                                   screen: screen, context: context)
             try Task.checkCancellation()
             store.log("claude", "round \(round): \(plan.steps.count) step(s) complete=\(plan.goalComplete)\(plan.clarify != nil ? " +question" : "")")
@@ -1543,8 +1549,10 @@ final class AppCoordinator: ObservableObject {
     }
 
     private func buildPlannerContext(command: String, taskProgress: [String]) -> String {
-        var parts = [knowledge.promptContext,
-                     workingContext.promptText,
+        // knowledge.promptContext deliberately excluded — it's stable, so it rides in
+        // the cached prefix alongside the vocabulary (see the parsePlan call site).
+        // Everything below changes turn to turn.
+        var parts = [workingContext.promptText,
                      procedures.promptContext(for: command),
                      environment.snapshot.promptText,
                      recentActionsBlock()]
