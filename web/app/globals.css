@@ -1,14 +1,19 @@
 /* Hand-written rather than a utility framework: this is one page plus a receipt
    page, and a build-step-free stylesheet is less to keep working over time. */
 
+/* Accent tracks the app icon's gradient (#5B4CFF → #B23BF0) so the site and the
+   thing you download look like one product. Each theme picks the end of that
+   ramp that clears 4.5:1 against its own background. */
 :root {
   --bg: #0b0c0f;
   --panel: #14161b;
   --line: #262a33;
   --ink: #f2f4f8;
   --muted: #9aa3b2;
-  --accent: #6ee7a8;
-  --accent-ink: #06281a;
+  --accent: #a78bff;
+  --accent-ink: #150733;
+  --brand-a: #5b4cff;
+  --brand-b: #b23bf0;
   --radius: 14px;
   --page: 1080px;
 }
@@ -20,7 +25,7 @@
     --line: #e4e7ec;
     --ink: #11141a;
     --muted: #5b6474;
-    --accent: #10935c;
+    --accent: #6d28d9;
     --accent-ink: #ffffff;
   }
 }
@@ -46,13 +51,29 @@ nav {
   padding: 22px 0;
   border-bottom: 1px solid var(--line);
 }
-nav .brand { font-weight: 650; letter-spacing: -0.02em; margin-right: auto; }
+nav .brand { margin-right: auto; }
 nav a { color: var(--muted); text-decoration: none; font-size: 14px; }
 nav a:hover { color: var(--ink); }
 
+.lockup {
+  display: inline-flex; align-items: center; gap: 10px;
+  font-weight: 650; letter-spacing: -0.02em;
+  color: var(--ink);
+}
+/* The mark's own colour, not the text's — it's the one place the brand hue
+   appears at small size, and it has to survive both themes. */
+.lockup svg { color: var(--accent); flex: none; }
+
 /* ---------- hero ---------- */
 
-header.hero { padding: 96px 0 72px; text-align: center; }
+header.hero { padding: 84px 0 72px; text-align: center; }
+
+.hero-mark {
+  color: var(--accent);
+  margin: 0 auto 26px;
+  display: block;
+  filter: drop-shadow(0 6px 22px color-mix(in srgb, var(--accent) 45%, transparent));
+}
 
 h1 {
   font-size: clamp(38px, 6vw, 66px);
@@ -164,6 +185,11 @@ section > .wrap > p.sub { color: var(--muted); margin: 0 0 40px; max-width: 620p
   content: "→"; position: absolute; left: 0; color: var(--accent);
 }
 .price .btn { justify-content: center; margin-top: auto; }
+
+.footnote {
+  color: var(--muted); font-size: 13px; text-align: center;
+  margin: 24px auto 0; max-width: 60ch;
+}
 
 .err { color: #ff8080; font-size: 13.5px; min-height: 20px; margin: 12px 0 0; text-align: center; }
 

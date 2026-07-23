@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { stripe } from "@/lib/stripe";
+import { PRICE_ENV, planByName, stripe } from "@/lib/stripe";
 
 /**
  * POST /api/checkout  { plan } -> { url }
@@ -11,17 +11,11 @@ import { stripe } from "@/lib/stripe";
 
 export const runtime = "nodejs";
 
-const PRICE_ENV: Record<string, string> = {
-  personal: "STRIPE_PRICE_PERSONAL",
-  pro: "STRIPE_PRICE_PRO",
-  yearly: "STRIPE_PRICE_YEARLY",
-};
-
 export async function POST(req: NextRequest) {
-  const { plan = "pro" } = await req.json().catch(() => ({ plan: "pro" }));
+  const { plan = "solo" } = await req.json().catch(() => ({ plan: "solo" }));
 
   const envName = PRICE_ENV[plan];
-  if (!envName) {
+  if (!envName || !planByName(plan)) {
     return NextResponse.json({ error: `Unknown plan "${plan}".` }, { status: 400 });
   }
   // A known plan with no price id means the deployment is missing config, not
@@ -37,15 +31,13 @@ export async function POST(req: NextRequest) {
   }
 
   const origin = process.env.SITE_URL ?? req.nextUrl.origin;
-  const isSubscription = plan === "yearly";
 
   try {
     const session = await stripe().checkout.sessions.create({
-      mode: isSubscription ? "subscription" : "payment",
+      // Every plan bills weekly, so there is no one-off path any more. Stripe
+      // always creates a customer for a subscription, hence no customer_creation.
+      mode: "subscription",
       line_items: [{ price: priceId, quantity: 1 }],
-      // The licence is emailed and shown on the success page, so an address is
-      // mandatory — without it a customer who closes the tab has no way back in.
-      customer_creation: isSubscription ? undefined : "always",
       success_url: `${origin}/success?session_id={CHECKOUT_SESSION_ID}`,
       cancel_url: `${origin}/#pricing`,
       allow_promotion_codes: true,

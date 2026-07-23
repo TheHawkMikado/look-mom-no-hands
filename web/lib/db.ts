@@ -64,6 +64,36 @@ export async function ensureSchema() {
       PRIMARY KEY (key, device)
     )`;
   await db`CREATE INDEX IF NOT EXISTS licences_email_idx ON licences (email)`;
+
+  // Added after the move to weekly billing. Separate ALTERs rather than a
+  // rewritten CREATE, so deployments that already have the old table pick these
+  // up instead of skipping the whole statement on IF NOT EXISTS.
+  await db`ALTER TABLE licences ADD COLUMN IF NOT EXISTS stripe_subscription text`;
+  await db`ALTER TABLE licences ADD COLUMN IF NOT EXISTS phones integer NOT NULL DEFAULT 0`;
+  await db`ALTER TABLE licences ADD COLUMN IF NOT EXISTS sub_users integer NOT NULL DEFAULT 0`;
+  await db`ALTER TABLE licences ADD COLUMN IF NOT EXISTS resell boolean NOT NULL DEFAULT false`;
+  await db`CREATE INDEX IF NOT EXISTS licences_subscription_idx ON licences (stripe_subscription)`;
+}
+
+/**
+ * Pushes a licence's expiry out to the end of the period Stripe just billed.
+ * Called on every renewal — a weekly subscriber's licence is only ever valid a
+ * week at a time, so this is what keeps a paying customer working.
+ */
+export async function extendSubscription(subscriptionId: string, expiresAt: Date) {
+  const db = sql();
+  await db`
+    UPDATE licences SET expires_at = ${expiresAt}
+     WHERE stripe_subscription = ${subscriptionId}`;
+}
+
+/** Ends a licence now — cancellation, or a final failed payment. */
+export async function endSubscription(subscriptionId: string) {
+  const db = sql();
+  await db`
+    UPDATE licences SET expires_at = now()
+     WHERE stripe_subscription = ${subscriptionId}
+       AND (expires_at IS NULL OR expires_at > now())`;
 }
 
 export async function findLicence(key: string): Promise<Licence | null> {
@@ -80,14 +110,20 @@ export async function createLicence(l: {
   plan: string;
   expiresAt: Date | null;
   seats: number;
+  phones: number;
+  subUsers: number;
+  resell: boolean;
   stripeSession: string;
   stripeCustomer: string | null;
+  stripeSubscription: string | null;
 }) {
   const db = sql();
   await db`
-    INSERT INTO licences (key, email, plan, expires_at, seats, stripe_session, stripe_customer)
-    VALUES (${l.key}, ${l.email}, ${l.plan}, ${l.expiresAt}, ${l.seats},
-            ${l.stripeSession}, ${l.stripeCustomer})
+    INSERT INTO licences (key, email, plan, expires_at, seats, phones, sub_users,
+                          resell, stripe_session, stripe_customer, stripe_subscription)
+    VALUES (${l.key}, ${l.email}, ${l.plan}, ${l.expiresAt}, ${l.seats}, ${l.phones},
+            ${l.subUsers}, ${l.resell}, ${l.stripeSession}, ${l.stripeCustomer},
+            ${l.stripeSubscription})
     ON CONFLICT (stripe_session) DO NOTHING`;
 }
 

@@ -23,24 +23,69 @@ export function stripe(): Stripe {
   return client;
 }
 
-/** What each Stripe Price entitles the buyer to. */
+/** What a plan entitles the subscriber to. */
 export interface PlanSpec {
   plan: string;
-  seats: number;
-  /** null = perpetual licence; a number = months until the licence lapses. */
-  months: number | null;
+  /** Macs that may be activated at once. */
+  computers: number;
+  /** Phones allowed. Sold but not yet enforceable — see the note below. */
+  phones: number;
+  /** Solo sub-licences a reseller may issue before overage billing starts. */
+  subUsers: number;
+  /** Resellers may issue sub-licences under their own account. */
+  resell: boolean;
+}
+
+/** Stands in for "unlimited" — a real integer keeps the seat check branch-free. */
+export const UNLIMITED = 9_999;
+
+/**
+ * The catalogue. Every plan bills weekly.
+ *
+ * Phone counts are recorded but nothing enforces them: activation is keyed on a
+ * Mac's hashed IOPlatformUUID and there is no iOS client yet. When one exists it
+ * should register against a separate `phones` allowance rather than spending a
+ * computer seat.
+ *
+ * Sub-user counts are likewise recorded but unissued — reseller provisioning
+ * (minting Solo keys under a parent licence, and metering the $1/wk overage) is
+ * not built. Selling Unlimited before it is means fulfilling those by hand.
+ */
+const PLANS: Record<string, PlanSpec> = {
+  solo: { plan: "solo", computers: 2, phones: 1, subUsers: 0, resell: false },
+  family: { plan: "family", computers: 9, phones: 9, subUsers: 0, resell: false },
+  unlimited: {
+    plan: "unlimited",
+    computers: UNLIMITED,
+    phones: UNLIMITED,
+    subUsers: 27,
+    resell: true,
+  },
+};
+
+/** Env var holding each plan's Stripe Price id. */
+export const PRICE_ENV: Record<string, string> = {
+  solo: "STRIPE_PRICE_SOLO",
+  family: "STRIPE_PRICE_FAMILY",
+  unlimited: "STRIPE_PRICE_UNLIMITED",
+};
+
+export function planByName(name: string): PlanSpec | null {
+  return PLANS[name] ?? null;
 }
 
 /**
- * Maps a Stripe Price ID to entitlements. Keeping this server-side means the
- * seat count and duration can't be tampered with from the checkout call — the
- * client only ever names a plan, never its terms.
+ * Resolves a Stripe Price id back to its entitlements. Server-side on purpose:
+ * the browser only ever names a plan, so nobody can open devtools and check out
+ * with a seat count they invented.
  */
 export function planForPrice(priceId: string): PlanSpec {
-  const table: Record<string, PlanSpec> = {
-    [process.env.STRIPE_PRICE_PERSONAL ?? "__personal"]: { plan: "personal", seats: 2, months: null },
-    [process.env.STRIPE_PRICE_PRO ?? "__pro"]: { plan: "pro", seats: 5, months: null },
-    [process.env.STRIPE_PRICE_YEARLY ?? "__yearly"]: { plan: "yearly", seats: 5, months: 12 },
-  };
-  return table[priceId] ?? { plan: "personal", seats: 2, months: null };
+  for (const [name, envVar] of Object.entries(PRICE_ENV)) {
+    if (priceId && process.env[envVar] === priceId) return PLANS[name];
+  }
+  // An unrecognised price means the catalogue and Stripe have drifted. Fall back
+  // to the smallest plan: under-serving is recoverable by hand, over-serving
+  // (handing out resell rights) is not.
+  console.error(`No plan matches price ${priceId} — defaulting to solo`);
+  return PLANS.solo;
 }

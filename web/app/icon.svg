@@ -1,0 +1,68 @@
+<!-- macOS app icon master. 1024x1024 with the 824x824 superellipse body Apple
+     expects, so it lines up with every other icon in the Dock and in Finder.
+     Scripts/render_icon.sh rasterises this into Assets/AppIcon.icns. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024"
+     width="1024" height="1024" role="img" aria-label="Look Ma, No Hands">
+  <defs>
+    <linearGradient id="body" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#5B4CFF"/>
+      <stop offset="0.55" stop-color="#8B3DFB"/>
+      <stop offset="1" stop-color="#B23BF0"/>
+    </linearGradient>
+    <!-- Light falling from above: keeps the face from reading as flat vinyl. -->
+    <radialGradient id="sheen" cx="0.5" cy="0.06" r="0.78">
+      <stop offset="0" stop-color="#fff" stop-opacity="0.28"/>
+      <stop offset="1" stop-color="#fff" stop-opacity="0"/>
+    </radialGradient>
+    <!-- userSpaceOnUse is mandatory here: four of the five bars are perfectly
+         vertical, so their object bounding box has zero width and an
+         objectBoundingBox gradient would leave them unpainted. -->
+    <linearGradient id="bar" gradientUnits="userSpaceOnUse" x1="0" y1="332" x2="0" y2="692">
+      <stop offset="0" stop-color="#fff"/>
+      <stop offset="1" stop-color="#EDE7FF"/>
+    </linearGradient>
+    <filter id="lift" x="-25%" y="-25%" width="150%" height="150%">
+      <feDropShadow dx="0" dy="10" stdDeviation="14"
+                    flood-color="#2A0A63" flood-opacity="0.28"/>
+    </filter>
+    <path id="squircle" d="M924.0 512.0L923.8 635.4L923.2 674.7L922.2 703.2L920.8 726.3L919.0
+      746.0L916.8 763.2L914.2 778.6L911.2 792.6L907.7 805.3L903.8 817.0L899.5 827.7L894.7
+      837.7L889.4 846.9L883.7 855.4L877.4 863.3L870.7 870.7L863.3 877.4L855.4 883.7L846.9
+      889.4L837.7 894.7L827.7 899.5L817.0 903.8L805.3 907.7L792.6 911.2L778.6 914.2L763.2
+      916.8L746.0 919.0L726.3 920.8L703.2 922.2L674.7 923.2L635.4 923.8L512.0 924.0L388.6
+      923.8L349.3 923.2L320.8 922.2L297.7 920.8L278.0 919.0L260.8 916.8L245.4 914.2L231.4
+      911.2L218.7 907.7L207.0 903.8L196.3 899.5L186.3 894.7L177.1 889.4L168.6 883.7L160.7
+      877.4L153.3 870.7L146.6 863.3L140.3 855.4L134.6 846.9L129.3 837.7L124.5 827.7L120.2
+      817.0L116.3 805.3L112.8 792.6L109.8 778.6L107.2 763.2L105.0 746.0L103.2 726.3L101.8
+      703.2L100.8 674.7L100.2 635.4L100.0 512.0L100.2 388.6L100.8 349.3L101.8 320.8L103.2
+      297.7L105.0 278.0L107.2 260.8L109.8 245.4L112.8 231.4L116.3 218.7L120.2 207.0L124.5
+      196.3L129.3 186.3L134.6 177.1L140.3 168.6L146.6 160.7L153.3 153.3L160.7 146.6L168.6
+      140.3L177.1 134.6L186.3 129.3L196.3 124.5L207.0 120.2L218.7 116.3L231.4 112.8L245.4
+      109.8L260.8 107.2L278.0 105.0L297.7 103.2L320.8 101.8L349.3 100.8L388.6 100.2L512.0
+      100.0L635.4 100.2L674.7 100.8L703.2 101.8L726.3 103.2L746.0 105.0L763.2 107.2L778.6
+      109.8L792.6 112.8L805.3 116.3L817.0 120.2L827.7 124.5L837.7 129.3L846.9 134.6L855.4
+      140.3L863.3 146.6L870.7 153.3L877.4 160.7L883.7 168.6L889.4 177.1L894.7 186.3L899.5
+      196.3L903.8 207.0L907.7 218.7L911.2 231.4L914.2 245.4L916.8 260.8L919.0 278.0L920.8
+      297.7L922.2 320.8L923.2 349.3L923.8 388.6Z"/>
+    <clipPath id="clip"><use href="#squircle"/></clipPath>
+  </defs>
+
+  <use href="#squircle" fill="url(#body)"/>
+  <use href="#squircle" fill="url(#sheen)"/>
+  <!-- Hairline top edge, clipped to the body: the glassy rim on Apple's icons. -->
+  <g clip-path="url(#clip)">
+    <use href="#squircle" fill="none" stroke="#fff" stroke-opacity="0.35" stroke-width="4"/>
+  </g>
+
+  <!-- The mark, scaled about the centre so it fills the body the way Apple's
+       own icons do without crowding the corners. -->
+  <g transform="translate(512 512) scale(1.18) translate(-512 -512)"
+     filter="url(#lift)" fill="none" stroke="url(#bar)"
+     stroke-width="76" stroke-linecap="round">
+    <path d="M344 654 L255 486"/>  <!-- thumb  -->
+    <path d="M434 430 V654"/>      <!-- index  -->
+    <path d="M546 370 V654"/>      <!-- middle -->
+    <path d="M658 410 V654"/>      <!-- ring   -->
+    <path d="M770 490 V654"/>      <!-- pinky  -->
+  </g>
+</svg>

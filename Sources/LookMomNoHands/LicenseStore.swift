@@ -32,9 +32,19 @@ enum LicenseConfig {
 
     /// How long a fresh install runs unlicensed.
     static let trialDays = 7
-    /// A token whose `exp` has passed still works this long, so an expiring card
-    /// or a lapsed subscription degrades into a warning rather than a hard stop.
-    static let expiryGraceDays = 14
+
+    /// A token whose `exp` has passed still works this long, so a card that
+    /// fails on a Friday degrades into a warning rather than a dead app.
+    ///
+    /// Kept short deliberately: billing is weekly, so a generous grace period is
+    /// a large fraction of a paid week given away on every cancellation. Three
+    /// days covers a weekend and the first of Stripe's dunning retries.
+    static let expiryGraceDays = 3
+
+    /// Refresh the token once it's within this long of expiring. Tokens are
+    /// minted for one billing period, so without this every weekly subscriber
+    /// would lock themselves out seven days after activating.
+    static let refreshWithinDays = 3.0
 
     static var isConfigured: Bool { publicKeyHex.contains(where: { $0 != "0" }) }
 }
@@ -106,9 +116,16 @@ final class LicenseStore: ObservableObject {
     @Published private(set) var lastError: String?
 
     private let tokenAccount = "license-token"
+    private let keyAccount = "license-key"
     private let trialAccount = "trial-started"
 
-    init() { refresh() }
+    init() {
+        refresh()
+        // Weekly billing means the stored token is short-lived by design, so top
+        // it up in the background at launch. Silent: a subscriber in good
+        // standing should never see this happen.
+        Task { await refreshTokenIfNeeded() }
+    }
 
     // MARK: - State
 
@@ -161,16 +178,43 @@ final class LicenseStore: ObservableObject {
     /// Trades a purchase key for a signed token. Errors surface on `lastError`
     /// rather than throwing — the caller is a SwiftUI button.
     func activate(key rawKey: String) async {
+        await exchange(key: rawKey, silent: false)
+    }
+
+    /// Swaps the stored key for a fresh token when the current one is close to
+    /// running out. No-ops when there's nothing to renew, when the token still
+    /// has plenty of life, or when the licence is perpetual (`exp == 0`).
+    ///
+    /// Failure is deliberately silent: the customer keeps the token they have
+    /// and the grace window covers a spell offline. Nagging someone on a plane
+    /// about a renewal they can't action would be worse than saying nothing.
+    func refreshTokenIfNeeded() async {
+        guard LicenseConfig.isConfigured,
+              let key = KeychainStore.load(account: keyAccount),
+              let token = KeychainStore.load(account: tokenAccount),
+              case .success(let claims) = Self.verify(token),
+              let expiry = claims.expiryDate
+        else { return }
+
+        let threshold = expiry.addingTimeInterval(-LicenseConfig.refreshWithinDays * 86_400)
+        guard Date() >= threshold else { return }
+
+        await exchange(key: key, silent: true)
+    }
+
+    private func exchange(key rawKey: String, silent: Bool) async {
         let key = rawKey.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
         guard !key.isEmpty else { return }
         guard LicenseConfig.isConfigured else {
-            lastError = "This build has no license public key compiled in."
+            if !silent { lastError = "This build has no license public key compiled in." }
             return
         }
 
-        isActivating = true
-        lastError = nil
-        defer { isActivating = false }
+        if !silent {
+            isActivating = true
+            lastError = nil
+        }
+        defer { if !silent { isActivating = false } }
 
         var req = URLRequest(url: LicenseConfig.activationURL)
         req.httpMethod = "POST"
@@ -185,8 +229,10 @@ final class LicenseStore: ObservableObject {
             let payload = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
 
             guard code == 200, let token = payload?["token"] as? String else {
-                lastError = (payload?["error"] as? String)
-                    ?? "Activation failed (HTTP \(code)). Check the key and try again."
+                if !silent {
+                    lastError = (payload?["error"] as? String)
+                        ?? "Activation failed (HTTP \(code)). Check the key and try again."
+                }
                 return
             }
             // Never trust the server blindly — the token has to verify against the
@@ -194,16 +240,24 @@ final class LicenseStore: ObservableObject {
             switch Self.verify(token) {
             case .success:
                 KeychainStore.save(token, account: tokenAccount)
+                // Keep the key too: it's what lets the weekly renewal above run
+                // without asking the customer to paste it again every seven days.
+                KeychainStore.save(key, account: keyAccount)
                 refresh()
             case .failure(let err):
-                lastError = "Server returned a token this build can't verify: \(err.message)"
+                if !silent {
+                    lastError = "Server returned a token this build can't verify: \(err.message)"
+                }
             }
         } catch {
-            lastError = "Couldn't reach nohandsapp.com: \(error.localizedDescription)"
+            if !silent {
+                lastError = "Couldn't reach nohandsapp.com: \(error.localizedDescription)"
+            }
         }
     }
 
     func deactivate() {
+        KeychainStore.delete(account: keyAccount)
         KeychainStore.delete(account: tokenAccount)
         refresh()
     }

@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { Lockup, Mark } from "@/components/Logo";
 
 /**
  * Landing page. Everything the buyer needs to decide, on one scroll: what it
@@ -41,7 +42,9 @@ export default function Home() {
     <>
       <div className="wrap">
         <nav>
-          <span className="brand">Look Ma, No Hands</span>
+          <span className="brand">
+            <Lockup />
+          </span>
           <a href="#how">How it works</a>
           <a href="#pricing">Pricing</a>
           <a href="#faq">FAQ</a>
@@ -49,6 +52,7 @@ export default function Home() {
         </nav>
 
         <header className="hero">
+          <Mark size={92} className="hero-mark" />
           <h1>
             Run your Mac by <span className="said">saying so</span>.
           </h1>
@@ -139,68 +143,72 @@ export default function Home() {
         <div className="wrap">
           <h2>Pricing</h2>
           <p className="sub">
-            Try it free for 7 days — no card. One key activates several of your own
-            Macs.
+            Try it free for 7 days — no card. Billed weekly, cancel any time.
           </p>
           <div className="prices">
             <div className="price">
-              <span className="tag">Personal</span>
+              <span className="tag">Solo</span>
               <div className="amount">
-                $39 <span>once</span>
+                $3 <span>/ week</span>
               </div>
               <ul>
-                <li>2 Macs</li>
-                <li>Yours permanently</li>
-                <li>A year of updates</li>
-              </ul>
-              <button
-                className="btn btn-ghost"
-                disabled={busy !== null}
-                onClick={() => buy("personal")}
-              >
-                {busy === "personal" ? "Opening checkout…" : "Buy Personal"}
-              </button>
-            </div>
-
-            <div className="price featured">
-              <span className="tag">Pro · most popular</span>
-              <div className="amount">
-                $79 <span>once</span>
-              </div>
-              <ul>
-                <li>5 Macs</li>
-                <li>Yours permanently</li>
-                <li>Two years of updates</li>
-                <li>Priority support</li>
-              </ul>
-              <button
-                className="btn btn-primary"
-                disabled={busy !== null}
-                onClick={() => buy("pro")}
-              >
-                {busy === "pro" ? "Opening checkout…" : "Buy Pro"}
-              </button>
-            </div>
-
-            <div className="price">
-              <span className="tag">Yearly</span>
-              <div className="amount">
-                $29 <span>/ year</span>
-              </div>
-              <ul>
-                <li>5 Macs</li>
+                <li>2 Computers</li>
+                <li>1 Phone</li>
                 <li>Every update while active</li>
                 <li>Cancel any time</li>
               </ul>
               <button
                 className="btn btn-ghost"
                 disabled={busy !== null}
-                onClick={() => buy("yearly")}
+                onClick={() => buy("solo")}
               >
-                {busy === "yearly" ? "Opening checkout…" : "Subscribe"}
+                {busy === "solo" ? "Opening checkout…" : "Get Solo"}
+              </button>
+            </div>
+
+            <div className="price featured">
+              <span className="tag">Family · most popular</span>
+              <div className="amount">
+                $9 <span>/ week</span>
+              </div>
+              <ul>
+                <li>9 Computers</li>
+                <li>9 Phones</li>
+                <li>Every update while active</li>
+                <li>Cancel any time</li>
+              </ul>
+              <button
+                className="btn btn-primary"
+                disabled={busy !== null}
+                onClick={() => buy("family")}
+              >
+                {busy === "family" ? "Opening checkout…" : "Get Family"}
+              </button>
+            </div>
+
+            <div className="price">
+              <span className="tag">Unlimited · resell rights</span>
+              <div className="amount">
+                $27 <span>/ week</span>
+              </div>
+              <ul>
+                <li>Unlimited* Computers &amp; Phones</li>
+                <li>Resell rights</li>
+                <li>Includes 27 Solo sub-users</li>
+                <li>Then $1 / week per extra user</li>
+              </ul>
+              <button
+                className="btn btn-ghost"
+                disabled={busy !== null}
+                onClick={() => buy("unlimited")}
+              >
+                {busy === "unlimited" ? "Opening checkout…" : "Get Unlimited"}
               </button>
             </div>
           </div>
+          <p className="footnote">
+            *Unlimited includes 27 Solo sub-users. Each additional user is $1 / week.
+          </p>
           <p className="err">{error}</p>
         </div>
       </section>

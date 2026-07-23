@@ -55,15 +55,48 @@ No migration step: `ensureSchema()` creates the tables on first request.
 
 ### 3. Stripe
 
-1. Create three **Prices** in the dashboard and copy the `price_…` ids into
-   `STRIPE_PRICE_PERSONAL`, `STRIPE_PRICE_PRO`, `STRIPE_PRICE_YEARLY`.
-   The plan → seats/duration mapping lives in `lib/stripe.ts`, server-side, so
-   the browser can never ask for terms it didn't pay for.
-2. Add a webhook endpoint pointing at `https://nohandsapp.com/api/stripe/webhook`,
-   subscribed to `checkout.session.completed` and `customer.subscription.deleted`.
-   Copy its signing secret into `STRIPE_WEBHOOK_SECRET`.
+1. Create three **recurring Prices billed every 1 week** and copy the `price_…`
+   ids into `STRIPE_PRICE_SOLO`, `STRIPE_PRICE_FAMILY`, `STRIPE_PRICE_UNLIMITED`.
+   They must be recurring — checkout runs in subscription mode for every plan,
+   and a one-off price will simply fail. The plan → entitlement mapping lives in
+   `lib/stripe.ts`, server-side, so the browser can never ask for terms it
+   didn't pay for.
+
+   | Plan | Price | Computers | Phones | Notes |
+   |---|---|---|---|---|
+   | Solo | $3/wk | 2 | 1 | |
+   | Family | $9/wk | 9 | 9 | |
+   | Unlimited | $27/wk | unlimited | unlimited | resell rights, 27 sub-users |
+
+2. Add a webhook endpoint at `https://nohandsapp.com/api/stripe/webhook`
+   subscribed to `checkout.session.completed`, **`invoice.paid`** and
+   `customer.subscription.deleted`. Copy the signing secret into
+   `STRIPE_WEBHOOK_SECRET`.
+
+   `invoice.paid` is not optional. Licences are only ever valid to the end of
+   the period Stripe has actually collected for, so it is the event that keeps
+   paying subscribers working. Miss it and everyone stops after week one.
+
 3. Turn on **Stripe Tax** if you want VAT/sales tax calculated (`automatic_tax`
    is already enabled in the checkout call).
+
+> **Fees bite harder at $3.** Stripe's 2.9% + 30¢ costs about 39¢ on a $3
+> charge — roughly 13% of revenue, versus ~3.5% on a monthly $13. Weekly billing
+> also means 4× the charges and 4× the chances of a card declining. Worth
+> pricing in, or offering a monthly option alongside.
+
+### Not built yet: phones and resell sub-users
+
+The catalogue sells both; neither is implemented.
+
+- **Phones.** The app is a macOS menu-bar app and activation is keyed on a Mac's
+  hashed `IOPlatformUUID`. There is no iOS client, so a phone allowance can't be
+  spent or enforced. `lib/stripe.ts` records the counts, ready for when one
+  exists.
+- **Resell sub-users.** Unlimited promises 27 Solo sub-users and $1/wk for each
+  one after. Minting sub-licences under a parent, and metering that overage back
+  to Stripe, is not written. Selling Unlimited today means issuing those keys by
+  hand and invoicing overage yourself.
 
 ### 4. Vercel
 

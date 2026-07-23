@@ -88,11 +88,42 @@ final class LicenseTests: XCTestCase {
 
     func testExpiredLicenceKeepsWorkingInsideTheGraceWindow() {
         let yesterday = Date().addingTimeInterval(-86_400).timeIntervalSince1970
-        let claims = LicenseClaims(email: "a@b.c", plan: "yearly", exp: yesterday,
+        let claims = LicenseClaims(email: "a@b.c", plan: "solo", exp: yesterday,
                                    issuedAt: 0, device: device)
-        // One day past expiry is well inside the 14-day grace period.
         XCTAssertNotNil(claims.expiryDate)
         XCTAssertTrue(claims.expiryDate! < Date())
+    }
+
+    // MARK: - Weekly billing
+
+    /// Billing is weekly, so a grace period at or beyond a week would hand every
+    /// canceller a free period on the way out.
+    func testGraceIsShorterThanABillingWeek() {
+        XCTAssertLessThan(LicenseConfig.expiryGraceDays, 7,
+                          "grace must stay well under the 7-day billing period")
+    }
+
+    /// The renewal window has to open before the token dies, or the refresh can
+    /// only ever fire once the customer is already locked out.
+    func testRenewalWindowOpensBeforeExpiry() {
+        XCTAssertGreaterThan(LicenseConfig.refreshWithinDays, 0)
+        XCTAssertLessThan(LicenseConfig.refreshWithinDays, 7,
+                          "must open inside the billing period, not before it starts")
+        // And there must be real overlap with the grace window, so a Mac that was
+        // asleep past the expiry date still gets a chance to renew itself.
+        XCTAssertGreaterThanOrEqual(
+            Double(LicenseConfig.expiryGraceDays) + LicenseConfig.refreshWithinDays, 5,
+            "grace + renewal window should span a long weekend offline")
+    }
+
+    /// A weekly token must not read as perpetual — `exp == 0` is the only thing
+    /// that means "never expires", and a subscription must never mint one.
+    func testWeeklySubscriptionTokenIsNotPerpetual() {
+        let weekOut = Date().addingTimeInterval(7 * 86_400).timeIntervalSince1970
+        let claims = LicenseClaims(email: "a@b.c", plan: "solo", exp: weekOut,
+                                   issuedAt: Date().timeIntervalSince1970, device: device)
+        XCTAssertNotNil(claims.expiryDate, "a weekly licence must carry an expiry")
+        XCTAssertGreaterThan(claims.expiryDate!, Date())
     }
 
     // MARK: - Encoding helpers
