@@ -4,10 +4,13 @@ import SwiftUI
 struct LookMomNoHandsApp: App {
     @StateObject private var coordinator = AppCoordinator()
     @StateObject private var license = LicenseStore()
+    @StateObject private var updates = UpdateChecker()
 
     var body: some Scene {
         MenuBarExtra {
-            PanelView(coordinator: coordinator, store: coordinator.store, license: license)
+            PanelView(coordinator: coordinator, store: coordinator.store,
+                      license: license, updates: updates)
+                .onAppear { updates.checkInBackground() }
         } label: {
             // slash = off, dimmed = standby (wake listening), solid = live session
             Image(nsImage: .brandMark(height: 15,
@@ -62,16 +65,20 @@ struct PanelView: View {
     @ObservedObject var coordinator: AppCoordinator
     @ObservedObject var store: AppStore
     @ObservedObject var license: LicenseStore
+    @ObservedObject var updates: UpdateChecker
     @Environment(\.openWindow) private var openWindow
     @State private var keyField = ""
     @State private var elevenField = ""
     @State private var showVoiceSetup = false
     @State private var licenseField = ""
     @State private var showLicenseEntry = false
+    @State private var launchAtLogin = LoginItem.isEnabled
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             header
+
+            updateBanner
 
             licenseSection
 
@@ -197,6 +204,42 @@ struct PanelView: View {
                  ? "Chord off — say “Mama dictate this” to start, “Mama stop dictating” to paste."
                  : "Press the chord (or say “Mama dictate this”) to start; press again or say “Mama stop dictating” to paste at your cursor.")
                 .font(.caption2).foregroundStyle(.secondary)
+        }
+    }
+
+    /// Shows only when an update exists — invisible the rest of the time, which
+    /// is almost always. A `.required` build (below the server's floor) reads as
+    /// red rather than the softer accent, but still just links out; nothing here
+    /// disables the app.
+    @ViewBuilder
+    private var updateBanner: some View {
+        switch updates.status {
+        case .upToDate:
+            EmptyView()
+        case .available(let version, let url, let notes),
+             .required(let version, let url, let notes):
+            let mandatory = { if case .required = updates.status { return true } else { return false } }()
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(spacing: 6) {
+                    Image(systemName: mandatory ? "exclamationmark.arrow.triangle.2.circlepath"
+                                                : "arrow.down.circle.fill")
+                        .foregroundStyle(mandatory ? .red : Color.accentColor)
+                    Text(mandatory ? "Update required — v\(version)"
+                                   : "Update available — v\(version)")
+                        .font(.callout.weight(.medium))
+                    Spacer()
+                    Button("Get it") { NSWorkspace.shared.open(url) }
+                        .font(.caption)
+                }
+                if !notes.isEmpty {
+                    Text(notes).font(.caption2).foregroundStyle(.secondary)
+                        .lineLimit(3)
+                }
+            }
+            .padding(10)
+            .background((mandatory ? Color.red : Color.accentColor).opacity(0.10),
+                        in: RoundedRectangle(cornerRadius: 8))
+            Divider()
         }
     }
 
@@ -415,7 +458,56 @@ struct PanelView: View {
                 }
             }
             .frame(maxHeight: 100)
+            launchAtLoginRow
+            versionRow
         }
+    }
+
+    /// Open-at-login toggle. A voice assistant you have to remember to launch
+    /// isn't really hands-free, so this is on by intent for most users — but it's
+    /// their machine, so it's a choice, defaulting to whatever the OS reports.
+    private var launchAtLoginRow: some View {
+        HStack(spacing: 6) {
+            Toggle(isOn: Binding(
+                get: { launchAtLogin },
+                set: { want in
+                    let ok = LoginItem.setEnabled(want)
+                    // Reflect the OS's actual state, not the requested one — if the
+                    // user has to approve it in Settings, the switch shouldn't lie.
+                    launchAtLogin = ok ? want : LoginItem.isEnabled
+                }
+            )) {
+                Text("Open at login").font(.caption2).foregroundStyle(.secondary)
+            }
+            .toggleStyle(.checkbox)
+            if LoginItem.needsApproval {
+                Button("Approve…") { LoginItem.openLoginItemsSettings() }
+                    .font(.caption2)
+            }
+            Spacer()
+        }
+        .padding(.top, 2)
+    }
+
+    /// Version + manual update check. The banner above handles the "there's an
+    /// update" case on its own; this is for the user who wants to check on demand
+    /// and to see what they're running.
+    private var versionRow: some View {
+        HStack(spacing: 6) {
+            Text("v\(Self.appVersion)").font(.caption2).foregroundStyle(.secondary)
+            Spacer()
+            if case .upToDate = updates.status {
+                Button("Check for updates") { updates.checkInBackground(force: true) }
+                    .font(.caption2)
+            } else {
+                Text("Update available").font(.caption2).foregroundStyle(Color.accentColor)
+            }
+        }
+        .padding(.top, 2)
+    }
+
+    private static var appVersion: String {
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0"
     }
 }
 
