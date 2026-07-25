@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { appleClientSecret, appleConfig } from "@/lib/apple";
+import { ensureSchema, sql } from "@/lib/db";
 
 /**
  * GET /api/auth/debug — TEMPORARY. Reports which auth env vars reached this
@@ -78,12 +79,24 @@ async function probeApple(site: string) {
   }
 }
 
+/** Actually connect to the database the pages use, so a bad connection string or
+ *  unreachable DB is reported here instead of 500-ing a dashboard. */
+async function probeDb() {
+  try {
+    await ensureSchema();
+    const rows = await sql()<{ ok: number }[]>`select 1 as ok`;
+    return rows[0]?.ok === 1 ? "ok" : "unexpected";
+  } catch (err) {
+    return `error:${err instanceof Error ? err.message : "unknown"}`;
+  }
+}
+
 export async function GET() {
   const site = process.env.SITE_URL ?? "https://nohandsapp.com";
   const pk = (process.env.APPLE_PRIVATE_KEY ?? "").replace(/\\n/g, "\n");
   const admins = (process.env.ADMIN_EMAILS ?? "").split(",").map((s) => s.trim()).filter(Boolean);
 
-  const [google, apple] = await Promise.all([probeGoogle(site), probeApple(site)]);
+  const [google, apple, db] = await Promise.all([probeGoogle(site), probeApple(site), probeDb()]);
 
   return NextResponse.json({
     NODE_ENV: process.env.NODE_ENV ?? null,
@@ -104,5 +117,6 @@ export async function GET() {
     //   redirect_uri_mismatch => the callback URL isn't registered exactly
     google_probe: google,
     apple_probe: apple,
+    db_probe: db, // "ok" => reachable; "error:…" => the reason a dashboard 500s
   });
 }
