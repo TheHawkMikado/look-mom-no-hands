@@ -65,6 +65,25 @@ export const DEFAULT_PLANS: PlanRow[] = [
     visible: true,
     sort: 30,
   },
+  {
+    // Comp: a free Solo account issued by hand from the admin. Hidden from the
+    // pricing page (visible:false) and never sold, so it has no Stripe price —
+    // it's the "give someone a free account" tier. Solo entitlements, one user.
+    slug: "comp",
+    name: "Comp",
+    tagline: "complimentary",
+    price_id: null,
+    price_label: "Free",
+    period: "",
+    features: ["3 devices", "1 user", "Complimentary — issued by hand"],
+    computers: 3,
+    phones: 0,
+    sub_users: 0,
+    resell: false,
+    featured: false,
+    visible: false,
+    sort: 100,
+  },
 ];
 
 /** Seed values, with any price id already configured in the environment. */

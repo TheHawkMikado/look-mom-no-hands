@@ -181,6 +181,16 @@ export async function ensureSchema() {
   await db`UPDATE plans SET computers = 3, phones = 0, sub_users = 0 WHERE slug = 'solo'`;
   await db`UPDATE plans SET computers = 3, phones = 0, sub_users = 5 WHERE slug = 'family'`;
   await db`UPDATE plans SET computers = 3, phones = 0, sub_users = 9999, resell = true WHERE slug = 'community'`;
+
+  // The hidden "comp" plan: a free Solo account issued by hand. ON CONFLICT DO
+  // NOTHING so it's created once and any later admin edits to it survive re-runs.
+  await db`
+    INSERT INTO plans (slug, name, tagline, price_label, period, features,
+                       computers, phones, sub_users, resell, featured, visible, sort)
+    VALUES ('comp', 'Comp', 'complimentary', 'Free', '',
+            ${JSON.stringify(["3 devices", "1 user", "Complimentary — issued by hand"])},
+            3, 0, 0, false, false, false, 100)
+    ON CONFLICT (slug) DO NOTHING`;
 }
 
 // MARK: - Sign-in tokens
@@ -492,6 +502,24 @@ export async function setSeats(key: string, seats: number) {
 export async function deleteLicence(key: string) {
   const db = sql();
   await db`DELETE FROM licences WHERE key = ${key}`;
+}
+
+/**
+ * Admin override of a licence's entitlements — the "set it to whatever I say"
+ * escape hatch for support and comps. Sets all overridable fields at once (the
+ * admin form always submits every one, pre-filled from the current row), so
+ * there's no partial-update ambiguity. `expiresAt` null means perpetual.
+ */
+export async function overrideLicence(
+  key: string,
+  f: { plan: string; seats: number; subUsers: number; expiresAt: Date | null; resell: boolean },
+) {
+  const db = sql();
+  await db`
+    UPDATE licences
+       SET plan = ${f.plan}, seats = ${f.seats}, sub_users = ${f.subUsers},
+           expires_at = ${f.expiresAt}, resell = ${f.resell}
+     WHERE key = ${key}`;
 }
 
 /** Issues a licence outside Stripe — comps, support replacements, sub-users. */

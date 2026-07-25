@@ -1,3 +1,4 @@
+import { Fragment } from "react";
 import { redirect } from "next/navigation";
 import { getSession } from "@/lib/auth";
 import { catalogue } from "@/lib/catalogue";
@@ -12,6 +13,7 @@ import {
   adminDeletePlan,
   adminExtend,
   adminIssue,
+  adminOverride,
   adminSavePlan,
   adminSetRevoked,
   adminSetSeats,
@@ -126,70 +128,94 @@ export default async function Admin({
               </thead>
               <tbody>
                 {licences.map((l) => (
-                  <tr key={l.key}>
-                    <td>
-                      <code>{l.key}</code>
-                      {l.parent_key && <div className="dim small">sub-user</div>}
-                    </td>
-                    <td>{l.email}</td>
-                    <td>{l.plan}</td>
-                    <td>
-                      <form action={adminSetSeats} className="tight">
-                        <input type="hidden" name="key" value={l.key} />
-                        <input className="field mini" name="seats" type="number"
-                               min={0} defaultValue={l.seats} />
-                        <span className="dim small">{l.devices} used</span>
-                      </form>
-                    </td>
-                    <td>
-                      {l.expires_at ? l.expires_at.toLocaleDateString() : "never"}
-                      <form action={adminExtend} className="tight">
-                        <input type="hidden" name="key" value={l.key} />
-                        <input className="field mini" name="days" type="number"
-                               defaultValue={7} />
-                        <button className="linkish">+days</button>
-                      </form>
-                    </td>
-                    <td>
-                      {l.revoked ? (
-                        <span className="pill bad">Revoked</span>
-                      ) : (
-                        <span className="pill good">OK</span>
-                      )}
-                    </td>
-                    <td className="actions">
-                      <form action={adminSetRevoked}>
-                        <input type="hidden" name="key" value={l.key} />
-                        <input type="hidden" name="revoked" value={l.revoked ? "0" : "1"} />
-                        <button className="linkish">{l.revoked ? "Restore" : "Revoke"}</button>
-                      </form>
-                      <form action={adminDelete}>
-                        <input type="hidden" name="key" value={l.key} />
-                        <button className="linkish danger">Delete</button>
-                      </form>
-                    </td>
-                  </tr>
+                  <Fragment key={l.key}>
+                    <tr>
+                      <td>
+                        <code>{l.key}</code>
+                        {l.parent_key && <div className="dim small">sub-user</div>}
+                      </td>
+                      <td>{l.email}</td>
+                      <td>{l.plan}</td>
+                      <td>
+                        <form action={adminSetSeats} className="tight">
+                          <input type="hidden" name="key" value={l.key} />
+                          <input className="field mini" name="seats" type="number"
+                                 min={0} defaultValue={l.seats} />
+                          <span className="dim small">{l.devices} used</span>
+                        </form>
+                      </td>
+                      <td>
+                        {l.expires_at ? l.expires_at.toLocaleDateString() : "never"}
+                        <form action={adminExtend} className="tight">
+                          <input type="hidden" name="key" value={l.key} />
+                          <input className="field mini" name="days" type="number"
+                                 defaultValue={7} />
+                          <button className="linkish">+days</button>
+                        </form>
+                      </td>
+                      <td>
+                        {l.revoked ? (
+                          <span className="pill bad">Revoked</span>
+                        ) : (
+                          <span className="pill good">OK</span>
+                        )}
+                      </td>
+                      <td className="actions">
+                        <form action={adminSetRevoked}>
+                          <input type="hidden" name="key" value={l.key} />
+                          <input type="hidden" name="revoked" value={l.revoked ? "0" : "1"} />
+                          <button className="linkish">{l.revoked ? "Restore" : "Revoke"}</button>
+                        </form>
+                        <form action={adminDelete}>
+                          <input type="hidden" name="key" value={l.key} />
+                          <button className="linkish danger">Delete</button>
+                        </form>
+                      </td>
+                    </tr>
+                    <tr>
+                      <td colSpan={7} style={{ paddingTop: 0 }}>
+                        <details>
+                          <summary className="linkish">Override subscription</summary>
+                          <form action={adminOverride} className="form-grid" style={{ marginTop: 10 }}>
+                            <input type="hidden" name="key" value={l.key} />
+                            <label>Plan<PlanSelect plans={plans} defaultValue={l.plan} /></label>
+                            <label>Devices<input className="field" name="seats" type="number"
+                                   min={0} defaultValue={l.seats} /></label>
+                            <label>Sub-users<input className="field" name="subUsers" type="number"
+                                   min={0} defaultValue={l.sub_users} /></label>
+                            <label>Expiry (blank = never)
+                              <input className="field" name="expiry" type="date"
+                                     defaultValue={l.expires_at ? l.expires_at.toISOString().slice(0, 10) : ""} />
+                            </label>
+                            <label className="check">
+                              <input type="checkbox" name="resell" defaultChecked={l.resell} /> Resell rights
+                            </label>
+                            <button className="btn btn-primary">Save override</button>
+                          </form>
+                        </details>
+                      </td>
+                    </tr>
+                  </Fragment>
                 ))}
               </tbody>
             </table>
           </div>
         )}
 
-        <h3 style={{ marginTop: 36 }}>Issue a licence by hand</h3>
+        <h3 style={{ marginTop: 36 }}>Create a user</h3>
         <p className="dim small">
-          For comps and replacements. This creates no Stripe subscription, so
-          nothing bills and nothing renews — set an expiry of 0 for a permanent key.
+          For comps and replacements. Entitlements come from the chosen plan —{" "}
+          <strong>Comp</strong> is a free Solo account (3 devices, 1 user, hidden from
+          the pricing page). This creates no Stripe subscription, so nothing bills and
+          nothing renews; days of 0 is a permanent key. Fine-tune any of it afterwards
+          with <em>Override subscription</em> on the licence row above.
         </p>
         <form action={adminIssue} className="form-grid">
           <label>Email<input className="field" name="email" type="email" required /></label>
-          <label>Plan<input className="field" name="plan" defaultValue="solo" /></label>
-          <label>Computers<input className="field" name="seats" type="number" defaultValue={2} /></label>
-          <label>Phones<input className="field" name="phones" type="number" defaultValue={1} /></label>
-          <label>Sub-users<input className="field" name="subUsers" type="number" defaultValue={0} /></label>
+          <label>Plan<PlanSelect plans={plans} defaultValue="comp" /></label>
           <label>Days (0 = never expires)<input className="field" name="days" type="number" defaultValue={0} /></label>
           <label>Note<input className="field" name="note" placeholder="why this was issued" /></label>
-          <label className="check"><input type="checkbox" name="resell" /> Resell rights</label>
-          <button className="btn btn-primary">Issue licence</button>
+          <button className="btn btn-primary">Create user</button>
         </form>
       </section>
 
@@ -383,6 +409,31 @@ function PlanEditor({ plan, isNew = false }: { plan: PlanRow; isNew?: boolean })
         </div>
       )}
     </div>
+  );
+}
+
+/** Plan picker shared by "Create a user" and the per-licence override. If the
+ *  licence's current slug isn't a known plan (an old or deleted one), it's kept
+ *  as an option so saving doesn't silently switch the plan out from under it. */
+function PlanSelect({
+  plans,
+  defaultValue,
+  name = "plan",
+}: {
+  plans: PlanRow[];
+  defaultValue: string;
+  name?: string;
+}) {
+  const known = plans.some((p) => p.slug === defaultValue);
+  return (
+    <select className="field" name={name} defaultValue={defaultValue}>
+      {!known && defaultValue && <option value={defaultValue}>{defaultValue} (current)</option>}
+      {plans.map((p) => (
+        <option key={p.slug} value={p.slug}>
+          {p.name} ({p.slug}){p.visible ? "" : " — hidden"}
+        </option>
+      ))}
+    </select>
   );
 }
 

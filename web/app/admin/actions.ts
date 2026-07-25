@@ -9,6 +9,8 @@ import {
   deletePlan,
   ensureSchema,
   insertLicence,
+  overrideLicence,
+  planBySlug,
   setExpiry,
   setRevoked,
   setSeats,
@@ -68,7 +70,14 @@ export async function adminDelete(formData: FormData) {
   revalidatePath("/admin");
 }
 
-/** Issues a licence by hand — comps, replacements, anything outside Stripe. */
+/**
+ * Creates a user by hand — comps, replacements, anything outside Stripe.
+ *
+ * Entitlements come from the chosen plan (so "comp" grants exactly a free Solo,
+ * "family" grants the family allowance, etc.) rather than being typed in; use the
+ * per-licence Override afterwards for anything bespoke. No Stripe subscription is
+ * created, so nothing bills and nothing renews — days of 0 is a permanent key.
+ */
 export async function adminIssue(formData: FormData) {
   await requireAdmin();
   await ensureSchema();
@@ -76,19 +85,57 @@ export async function adminIssue(formData: FormData) {
   const email = String(formData.get("email") ?? "").trim().toLowerCase();
   if (!email.includes("@")) throw new Error("Enter a valid email address.");
 
+  const slug = String(formData.get("plan") ?? "comp").trim().toLowerCase() || "comp";
+  const plan = await planBySlug(slug);
+  // Unknown slug falls back to a Solo-shaped comp rather than failing — an admin
+  // typing a slug that doesn't exist still gets a sane, minimal grant.
+  const seats = plan ? plan.computers : 3;
+  const phones = plan ? plan.phones : 0;
+  const subUsers = plan ? plan.sub_users : 0;
+  const resell = plan ? plan.resell : false;
+
   const days = num(formData.get("days"), 0);
   await insertLicence({
     key: mintLicenceKey(),
     email,
-    plan: String(formData.get("plan") ?? "solo"),
+    plan: slug,
     // 0 days means perpetual: a comp that never needs renewing.
     expiresAt: days > 0 ? new Date(Date.now() + days * 86_400_000) : null,
-    seats: Math.max(1, num(formData.get("seats"), 2)),
-    phones: Math.max(0, num(formData.get("phones"), 0)),
-    subUsers: Math.max(0, num(formData.get("subUsers"), 0)),
-    resell: formData.get("resell") === "on",
+    seats,
+    phones,
+    subUsers,
+    resell,
     parentKey: null,
     note: String(formData.get("note") ?? "").trim() || null,
+  });
+  revalidatePath("/admin");
+}
+
+/**
+ * Overrides a licence's entitlements outright — the manual lever for support and
+ * for comping someone extra devices/sub-users or a custom expiry. The form is
+ * pre-filled from the current row, so every field is always submitted; an empty
+ * expiry means "perpetual".
+ */
+export async function adminOverride(formData: FormData) {
+  await requireAdmin();
+  await ensureSchema();
+
+  const key = String(formData.get("key") ?? "");
+  if (!key) return;
+
+  const expiryRaw = String(formData.get("expiry") ?? "").trim();
+  // A YYYY-MM-DD value is taken as end-of-day UTC so the licence stays valid
+  // through the whole day the admin picked, not from midnight before it.
+  const expiresAt = expiryRaw ? new Date(`${expiryRaw}T23:59:59Z`) : null;
+  if (expiryRaw && Number.isNaN(expiresAt!.getTime())) throw new Error("Invalid expiry date.");
+
+  await overrideLicence(key, {
+    plan: String(formData.get("plan") ?? "solo").trim().toLowerCase() || "solo",
+    seats: Math.max(0, num(formData.get("seats"), 3)),
+    subUsers: Math.max(0, num(formData.get("subUsers"), 0)),
+    expiresAt,
+    resell: formData.get("resell") === "on",
   });
   revalidatePath("/admin");
 }
