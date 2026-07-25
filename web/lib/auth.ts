@@ -18,6 +18,8 @@ import { consumeLoginToken, createLoginToken } from "@/lib/db";
  */
 
 const COOKIE = "nh_session";
+/** CSRF cookie for the Google OAuth round-trip (set on start, checked on callback). */
+export const OAUTH_STATE_COOKIE = "nh_oauth_state";
 const SESSION_DAYS = 14;
 /** Long enough to find the mail, short enough that a leaked link is stale. */
 export const LOGIN_TOKEN_MINUTES = 20;

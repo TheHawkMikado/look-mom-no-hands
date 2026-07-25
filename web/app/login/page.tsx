@@ -1,7 +1,17 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Lockup } from "@/components/Logo";
+
+/** Messages for the ?error=… a failed callback redirects back with. */
+const ERRORS: Record<string, string> = {
+  expired: "That sign-in link has expired or was already used. Request a new one.",
+  missing: "That link was incomplete. Request a new one.",
+  failed: "Something went wrong signing in. Try again.",
+  google: "Google sign-in didn't complete. Try again.",
+  google_state: "Google sign-in expired before it finished. Try again.",
+  google_unconfigured: "Google sign-in isn't set up yet.",
+};
 
 /**
  * Sign-in. One field, because the address used at checkout is the only identity
@@ -12,6 +22,13 @@ export default function Login() {
   const [state, setState] = useState<"idle" | "sending" | "sent">("idle");
   const [error, setError] = useState("");
   const [devLink, setDevLink] = useState("");
+
+  // A failed sign-in callback bounces back here with ?error=… — surface it.
+  // Read from window rather than useSearchParams to avoid a Suspense boundary.
+  useEffect(() => {
+    const code = new URLSearchParams(window.location.search).get("error");
+    if (code) setError(ERRORS[code] ?? "Couldn't sign you in. Try again.");
+  }, []);
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
@@ -63,9 +80,34 @@ export default function Login() {
           <>
             <h1 style={{ fontSize: 30 }}>Sign in</h1>
             <p style={{ color: "var(--muted)", marginBottom: 24 }}>
-              Use the email address you subscribed with. We&rsquo;ll send a link — no
-              password to remember.
+              Use the email address you subscribed with — with Google, or a link we
+              email you. No password to remember.
             </p>
+
+            <a
+              className="btn btn-ghost"
+              href="/api/auth/google"
+              style={{ width: "100%", justifyContent: "center", gap: 10 }}
+            >
+              <GoogleG />
+              Continue with Google
+            </a>
+
+            <div
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: 12,
+                color: "var(--muted)",
+                fontSize: 13,
+                margin: "18px 0",
+              }}
+            >
+              <span style={{ flex: 1, height: 1, background: "var(--line, #e6e2d8)" }} />
+              or
+              <span style={{ flex: 1, height: 1, background: "var(--line, #e6e2d8)" }} />
+            </div>
+
             <form onSubmit={submit} style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
               <input
                 type="email"
@@ -92,5 +134,29 @@ export default function Login() {
         </p>
       </div>
     </div>
+  );
+}
+
+/** Google's four-colour "G", inline so there's no asset to load or CSP to widen. */
+function GoogleG() {
+  return (
+    <svg width="17" height="17" viewBox="0 0 18 18" aria-hidden="true">
+      <path
+        fill="#4285F4"
+        d="M17.64 9.2c0-.64-.06-1.25-.16-1.84H9v3.48h4.84a4.14 4.14 0 0 1-1.8 2.72v2.26h2.92c1.7-1.57 2.68-3.88 2.68-6.62z"
+      />
+      <path
+        fill="#34A853"
+        d="M9 18c2.43 0 4.47-.8 5.96-2.18l-2.92-2.26c-.8.54-1.84.86-3.04.86-2.34 0-4.32-1.58-5.02-3.7H.96v2.34A9 9 0 0 0 9 18z"
+      />
+      <path
+        fill="#FBBC05"
+        d="M3.98 10.72a5.4 5.4 0 0 1 0-3.44V4.94H.96a9 9 0 0 0 0 8.12l3.02-2.34z"
+      />
+      <path
+        fill="#EA4335"
+        d="M9 3.58c1.32 0 2.5.46 3.44 1.35l2.58-2.58C13.47.9 11.43 0 9 0A9 9 0 0 0 .96 4.94l3.02 2.34C4.68 5.16 6.66 3.58 9 3.58z"
+      />
+    </svg>
   );
 }
