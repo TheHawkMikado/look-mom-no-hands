@@ -11,6 +11,9 @@ const ERRORS: Record<string, string> = {
   google: "Google sign-in didn't complete. Try again.",
   google_state: "Google sign-in expired before it finished. Try again.",
   google_unconfigured: "Google sign-in isn't set up yet.",
+  apple: "Apple sign-in didn't complete. Try again.",
+  apple_state: "Apple sign-in expired before it finished. Try again.",
+  apple_unconfigured: "Apple sign-in isn't set up yet.",
 };
 
 /**
@@ -84,14 +87,24 @@ export default function Login() {
               email you. No password to remember.
             </p>
 
-            <a
-              className="btn btn-ghost"
-              href="/api/auth/google"
-              style={{ width: "100%", justifyContent: "center", gap: 10 }}
-            >
-              <GoogleG />
-              Continue with Google
-            </a>
+            <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+              <a
+                className="btn btn-ghost"
+                href="/api/auth/google"
+                style={{ width: "100%", justifyContent: "center", gap: 10 }}
+              >
+                <GoogleG />
+                Continue with Google
+              </a>
+              <a
+                className="btn btn-ghost"
+                href="/api/auth/apple"
+                style={{ width: "100%", justifyContent: "center", gap: 10 }}
+              >
+                <AppleLogo />
+                Continue with Apple
+              </a>
+            </div>
 
             <div
               style={{
@@ -157,6 +170,15 @@ function GoogleG() {
         fill="#EA4335"
         d="M9 3.58c1.32 0 2.5.46 3.44 1.35l2.58-2.58C13.47.9 11.43 0 9 0A9 9 0 0 0 .96 4.94l3.02 2.34C4.68 5.16 6.66 3.58 9 3.58z"
       />
+    </svg>
+  );
+}
+
+/** Apple logo, inline (currentColor so it matches the button text). */
+function AppleLogo() {
+  return (
+    <svg width="15" height="17" viewBox="0 0 14 17" fill="currentColor" aria-hidden="true">
+      <path d="M11.62 8.87c-.02-1.9 1.55-2.8 1.62-2.85-.88-1.29-2.26-1.47-2.75-1.49-1.17-.12-2.28.69-2.87.69-.59 0-1.5-.67-2.47-.65-1.27.02-2.44.74-3.1 1.87-1.32 2.3-.34 5.7.95 7.56.63.91 1.38 1.93 2.36 1.9.95-.04 1.31-.61 2.46-.61 1.14 0 1.47.61 2.47.59 1.02-.02 1.66-.93 2.29-1.85.72-1.06 1.02-2.08 1.03-2.14-.02-.01-1.97-.76-1.99-3.01l.47-.35zM9.7 3.29c.52-.63.87-1.51.78-2.39-.75.03-1.66.5-2.2 1.13-.48.55-.9 1.44-.79 2.29.84.06 1.69-.42 2.21-1.03z" />
     </svg>
   );
 }

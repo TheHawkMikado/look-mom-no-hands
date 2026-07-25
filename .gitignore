@@ -2,3 +2,7 @@
 build/
 *.xcodeproj
 .DS_Store
+
+# Secrets — never commit. Apple Sign in key, etc.
+*.p8
+AuthKey_*.p8
