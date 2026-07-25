@@ -69,7 +69,7 @@ struct DashboardView: View {
     @ViewBuilder private var content: some View {
         switch selected {
         case .memory:
-            MemoryTab(coordinator: coordinator, environment: coordinator.environment, knowledge: coordinator.knowledge)
+            MemoryTab(coordinator: coordinator, environment: coordinator.environment, knowledge: coordinator.knowledge, learned: coordinator.learnedControls, appCaps: coordinator.appCapabilities)
         case .live:
             LiveTab(coordinator: coordinator)
         case .transcripts:
@@ -98,6 +98,8 @@ private struct MemoryTab: View {
     @ObservedObject var coordinator: AppCoordinator
     @ObservedObject var environment: EnvironmentTracker
     @ObservedObject var knowledge: KnowledgeStore
+    @ObservedObject var learned: ElementMemoryStore
+    @ObservedObject var appCaps: AppCapabilityStore
     @State private var newFact = ""
 
     var body: some View {
@@ -180,6 +182,43 @@ private struct MemoryTab: View {
                             Spacer()
                             Button { knowledge.remove(fact.id) } label: { Image(systemName: "trash").foregroundStyle(.red) }
                                 .buttonStyle(.plain)
+                        }
+                    }
+                }
+
+                Section("Learned controls (taught by demonstration)") {
+                    if learned.elements.isEmpty {
+                        Text("None yet. When it can't find something you asked it to click, it'll ask you to click it once — then it remembers.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                    ForEach(learned.elements) { el in
+                        HStack {
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text("“\(el.phrase)” → \(el.label)").font(.callout)
+                                Text("\(el.role) in \(el.appName)").font(.caption2).foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                            Button { learned.remove(el.id) } label: { Image(systemName: "trash").foregroundStyle(.red) }
+                                .buttonStyle(.plain)
+                        }
+                    }
+                }
+
+                Section("App knowledge (from documentation)") {
+                    if appCaps.capabilities.isEmpty {
+                        Text("None yet. When you command an app for the first time, it looks up that app's features and shortcuts and remembers them here.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                    ForEach(appCaps.capabilities) { cap in
+                        DisclosureGroup {
+                            Text(cap.summary).font(.caption).textSelection(.enabled)
+                        } label: {
+                            HStack {
+                                Text(cap.appName).font(.callout.weight(.medium))
+                                Spacer()
+                                Button { appCaps.remove(cap.bundleID) } label: { Image(systemName: "trash").foregroundStyle(.red) }
+                                    .buttonStyle(.plain)
+                            }
                         }
                     }
                 }
@@ -633,12 +672,37 @@ private struct VocabularyTab: View {
 /// Every control binds to a coordinator property that persists itself on change.
 private struct SettingsTab: View {
     @ObservedObject var coordinator: AppCoordinator
+    @State private var section: SettingsSection = .general
+
+    private enum SettingsSection: String, CaseIterable {
+        case general = "General"
+        case hotkeys = "Hotkeys"
+    }
 
     private let pauseOptions: [(String, TimeInterval)] =
         [("5 seconds", 5), ("15 seconds", 15), ("30 seconds", 30), ("1 minute", 60),
          ("2 minutes", 120), ("Never (stop manually)", 0)]
 
     var body: some View {
+        VStack(spacing: 0) {
+            Picker("", selection: $section) {
+                ForEach(SettingsSection.allCases, id: \.self) { Text($0.rawValue).tag($0) }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .padding(.horizontal, 20)
+            .padding(.top, 12)
+            switch section {
+            case .general: generalForm
+            case .hotkeys: hotkeysForm
+            }
+        }
+        // Devices can (un)plug at any time; the list is cheap to rebuild and
+        // only needs to be fresh while the user is looking at it.
+        .onAppear { coordinator.refreshInputDevices() }
+    }
+
+    private var generalForm: some View {
         Form {
             Section("Speech recognition") {
                 Picker("Engine", selection: $coordinator.speechEngine) {
@@ -661,10 +725,15 @@ private struct SettingsTab: View {
                 }
                 Text("Pick a dedicated mic to leave your other mics free for a second recorder running in parallel.")
                     .font(.caption).foregroundStyle(.secondary)
-                LabeledContent("Anthropic key") { statusPill(coordinator.hasKey) }
-                LabeledContent("ElevenLabs key") { statusPill(coordinator.hasElevenLabsKey) }
-                Text("Add or change keys from the menu-bar icon.")
+            }
+
+            Section("API keys") {
+                LabeledContent("Anthropic") { statusPill(coordinator.hasKey) }
+                LabeledContent("ElevenLabs") { statusPill(coordinator.hasElevenLabsKey) }
+                Text("Your keys are set once on your account and shared to every device you sign in on — there's nothing to enter here. Anthropic powers screen control; ElevenLabs adds spoken replies and higher-accuracy transcription.")
                     .font(.caption).foregroundStyle(.secondary)
+                Link("Manage keys at nohandsapp.com", destination: AccountStore.accountURL)
+                    .font(.caption)
             }
 
             Section("Recording") {
@@ -678,9 +747,6 @@ private struct SettingsTab: View {
                     ForEach(pauseOptions, id: \.1) { Text($0.0).tag($0.1) }
                 }
                 Toggle("Clean up inserted text before pasting", isOn: $coordinator.cleanUpInsertedText)
-                Picker("Push-to-dictate chord", selection: $coordinator.dictationChord) {
-                    ForEach(DictationChord.allCases, id: \.self) { Text($0.label).tag($0) }
-                }
             }
 
             Section("Live transcript") {
@@ -700,12 +766,46 @@ private struct SettingsTab: View {
                 Toggle("Vision fallback (screenshot a target the app can't find)", isOn: $coordinator.visionClickEnabled)
                 Text("When on, a click the Accessibility tree can't resolve is retried by screenshotting the screen and locating it visually. Needs Screen Recording permission (macOS will prompt the first time).")
                     .font(.caption).foregroundStyle(.secondary)
+                Toggle("Learn app documentation (features & shortcuts)", isOn: $coordinator.appDocsEnabled)
+                Text("The first time you command an app, it researches that app's documented features and keyboard shortcuts on the web and feeds them to the planner — so it acts precisely instead of guessing. One web-search lookup per app, then cached. Review what it learned in the Memory tab.")
+                    .font(.caption).foregroundStyle(.secondary)
             }
         }
         .formStyle(.grouped)
-        // Devices can (un)plug at any time; the list is cheap to rebuild and
-        // only needs to be fresh while the user is looking at it.
-        .onAppear { coordinator.refreshInputDevices() }
+    }
+
+    private var hotkeysForm: some View {
+        Form {
+            Section("Dictation") {
+                Picker("Push-to-dictate", selection: $coordinator.dictationChord) {
+                    ForEach(DictationChord.allCases, id: \.self) { Text($0.label).tag($0) }
+                }
+                Text("Tap the chord to start dictating, tap again (or pause) to stop. The text is cleaned up and pasted at your cursor.")
+                    .font(.caption).foregroundStyle(.secondary)
+                Picker("Push-to-dictate & submit", selection: $coordinator.submitChord) {
+                    ForEach(DictationChord.allCases, id: \.self) { Text($0.label).tag($0) }
+                }
+                Text("Same as push-to-dictate, but presses Enter after pasting — so a chat box, search field, or terminal submits automatically.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+
+            Section("Screen control") {
+                Picker("Start session (“Hey Mama”)", selection: $coordinator.sessionStartChord) {
+                    ForEach(DictationChord.allCases, id: \.self) { Text($0.label).tag($0) }
+                }
+                Picker("End session (“Adios Mama”)", selection: $coordinator.sessionEndChord) {
+                    ForEach(DictationChord.allCases, id: \.self) { Text($0.label).tag($0) }
+                }
+                Text("Button equivalents of the wake/stop words, so a session can be started and ended by voice or by keyboard. Off by default.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+
+            Section {
+                Text("A chord is a set of modifier keys tapped together (no letter). Pick distinct chords for each action; when one is a subset of another (⌃⌥ vs ⌃⌥⇧), the more-specific one wins. Global hotkeys need Accessibility permission.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+        }
+        .formStyle(.grouped)
     }
 
     private func statusPill(_ ok: Bool) -> some View {
@@ -713,6 +813,7 @@ private struct SettingsTab: View {
             .foregroundStyle(ok ? .green : .secondary)
             .font(.caption)
     }
+
 }
 
 private struct TranscriptsTab: View {

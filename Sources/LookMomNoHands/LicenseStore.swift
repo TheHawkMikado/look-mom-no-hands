@@ -2,21 +2,19 @@ import Foundation
 import CryptoKit
 import IOKit
 
-/// Licensing for paid distribution.
+/// Entitlement verification for the account-login model.
 ///
-/// Two-step by design. The customer receives a short, typo-tolerant key by email
-/// after checkout (`NOHANDS-XXXX-XXXX-XXXX`); the app trades that key once, over
-/// the network, for an **Ed25519-signed entitlement token** bound to this Mac.
+/// Access is granted by **signing in** (see `AccountStore`), but the thing the
+/// app checks minute-to-minute is still an **Ed25519-signed entitlement token**
+/// bound to this Mac — minted server-side at `/api/app/device` after sign-in.
 /// From then on validation is a local signature check against the public key
-/// compiled in below — no phone-home on launch, works on a plane, and the server
+/// compiled in below: no phone-home on launch, works on a plane, and the server
 /// being down never locks a paying customer out of their own machine.
 ///
-/// The private half of the keypair lives only in the Vercel project's env
-/// (`LICENSE_SIGNING_KEY`). Nothing secret ships in the app: a public key is
-/// useless for minting tokens, so extracting it from the binary buys an attacker
-/// nothing. Cracking this still just means patching the binary — that is true of
-/// every client-side license check, and the goal here is an honest speed bump for
-/// honest customers, not DRM.
+/// This type is now a namespace of pure verification helpers; the session and
+/// networking live in `AccountStore`. The private half of the keypair lives only
+/// in Vercel (`LICENSE_SIGNING_KEY`) — a public key can verify tokens but never
+/// mint them, so shipping it in the binary is safe.
 enum LicenseConfig {
     /// Ed25519 public key, raw 32 bytes, hex. Public by nature — it can verify
     /// tokens but never mint them, so shipping it in the binary is safe and
@@ -27,11 +25,7 @@ enum LicenseConfig {
     /// must, re-issue tokens for existing orders before shipping the new key.
     static let publicKeyHex = "6329a6338a49b8487c4875537d07e21709332e5b842e315b3813444e3ee2f4a0"
 
-    static let activationURL = URL(string: "https://nohandsapp.com/api/activate")!
     static let purchaseURL = URL(string: "https://nohandsapp.com/#pricing")!
-
-    /// How long a fresh install runs unlicensed.
-    static let trialDays = 7
 
     /// A token whose `exp` has passed still works this long, so a card that
     /// fails on a Friday degrades into a warning rather than a dead app.
@@ -49,7 +43,7 @@ enum LicenseConfig {
     static var isConfigured: Bool { publicKeyHex.contains(where: { $0 != "0" }) }
 }
 
-/// What the signed token asserts. Mirrors the payload the Vercel `/api/activate`
+/// What the signed token asserts. Mirrors the payload the Vercel `/api/app/device`
 /// route signs — keep the two in step.
 struct LicenseClaims: Codable, Sendable {
     let email: String
@@ -79,17 +73,18 @@ enum LicenseStatus: Equatable, Sendable {
     case licensed(LicenseClaims)
     /// Past `exp` but inside the grace window — still usable, worth nagging about.
     case expiringSoon(LicenseClaims, daysLeft: Int)
-    case trial(daysLeft: Int)
-    case trialExpired
+    /// Signed in, but no active subscription (lapsed, cancelled, or never bought).
     case expired
+    /// Not signed in — the resting state of a fresh install.
+    case signedOut
     case invalid(String)
 
     /// The single gate the rest of the app asks about. Kept as one property so
     /// changing the business rule never means hunting call sites.
     var allowsUse: Bool {
         switch self {
-        case .licensed, .expiringSoon, .trial: return true
-        case .trialExpired, .expired, .invalid: return false
+        case .licensed, .expiringSoon: return true
+        case .expired, .signedOut, .invalid: return false
         }
     }
 
@@ -102,56 +97,23 @@ enum LicenseStatus: Equatable, Sendable {
 
     var label: String {
         switch self {
-        case .licensed: return "Licensed"
+        case .licensed: return "Active"
         case .expiringSoon(_, let d): return "Renewal needed — \(d)d left"
-        case .trial(let d): return "Trial — \(d) day\(d == 1 ? "" : "s") left"
-        case .trialExpired: return "Trial ended"
-        case .expired: return "License expired"
-        case .invalid: return "License problem"
+        case .expired: return "No active subscription"
+        case .signedOut: return "Not signed in"
+        case .invalid: return "Account problem"
         }
     }
 
     static func == (a: LicenseStatus, b: LicenseStatus) -> Bool { a.label == b.label }
 }
 
-@MainActor
-final class LicenseStore: ObservableObject {
-    @Published private(set) var status: LicenseStatus = .trialExpired
-    @Published private(set) var isActivating = false
-    @Published private(set) var lastError: String?
+/// Pure verification helpers, shared by `AccountStore`. No instance state — the
+/// live session (bearer token, entitlement token, networking) lives there.
+enum LicenseStore {
 
-    private let tokenAccount = "license-token"
-    private let keyAccount = "license-key"
-    private let trialAccount = "trial-started"
-
-    init() {
-        refresh()
-        // Weekly billing means the stored token is short-lived by design, so top
-        // it up in the background at launch. Silent: a subscriber in good
-        // standing should never see this happen.
-        Task { await refreshTokenIfNeeded() }
-    }
-
-    // MARK: - State
-
-    /// Recomputes status from what's on disk. Cheap and pure enough to call on
-    /// every panel open — it's a signature check, not a network call.
-    func refresh() {
-        if let token = KeychainStore.load(account: tokenAccount) {
-            switch Self.verify(token) {
-            case .success(let claims):
-                status = Self.status(for: claims)
-                return
-            case .failure(let err):
-                // A bad token shouldn't strand someone mid-trial.
-                status = trialStatus() ?? .invalid(err.message)
-                return
-            }
-        }
-        status = trialStatus() ?? .trialExpired
-    }
-
-    nonisolated private static func status(for claims: LicenseClaims) -> LicenseStatus {
+    /// Turns verified claims into a status, applying the grace window.
+    static func status(for claims: LicenseClaims) -> LicenseStatus {
         guard let expiry = claims.expiryDate else { return .licensed(claims) }
         let now = Date()
         if now < expiry { return .licensed(claims) }
@@ -159,112 +121,6 @@ final class LicenseStore: ObservableObject {
         guard now < graceEnds else { return .expired }
         let left = Int(ceil(graceEnds.timeIntervalSince(now) / 86_400))
         return .expiringSoon(claims, daysLeft: max(1, left))
-    }
-
-    /// Trial clock, stamped in the Keychain on first run. The Keychain outlives a
-    /// drag-to-trash reinstall, so the obvious "delete and redownload" reset
-    /// doesn't work. Anyone determined can still clear it — that's fine.
-    private func trialStatus() -> LicenseStatus? {
-        let started: Date
-        if let raw = KeychainStore.load(account: trialAccount), let t = TimeInterval(raw) {
-            started = Date(timeIntervalSince1970: t)
-        } else {
-            started = Date()
-            KeychainStore.save(String(started.timeIntervalSince1970), account: trialAccount)
-        }
-        let ends = started.addingTimeInterval(Double(LicenseConfig.trialDays) * 86_400)
-        guard Date() < ends else { return nil }
-        let left = Int(ceil(ends.timeIntervalSince(Date()) / 86_400))
-        return .trial(daysLeft: max(1, left))
-    }
-
-    // MARK: - Activation
-
-    /// Trades a purchase key for a signed token. Errors surface on `lastError`
-    /// rather than throwing — the caller is a SwiftUI button.
-    func activate(key rawKey: String) async {
-        await exchange(key: rawKey, silent: false)
-    }
-
-    /// Swaps the stored key for a fresh token when the current one is close to
-    /// running out. No-ops when there's nothing to renew, when the token still
-    /// has plenty of life, or when the licence is perpetual (`exp == 0`).
-    ///
-    /// Failure is deliberately silent: the customer keeps the token they have
-    /// and the grace window covers a spell offline. Nagging someone on a plane
-    /// about a renewal they can't action would be worse than saying nothing.
-    func refreshTokenIfNeeded() async {
-        guard LicenseConfig.isConfigured,
-              let key = KeychainStore.load(account: keyAccount),
-              let token = KeychainStore.load(account: tokenAccount),
-              case .success(let claims) = Self.verify(token),
-              let expiry = claims.expiryDate
-        else { return }
-
-        let threshold = expiry.addingTimeInterval(-LicenseConfig.refreshWithinDays * 86_400)
-        guard Date() >= threshold else { return }
-
-        await exchange(key: key, silent: true)
-    }
-
-    private func exchange(key rawKey: String, silent: Bool) async {
-        let key = rawKey.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
-        guard !key.isEmpty else { return }
-        guard LicenseConfig.isConfigured else {
-            if !silent { lastError = "This build has no license public key compiled in." }
-            return
-        }
-
-        if !silent {
-            isActivating = true
-            lastError = nil
-        }
-        defer { if !silent { isActivating = false } }
-
-        var req = URLRequest(url: LicenseConfig.activationURL)
-        req.httpMethod = "POST"
-        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        req.timeoutInterval = 20
-        let body = ["key": key, "device": Self.deviceID, "version": Self.appVersion]
-        req.httpBody = try? JSONSerialization.data(withJSONObject: body)
-
-        do {
-            let (data, response) = try await URLSession.shared.data(for: req)
-            let code = (response as? HTTPURLResponse)?.statusCode ?? 0
-            let payload = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
-
-            guard code == 200, let token = payload?["token"] as? String else {
-                if !silent {
-                    lastError = (payload?["error"] as? String)
-                        ?? "Activation failed (HTTP \(code)). Check the key and try again."
-                }
-                return
-            }
-            // Never trust the server blindly — the token has to verify against the
-            // compiled-in public key before it's worth storing.
-            switch Self.verify(token) {
-            case .success:
-                KeychainStore.save(token, account: tokenAccount)
-                // Keep the key too: it's what lets the weekly renewal above run
-                // without asking the customer to paste it again every seven days.
-                KeychainStore.save(key, account: keyAccount)
-                refresh()
-            case .failure(let err):
-                if !silent {
-                    lastError = "Server returned a token this build can't verify: \(err.message)"
-                }
-            }
-        } catch {
-            if !silent {
-                lastError = "Couldn't reach nohandsapp.com: \(error.localizedDescription)"
-            }
-        }
-    }
-
-    func deactivate() {
-        KeychainStore.delete(account: keyAccount)
-        KeychainStore.delete(account: tokenAccount)
-        refresh()
     }
 
     // MARK: - Verification
@@ -275,7 +131,7 @@ final class LicenseStore: ObservableObject {
     /// The key and device are parameters purely so the test suite can pin the
     /// Node-signing / Swift-verifying interop against a fixed vector; production
     /// callers take the defaults.
-    nonisolated static func verify(_ token: String,
+    static func verify(_ token: String,
                        publicKeyHex: String = LicenseConfig.publicKeyHex,
                        expectedDevice: String = deviceID) -> Result<LicenseClaims, LicenseError> {
         let parts = token.split(separator: ".", omittingEmptySubsequences: false)
@@ -295,7 +151,7 @@ final class LicenseStore: ObservableObject {
             return .failure(LicenseError("unreadable claims"))
         }
         guard claims.device == expectedDevice else {
-            return .failure(LicenseError("this license is registered to a different Mac"))
+            return .failure(LicenseError("this account is registered to a different Mac"))
         }
         return .success(claims)
     }
@@ -304,7 +160,7 @@ final class LicenseStore: ObservableObject {
 
     /// Hashed IOPlatformUUID. Hashing keeps a raw hardware serial off the wire
     /// while still being stable across reinstalls and OS upgrades.
-    nonisolated static let deviceID: String = {
+    static let deviceID: String = {
         let service = IOServiceGetMatchingService(kIOMainPortDefault,
                                                   IOServiceMatching("IOPlatformExpertDevice"))
         defer { if service != 0 { IOObjectRelease(service) } }
@@ -318,7 +174,7 @@ final class LicenseStore: ObservableObject {
         return digest.map { String(format: "%02x", $0) }.joined().prefix(32).description
     }()
 
-    nonisolated static var appVersion: String {
+    static var appVersion: String {
         Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0"
     }
 }

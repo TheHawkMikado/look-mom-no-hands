@@ -34,7 +34,30 @@ final class AppCoordinator: ObservableObject {
     @Published var dictationChord: DictationChord = .controlOption {
         didSet {
             UserDefaults.standard.set(dictationChord.rawValue, forKey: Self.chordKey)
-            hotkey.setChord(dictationChord.flags)
+            refreshHotkeys()
+        }
+    }
+    /// Like push-to-dictate, but presses Enter after pasting so the text is
+    /// submitted (chat inputs, search fields, terminals). Persisted.
+    @Published var submitChord: DictationChord = .controlOptionShift {
+        didSet {
+            UserDefaults.standard.set(submitChord.rawValue, forKey: Self.submitChordKey)
+            refreshHotkeys()
+        }
+    }
+    /// Starts a screen-control session — the button equivalent of "Hey Mama".
+    /// Off by default so voice stays the primary trigger. Persisted.
+    @Published var sessionStartChord: DictationChord = .off {
+        didSet {
+            UserDefaults.standard.set(sessionStartChord.rawValue, forKey: Self.sessionStartChordKey)
+            refreshHotkeys()
+        }
+    }
+    /// Ends the active session — the button equivalent of "Adios Mama". Persisted.
+    @Published var sessionEndChord: DictationChord = .off {
+        didSet {
+            UserDefaults.standard.set(sessionEndChord.rawValue, forKey: Self.sessionEndChordKey)
+            refreshHotkeys()
         }
     }
     /// Selected input device UID (nil = system default). Persisted. Lets the
@@ -58,9 +81,19 @@ final class AppCoordinator: ObservableObject {
     @Published var visionClickEnabled = true {
         didSet { UserDefaults.standard.set(visionClickEnabled, forKey: Self.visionKey) }
     }
+    /// Pull an app's documentation (features + shortcuts) via web search the first
+    /// time it's the focus of a command, and feed it to the planner. Costs a
+    /// web-search call per new app; cached after. Persisted.
+    @Published var appDocsEnabled = true {
+        didSet { UserDefaults.standard.set(appDocsEnabled, forKey: Self.appDocsKey) }
+    }
     private static let chordKey = "dictationChord"
+    private static let submitChordKey = "submitChord"
+    private static let sessionStartChordKey = "sessionStartChord"
+    private static let sessionEndChordKey = "sessionEndChord"
     private static let cleanupKey = "cleanUpInsertedText"
     private static let visionKey = "visionClickEnabled"
+    private static let appDocsKey = "appDocsEnabled"
     private let hotkey = HotkeyMonitor()
     private let pill = RecorderPill()                        // floating recorder HUD
     private let demo = DemonstrationRecorder()               // watch-me click/key capture
@@ -70,6 +103,8 @@ final class AppCoordinator: ObservableObject {
     private var starting = false                             // start() in flight (async permission gap)
     private var pendingRecording = false                     // recording requested before the mic was on
     private var pendingRecordingOutput: RecorderOutput = .note
+    private var pendingSessionStart = false                  // "Hey Mama" hotkey pressed before the mic was on
+    private var submitAfterInsert = false                    // press Enter after the current insert pastes
     private var insertTargetApp: NSRunningApplication?       // app to paste into (captured at insert start)
     private var lastExternalApp: NSRunningApplication?       // most recent frontmost app that ISN'T us
 
@@ -134,13 +169,29 @@ final class AppCoordinator: ObservableObject {
     private var dialogue: [(role: String, content: String)] = []
 
     private let listener = VoiceListener()
-    private var claude: ClaudeClient?
+    /// Mirrors `claude != nil` so SwiftUI (settings/menu) reacts to key changes.
+    /// `claude` itself is private and non-observable; drive the flag from its didSet.
+    @Published private(set) var hasKey = false
+    private var claude: ClaudeClient? {
+        didSet { hasKey = claude != nil }
+    }
     private let speaker = Speaker()
     let vocabulary: VocabularyStore
     let profiles: ProfileStore
     let procedures: ProcedureStore
     let knowledge: KnowledgeStore
     let insertRules: InsertRulesStore
+    let learnedControls: ElementMemoryStore
+    let appCapabilities: AppCapabilityStore
+    private var capabilityFetches: Set<String> = []   // bundleIDs with a fetch in flight
+
+    // Teach-on-miss: when a click can't be resolved, we ask the user to click it
+    // and learn the control from their demonstration. One-shot global mouse monitor.
+    private var teachMonitor: Any?
+    private var teachTarget = ""
+    private var teachApp: NSRunningApplication?
+    private var teachTimeout: Task<Void, Never>?
+    private let teachOverlay = TeachingOverlay()
 
     // Clause-pause gate: act this soon after a natural pause so a compound request
     // runs step-by-step; wait longer when the phrase clearly continues; snap back
@@ -200,6 +251,8 @@ final class AppCoordinator: ObservableObject {
         procedures = ProcedureStore(directory: store.directory)
         knowledge = KnowledgeStore(directory: store.directory)
         insertRules = InsertRulesStore(directory: store.directory)
+        learnedControls = ElementMemoryStore(directory: store.directory)
+        appCapabilities = AppCapabilityStore(directory: store.directory)
         if UserDefaults.standard.object(forKey: Self.silenceKey) != nil {
             recorderEndPause = UserDefaults.standard.double(forKey: Self.silenceKey)
         }
@@ -211,11 +264,26 @@ final class AppCoordinator: ObservableObject {
            let saved = DictationChord(rawValue: raw) {
             dictationChord = saved
         }
+        if let raw = UserDefaults.standard.string(forKey: Self.submitChordKey),
+           let saved = DictationChord(rawValue: raw) {
+            submitChord = saved
+        }
+        if let raw = UserDefaults.standard.string(forKey: Self.sessionStartChordKey),
+           let saved = DictationChord(rawValue: raw) {
+            sessionStartChord = saved
+        }
+        if let raw = UserDefaults.standard.string(forKey: Self.sessionEndChordKey),
+           let saved = DictationChord(rawValue: raw) {
+            sessionEndChord = saved
+        }
         if UserDefaults.standard.object(forKey: Self.cleanupKey) != nil {
             cleanUpInsertedText = UserDefaults.standard.bool(forKey: Self.cleanupKey)
         }
         if UserDefaults.standard.object(forKey: Self.visionKey) != nil {
             visionClickEnabled = UserDefaults.standard.bool(forKey: Self.visionKey)
+        }
+        if UserDefaults.standard.object(forKey: Self.appDocsKey) != nil {
+            appDocsEnabled = UserDefaults.standard.bool(forKey: Self.appDocsKey)
         }
         micUID = UserDefaults.standard.string(forKey: Self.micKey)
         listener.preferredInputUID = micUID
@@ -223,10 +291,10 @@ final class AppCoordinator: ObservableObject {
         listener.onPartial = { [weak self] text in self?.handlePartial(text) }
         listener.onInfo = { [weak self] msg in self?.store.log("speech", msg) }
         listener.onLevel = { [weak self] level in self?.meter.level = level }
-        // Push-to-dictate chord works whenever the app is running, even before
-        // Start — it turns the mic on on demand. Global delivery needs Accessibility.
-        hotkey.onToggle = { [weak self] in self?.toggleHotkeyDictation() }
-        hotkey.setChord(dictationChord.flags)
+        // Hotkeys work whenever the app is running, even before Start — they turn
+        // the mic on on demand. Global delivery needs Accessibility.
+        hotkey.onChord = { [weak self] id in self?.handleHotkey(id) }
+        refreshHotkeys()
         hotkey.start()
         // Track the last app that had focus that ISN'T us, so a push-to-dictate
         // paste always targets the user's editor even if our panel was frontmost
@@ -356,21 +424,40 @@ final class AppCoordinator: ObservableObject {
     }
 
     func setAPIKey(_ key: String) {
-        KeychainStore.save(key)
-        claude = ClaudeClient(apiKey: key)
+        let trimmed = key.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        KeychainStore.save(trimmed)
+        claude = ClaudeClient(apiKey: trimmed)
         store.log("app", "API key saved")
     }
 
     func setElevenLabsKey(_ key: String) {
         let trimmed = key.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { clearElevenLabsKey(); return }
         KeychainStore.save(trimmed, account: Self.elevenLabsAccount)
         speaker.elevenLabsKey = trimmed
-        elevenLabsKey = trimmed.isEmpty ? nil : trimmed
-        hasElevenLabsKey = !trimmed.isEmpty
+        elevenLabsKey = trimmed
+        hasElevenLabsKey = true
         store.log("app", "ElevenLabs key saved — spoken replies on")
     }
 
-    var hasKey: Bool { claude != nil }
+    /// Removes the stored Anthropic key. Screen-control commands are disabled
+    /// until a new key is entered.
+    func clearAPIKey() {
+        KeychainStore.delete(account: KeychainStore.defaultAccount)
+        claude = nil
+        store.log("app", "API key removed")
+    }
+
+    /// Removes the stored ElevenLabs key — spoken replies fall back to the system
+    /// voice and Scribe transcription is unavailable.
+    func clearElevenLabsKey() {
+        KeychainStore.delete(account: Self.elevenLabsAccount)
+        speaker.elevenLabsKey = nil
+        elevenLabsKey = nil
+        hasElevenLabsKey = false
+        store.log("app", "ElevenLabs key removed — spoken replies off")
+    }
 
     // MARK: Lifecycle
 
@@ -401,17 +488,43 @@ final class AppCoordinator: ObservableObject {
             self.phase = .listeningWake
             self.utterance = ""
             self.store.log("app", "listening enabled (standby)")
-            // A trigger that started the mic proceeds straight into recording.
+            // A trigger that started the mic proceeds straight into its action.
             if self.pendingRecording {
                 self.pendingRecording = false
                 self.startRecording(output: self.pendingRecordingOutput)
+            } else if self.pendingSessionStart {
+                self.pendingSessionStart = false
+                self.beginSession()
             }
         }
     }
 
+    /// Push the current hotkey chords into the monitor. Called at launch and
+    /// whenever any chord setting changes.
+    private func refreshHotkeys() {
+        hotkey.setChords([
+            (id: "dictate", flags: dictationChord.flags),
+            (id: "submit", flags: submitChord.flags),
+            (id: "sessionStart", flags: sessionStartChord.flags),
+            (id: "sessionEnd", flags: sessionEndChord.flags)
+        ])
+    }
+
+    /// Routes a fired chord to its action. The id strings match `refreshHotkeys`.
+    private func handleHotkey(_ id: String) {
+        switch id {
+        case "dictate": toggleHotkeyDictation(submit: false)
+        case "submit": toggleHotkeyDictation(submit: true)
+        case "sessionStart": startSessionByHotkey()
+        case "sessionEnd": endSessionByHotkey()
+        default: break
+        }
+    }
+
     /// The push-to-dictate chord/hotkey: toggles insert-mode recording, starting
-    /// the mic on demand if the app wasn't already listening.
-    func toggleHotkeyDictation() {
+    /// the mic on demand if the app wasn't already listening. When `submit` is
+    /// true, Enter is pressed after the text pastes (dictate-and-submit).
+    func toggleHotkeyDictation(submit: Bool = false) {
         if demonstrating { return }   // a chord press during a demo would fight the recording
         if mode == .recording {
             stopRecording()
@@ -427,6 +540,7 @@ final class AppCoordinator: ObservableObject {
             store.log("hotkey", "ignored — no API key (needed for cleanup)")
             return
         }
+        submitAfterInsert = submit
         if isRunning {
             startRecording(output: .insert)
         } else if starting || pendingRecording {
@@ -440,6 +554,29 @@ final class AppCoordinator: ObservableObject {
         }
     }
 
+    /// Start a screen-control session by hotkey — the button equivalent of "Hey
+    /// Mama". Turns the mic on on demand if the app wasn't already listening.
+    func startSessionByHotkey() {
+        if demonstrating { return }
+        if mode == .command { return }   // already in a session
+        if isRunning {
+            if mode == .recording { stopRecording() }
+            beginSession()
+        } else if starting || pendingSessionStart {
+            return
+        } else {
+            pendingSessionStart = true
+            start()
+        }
+    }
+
+    /// End the active session by hotkey — the button equivalent of "Adios Mama".
+    func endSessionByHotkey() {
+        guard isRunning else { return }
+        if mode == .recording { stopRecording() }
+        if mode != .standby { endSession(reason: "hotkey") }
+    }
+
     func stop() {
         runGeneration += 1
         actionTask?.cancel(); actionTask = nil
@@ -449,6 +586,9 @@ final class AppCoordinator: ObservableObject {
         flushing = false
         pendingClarification = nil
         pendingRecording = false
+        pendingSessionStart = false
+        endTeaching()
+        teachOverlay.hideAll()
         if demonstrating { _ = demo.stop(); demonstrating = false }
         screenPrefetch = nil   // a snapshot from the stopped run must not feed the next
         listener.metering = false
@@ -1552,14 +1692,45 @@ final class AppCoordinator: ObservableObject {
         // knowledge.promptContext deliberately excluded — it's stable, so it rides in
         // the cached prefix alongside the vocabulary (see the parsePlan call site).
         // Everything below changes turn to turn.
+        // Documentation-derived capabilities for the app in focus (fetched lazily).
+        let frontApp = NSWorkspace.shared.frontmostApplication
+        if appDocsEnabled, let bundle = frontApp?.bundleIdentifier,
+           bundle != Bundle.main.bundleIdentifier {
+            fetchAppCapabilitiesIfNeeded(bundleID: bundle, appName: frontApp?.localizedName)
+        }
+        let capabilities = frontApp?.bundleIdentifier.map { appCapabilities.promptText(forBundleID: $0) } ?? ""
         var parts = [workingContext.promptText,
                      procedures.promptContext(for: command),
+                     capabilities,
                      environment.snapshot.promptText,
                      recentActionsBlock()]
         if !taskProgress.isEmpty {
             parts.append("This task so far (already done — don't repeat):\n" + taskProgress.map { "- \($0)" }.joined(separator: "\n"))
         }
         return parts.filter { !$0.isEmpty }.joined(separator: "\n\n")
+    }
+
+    /// Kicks off a one-time background fetch of an app's documented capabilities
+    /// (features + shortcuts) if we don't already have a recent copy. Non-blocking:
+    /// the result lands in the store for the *next* command, never stalling this one.
+    private func fetchAppCapabilitiesIfNeeded(bundleID: String, appName: String?) {
+        guard let claude, appCapabilities.needsFetch(bundleID: bundleID),
+              !capabilityFetches.contains(bundleID) else { return }
+        // Need a human-readable name to search for.
+        guard let name = appName, !name.isEmpty else { return }
+        capabilityFetches.insert(bundleID)
+        store.log("appdocs", "researching \(name)…")
+        Task { [weak self] in
+            defer { self?.capabilityFetches.remove(bundleID) }
+            do {
+                let summary = try await claude.researchAppCapabilities(appName: name)
+                guard let self else { return }
+                self.appCapabilities.store(bundleID: bundleID, appName: name, summary: summary)
+                self.store.log("appdocs", "learned \(name)'s capabilities (\(summary.count) chars)")
+            } catch {
+                self?.store.log("appdocs", "couldn't research \(name): \(error)")
+            }
+        }
     }
 
     // MARK: Working context + memory
@@ -1619,33 +1790,113 @@ final class AppCoordinator: ObservableObject {
     /// The vision path is why an all-canvas/Electron UI (poor AX) is still clickable.
     private func performClick(target: String, gen: Int) async throws {
         guard ScreenController.isTrusted else { throw ScreenController.ControlError.notTrusted }
+        let app = NSWorkspace.shared.frontmostApplication
+
+        // 1. Direct AX search on the spoken phrase.
+        if try await clickViaAX(target) { return }
+
+        // 2. A control the user previously taught for this phrase in this app —
+        //    stored as a canonical label, re-resolved through the same AX matcher
+        //    so it survives window resizes and moves.
+        if let bundle = app?.bundleIdentifier,
+           let learned = learnedControls.lookup(appBundleID: bundle, phrase: target),
+           try await clickViaAX(learned.label) {
+            store.log("learn", "clicked \"\(target)\" via learned control \"\(learned.label)\"")
+            return
+        }
+
+        // 3. Vision fallback: screenshot + let the model locate it by pixel.
+        if visionClickEnabled, let claude,
+           let shot = await ScreenController.captureDisplayForFrontWindow() {
+            guard gen == runGeneration, !Task.isCancelled else { throw CancellationError() }
+            store.log("vision", "AX had no match for \"\(target)\" — trying screenshot")
+            if let norm = try await claude.locateElement(described: target, pngBase64: shot.pngBase64) {
+                guard gen == runGeneration, !Task.isCancelled else { throw CancellationError() }
+                let point = ScreenController.normalizedToScreen(x: norm.x, y: norm.y, in: shot.frame)
+                ScreenController.clickAt(point)
+                store.log("vision", "clicked \"\(target)\" via screenshot at \(Int(point.x)),\(Int(point.y))")
+                return
+            }
+        }
+
+        // 4. Everything automated failed — ask the user to show us, and learn it.
+        guard gen == runGeneration, !Task.isCancelled else { throw CancellationError() }
+        beginTeaching(target: target, app: app, gen: gen)
+    }
+
+    /// Runs `ScreenController.click` off the main actor. Returns true on a click,
+    /// false on an AX miss; rethrows anything else (not-trusted, cancellation).
+    private func clickViaAX(_ target: String) async throws -> Bool {
         do {
-            // Off the main actor + cancellable, same as the generic action path.
             try await withThrowingTaskGroup(of: Void.self) { group in
                 group.addTask { try ScreenController.click(target: target) }
                 try await group.waitForAll()
             }
-            return
+            return true
         } catch let error as ScreenController.ControlError {
-            // Only an AX miss is worth a screenshot retry; a real failure (not
-            // trusted, cancelled) propagates unchanged.
-            guard case .elementNotFound = error, visionClickEnabled, let claude else { throw error }
-            store.log("vision", "AX had no match for \"\(target)\" — trying screenshot")
-            try Task.checkCancellation()
-            guard let shot = await ScreenController.captureDisplayForFrontWindow() else {
-                throw error   // no Screen Recording permission → report the original miss
-            }
-            // Abandon (not silently succeed) if Stop/a newer command intervened during
-            // the async screenshot or vision call — matches every other cancel path.
-            guard gen == runGeneration, !Task.isCancelled else { throw CancellationError() }
-            guard let norm = try await claude.locateElement(described: target, pngBase64: shot.pngBase64) else {
-                throw error   // model couldn't see it either
-            }
-            guard gen == runGeneration, !Task.isCancelled else { throw CancellationError() }
-            let point = ScreenController.normalizedToScreen(x: norm.x, y: norm.y, in: shot.frame)
-            ScreenController.clickAt(point)
-            store.log("vision", "clicked \"\(target)\" via screenshot at \(Int(point.x)),\(Int(point.y))")
+            if case .elementNotFound = error { return false }
+            throw error
         }
+    }
+
+    // MARK: Teach-on-miss
+
+    /// Asks the user (by voice) to click the control we couldn't find, then watches
+    /// for their next click and learns the AX element under it. The user's own click
+    /// performs the action; we only observe, so the command isn't left half-done.
+    private func beginTeaching(target: String, app: NSRunningApplication?, gen: Int) {
+        endTeaching()   // never stack two teaching sessions
+        teachTarget = target
+        teachApp = app
+        teachMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown]) { [weak self] _ in
+            // Capture the location on the event; resolve on the main actor.
+            let cocoa = NSEvent.mouseLocation
+            Task { @MainActor [weak self] in self?.captureTeachClick(atCocoa: cocoa) }
+        }
+        // Give up quietly if they never click (moved on, changed their mind).
+        teachTimeout = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 20_000_000_000)
+            guard !Task.isCancelled else { return }
+            self?.endTeaching()
+        }
+        store.log("learn", "couldn't find \"\(target)\" — asking the user to show me")
+        teachOverlay.showPrompt("Click the “\(target)” and I'll remember it.")
+        Task { await speak("I couldn't find \(target). Click it and I'll remember it for next time.", gen: gen) }
+    }
+
+    private func captureTeachClick(atCocoa point: NSPoint) {
+        guard teachMonitor != nil else { return }
+        let target = teachTarget
+        // Prefer the app that was frontmost when we asked; fall back to whatever is
+        // frontmost now (clicking a control keeps its app frontmost).
+        let app = teachApp ?? NSWorkspace.shared.frontmostApplication
+        endTeaching()
+        // Cocoa is y-up from the primary display's bottom; AX hit-testing is y-down.
+        let primaryHeight = NSScreen.screens.first { $0.frame.origin == .zero }?.frame.height ?? 0
+        let quartz = CGPoint(x: point.x, y: primaryHeight - point.y)
+        guard let hit = ScreenController.elementHit(atQuartz: quartz), !hit.label.isEmpty else {
+            store.log("learn", "couldn't identify the clicked control — nothing learned")
+            Task { await speak("I couldn't identify that control, so I didn't learn it.", gen: runGeneration) }
+            return
+        }
+        // Don't learn a click that landed on our own panel.
+        guard let bundle = app?.bundleIdentifier, bundle != Bundle.main.bundleIdentifier else { return }
+        learnedControls.remember(appBundleID: bundle, appName: app?.localizedName ?? hit.app,
+                                 phrase: target, label: hit.label, role: hit.role)
+        // Flash a box around exactly what we captured, so the user can see it.
+        if let frame = hit.frameAX { teachOverlay.flashBox(aroundAX: frame, color: .systemGreen) }
+        store.log("learn", "learned \"\(target)\" → \"\(hit.label)\" (\(hit.role)) in \(hit.app)")
+        Task { await speak("Got it — I'll remember \(hit.label) for \(target).", gen: runGeneration) }
+    }
+
+    /// Tears down an in-flight teaching session (click monitor + timeout + banner).
+    /// Leaves any confirmation box alone — it manages its own brief auto-hide.
+    private func endTeaching() {
+        if let m = teachMonitor { NSEvent.removeMonitor(m); teachMonitor = nil }
+        teachTimeout?.cancel(); teachTimeout = nil
+        teachTarget = ""
+        teachApp = nil
+        teachOverlay.hidePrompt()
     }
 
     /// Screenshots the screen and speaks Claude's description/answer. Reuses the
@@ -1770,6 +2021,7 @@ final class AppCoordinator: ObservableObject {
     /// Voice-triggered insert: capture the paste target before starting (the app
     /// is already frontmost — no activation happens on this path).
     private func startInsertByVoice() {
+        submitAfterInsert = false   // voice dictation never auto-submits
         captureInsertTarget()
         startRecording(output: .insert)
     }
@@ -1922,6 +2174,10 @@ final class AppCoordinator: ObservableObject {
         }
         try Task.checkCancellation()
         guard gen == runGeneration else { return }
+        // Capture-and-clear now so every early return below leaves a clean slate
+        // for the next dictation; only a completed paste should submit.
+        let shouldSubmit = submitAfterInsert
+        submitAfterInsert = false
         ScreenController.setClipboard(final)   // always — recoverable without Accessibility
         store.addTranscript(TranscriptRecord(kind: "dictation", transcript: final))
         guard ScreenController.isTrusted else {
@@ -1943,6 +2199,13 @@ final class AppCoordinator: ObservableObject {
         guard gen == runGeneration, !Task.isCancelled else { return }
         try? ScreenController.sendPaste()
         store.log("dictation", "pasted \(final.count) chars into \(target.localizedName ?? "target app")")
+        if shouldSubmit {
+            // Let the paste settle in the field before Enter submits it.
+            try? await Task.sleep(nanoseconds: 60_000_000)
+            guard gen == runGeneration, !Task.isCancelled else { return }
+            try? ScreenController.keystroke("return")
+            store.log("dictation", "submitted with Enter")
+        }
     }
 
     // MARK: Permissions

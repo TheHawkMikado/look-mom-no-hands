@@ -547,6 +547,59 @@ final class ClaudeClient: @unchecked Sendable {
         private enum CodingKeys: String, CodingKey { case found, x, y }
     }
 
+    // MARK: - App documentation (server-side web search)
+
+    /// Researches a macOS app's capabilities and keyboard shortcuts via Claude's
+    /// server-side web search, and distills them into a compact reference the
+    /// planner can consult — so it knows what actions an app supports and how to
+    /// trigger them instead of guessing. Runs in the background, once per app.
+    func researchAppCapabilities(appName: String) async throws -> String {
+        // Dynamic-filtering web search variant — Opus 4.8 supports it (older models
+        // would need the basic web_search_20250305 instead).
+        let tool: [String: Any] = [
+            "type": "web_search_20260209",
+            "name": "web_search",
+            "max_uses": 4                       // bound cost; a few searches suffice
+        ]
+        let prompt = """
+        Research the macOS application "\(appName)" using web search. Produce a compact \
+        reference an automation assistant can use to drive it by voice. Focus on the \
+        actions a user would actually command — creating/opening/saving, searching, \
+        navigating, switching views/tabs, and common formatting or editing — and the \
+        keyboard shortcut for each. Prefer official documentation and the app's own \
+        keyboard-shortcut reference. Output plain text under ~350 words, no preamble, in \
+        two sections:
+        Shortcuts:
+        - <action> — <keys>   (one per line)
+        Notes:
+        - <key UI concept or gotcha>   (a few lines)
+        If you can't identify the app confidently, output exactly: UNKNOWN
+        """
+        let body: [String: Any] = [
+            "model": ClaudeModel.opus48.rawValue,
+            "max_tokens": 1500,
+            "tools": [tool],
+            "messages": [[
+                "role": "user",
+                "content": [["type": "text", "text": prompt]]
+            ]]
+        ]
+        // Web search adds round-trips server-side; give it room.
+        let json = try await post(body, timeout: 90)
+        try Self.checkRefusal(json)
+        let text = Self.joinedTextBlocks(json).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty, text != "UNKNOWN" else { throw ClaudeError.decoding("no capabilities") }
+        return text
+    }
+
+    /// All `text` blocks concatenated — web-search responses interleave server-tool
+    /// blocks with the model's prose, so the answer isn't just the first text block.
+    static func joinedTextBlocks(_ json: [String: Any]) -> String {
+        (json["content"] as? [[String: Any]])?
+            .compactMap { ($0["type"] as? String) == "text" ? $0["text"] as? String : nil }
+            .joined(separator: "\n") ?? ""
+    }
+
     // MARK: - Response unpacking
 
     // Both endpoints unpack "first block of a type → decode its payload" — one

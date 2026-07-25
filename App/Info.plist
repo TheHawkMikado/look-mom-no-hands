@@ -25,6 +25,19 @@
     <!-- Menu-bar-only app: no Dock icon, no main window. -->
     <key>LSUIElement</key>
     <true/>
+    <!-- Browser -> app sign-in handoff: the website redirects to
+         lookmomnohands://auth?token=… after login and macOS routes it here. -->
+    <key>CFBundleURLTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleURLName</key>
+            <string>com.lookmomnohands.app.auth</string>
+            <key>CFBundleURLSchemes</key>
+            <array>
+                <string>lookmomnohands</string>
+            </array>
+        </dict>
+    </array>
     <!-- Usage strings drive the TCC permission prompts. -->
     <key>NSMicrophoneUsageDescription</key>
     <string>Look Ma, No Hands listens to your voice so you can control your Mac hands-free.</string>

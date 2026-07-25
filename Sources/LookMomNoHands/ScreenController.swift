@@ -202,10 +202,13 @@ enum ScreenController {
         return !(role == "AXTextField" || role == "AXTextArea" || role == "AXComboBox")
     }
 
-    /// The UI element under a screen point (Quartz coords): its app, role, and
-    /// label. Demonstration recording uses this to narrate "click the 'Save'
-    /// button in Mail" instead of brittle raw coordinates.
-    static func elementLabel(atQuartz point: CGPoint) -> (app: String, role: String, label: String)? {
+    /// The UI element under a screen point (Quartz coords): its app, role, label,
+    /// and frame (AX/top-left origin). Demonstration recording and teach-on-miss
+    /// use this to identify "the 'Save' button in Mail" instead of brittle raw
+    /// coordinates, and to draw a highlight box around what was clicked.
+    struct HitElement { let app: String; let role: String; let label: String; let frameAX: CGRect? }
+
+    static func elementHit(atQuartz point: CGPoint) -> HitElement? {
         let systemWide = AXUIElementCreateSystemWide()
         // Bound the synchronous IPC — a beachballing target must not stall the UI /
         // voice pipeline (this runs on the main actor during a demonstration).
@@ -220,7 +223,30 @@ enum ScreenController {
         let role = (string(element, kAXRoleAttribute) ?? "element")
             .replacingOccurrences(of: "AX", with: "").lowercased()
         let label = descriptiveText(of: element).map { String($0.prefix(60)) } ?? ""
-        return (app, role.isEmpty ? "element" : role, label)
+        return HitElement(app: app, role: role.isEmpty ? "element" : role,
+                          label: label, frameAX: elementFrame(element))
+    }
+
+    /// Convenience for callers that only need app/role/label (demonstration steps).
+    static func elementLabel(atQuartz point: CGPoint) -> (app: String, role: String, label: String)? {
+        guard let hit = elementHit(atQuartz: point) else { return nil }
+        return (hit.app, hit.role, hit.label)
+    }
+
+    /// An element's on-screen frame (AX position + size), or nil if it doesn't
+    /// report geometry.
+    private static func elementFrame(_ element: AXUIElement) -> CGRect? {
+        var posRef: CFTypeRef?
+        var sizeRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, kAXPositionAttribute as CFString, &posRef) == .success,
+              AXUIElementCopyAttributeValue(element, kAXSizeAttribute as CFString, &sizeRef) == .success,
+              let pr = posRef, CFGetTypeID(pr) == AXValueGetTypeID(),
+              let sr = sizeRef, CFGetTypeID(sr) == AXValueGetTypeID() else { return nil }
+        var pos = CGPoint.zero, size = CGSize.zero
+        AXValueGetValue((pr as! AXValue), .cgPoint, &pos)
+        AXValueGetValue((sr as! AXValue), .cgSize, &size)
+        guard size.width > 1, size.height > 1 else { return nil }
+        return CGRect(origin: pos, size: size)
     }
 
     /// Switches the frontmost browser to the tab whose title best matches. Presses
@@ -266,6 +292,9 @@ enum ScreenController {
             // Bound every AX call to this app so one wedged process can't stall the
             // whole poll (AX has no default timeout; this poller runs unattended).
             AXUIElementSetMessagingTimeout(axApp, 0.4)
+            // Unlock Electron/Chromium trees so their tabs/buttons are readable.
+            // Done every poll (idempotent) so newly-launched apps warm up quickly.
+            enableFullAccessibility(axApp)
             var value: CFTypeRef?
             guard AXUIElementCopyAttributeValue(axApp, kAXWindowsAttribute as CFString, &value) == .success,
                   let windows = value as? [AXUIElement] else { continue }
@@ -280,12 +309,11 @@ enum ScreenController {
                 CFGetTypeID($0) == AXUIElementGetTypeID() ? ($0 as! AXUIElement) : nil
             }
 
-            let browser = includeTabs ? browserTabber(for: app.bundleIdentifier) : nil
             var envWindows: [EnvWindow] = []
             for w in windows {
                 let title = string(w, kAXTitleAttribute) ?? ""
                 let isFocused = focused.map { CFEqual($0, w) } ?? false
-                let (tabs, active) = browser?(w) ?? ([], nil)
+                let (tabs, active) = includeTabs ? windowTabs(w) : ([], nil)
                 // Which display holds this window (by its top-left, nudged inward).
                 var display = 0
                 var posRef: CFTypeRef?
@@ -311,29 +339,36 @@ enum ScreenController {
                            displayCount: max(1, displayBounds.count))
     }
 
-    /// Browser tab reader for a bundle id, or nil for non-browsers. Reads the
-    /// window's AXTabGroup children (titles) — no Automation permission needed,
-    /// unlike AppleScript. Best-effort: a browser that doesn't expose an AXTabGroup
-    /// just yields no tabs.
-    private static let browserBundleIDs: Set<String> = [
-        "com.google.Chrome", "com.google.Chrome.canary", "com.brave.Browser",
-        "com.microsoft.edgemac", "company.thebrowser.Browser", "org.mozilla.firefox",
-        "com.apple.Safari"
-    ]
-    private static func browserTabber(for bundleID: String?) -> ((AXUIElement) -> ([String], String?))? {
-        guard let bundleID, browserBundleIDs.contains(bundleID) else { return nil }
-        return { window in
-            guard let group = firstDescendant(of: window, role: "AXTabGroup", depth: 0) else { return ([], nil) }
-            var titles: [String] = []
-            var active: String? = nil
-            for tab in children(of: group) where string(tab, kAXRoleAttribute) == "AXRadioButton" {
-                guard let t = string(tab, kAXTitleAttribute), !t.isEmpty else { continue }
-                titles.append(t)
-                // AXValue == 1 marks the selected tab on most browsers.
-                if let v = string(tab, kAXValueAttribute), v == "1" { active = t }
-            }
-            return (titles, active)
+    /// Reads a window's tab strip if it exposes a standard AXTabGroup. Works for
+    /// browsers and any other tabbed app (VS Code, native tab bars) now that
+    /// Electron/Chromium trees are unlocked — no Automation permission needed,
+    /// unlike AppleScript. Best-effort: no tab group ⇒ no tabs.
+    private static func windowTabs(_ window: AXUIElement) -> ([String], String?) {
+        guard let group = firstDescendant(of: window, role: "AXTabGroup", depth: 0) else { return ([], nil) }
+        var titles: [String] = []
+        var active: String? = nil
+        for tab in children(of: group) {
+            // macOS tab controls are usually AXRadioButton; some apps use AXTab.
+            let role = string(tab, kAXRoleAttribute)
+            guard role == "AXRadioButton" || role == "AXTab" else { continue }
+            guard let t = string(tab, kAXTitleAttribute), !t.isEmpty else { continue }
+            titles.append(t)
+            // AXValue == 1 marks the selected tab on most browsers/tab controls.
+            if let v = string(tab, kAXValueAttribute), v == "1" { active = t }
         }
+        return (titles, active)
+    }
+
+    /// Electron and Chromium apps (VS Code, Chrome, Slack, Discord, …) ship an
+    /// almost-empty accessibility tree until an assistive client explicitly asks
+    /// for the full one. Setting AXManualAccessibility on the app element makes
+    /// them build it — every tab, button and field becomes readable and clickable,
+    /// which is what our element search and tab reader depend on. Idempotent, and
+    /// harmless on native apps (they ignore the unknown attribute). The tree is
+    /// built asynchronously, so the first read after enabling may still be sparse;
+    /// the next poll (seconds later) sees the full tree.
+    static func enableFullAccessibility(_ axApp: AXUIElement) {
+        AXUIElementSetAttributeValue(axApp, "AXManualAccessibility" as CFString, kCFBooleanTrue)
     }
 
     private static func firstDescendant(of element: AXUIElement, role: String, depth: Int) -> AXUIElement? {
@@ -470,6 +505,9 @@ enum ScreenController {
         guard isTrusted, let app = NSWorkspace.shared.frontmostApplication,
               let name = app.localizedName else { return nil }
         let axApp = AXUIElementCreateApplication(app.processIdentifier)
+        // Make sure an Electron/Chromium app's tree is built before we read it,
+        // so the model sees its real buttons/fields instead of an empty window.
+        enableFullAccessibility(axApp)
         var winRef: CFTypeRef?
         var window: AXUIElement?
         if AXUIElementCopyAttributeValue(axApp, kAXFocusedWindowAttribute as CFString, &winRef) == .success {

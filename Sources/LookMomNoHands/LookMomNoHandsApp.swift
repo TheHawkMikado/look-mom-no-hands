@@ -1,21 +1,34 @@
 import SwiftUI
+import AppKit
 
 @main
 struct LookMomNoHandsApp: App {
     @StateObject private var coordinator = AppCoordinator()
-    @StateObject private var license = LicenseStore()
+    @StateObject private var account = AccountStore()
     @StateObject private var updates = UpdateChecker()
+    @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
 
     var body: some Scene {
         MenuBarExtra {
             PanelView(coordinator: coordinator, store: coordinator.store,
-                      license: license, updates: updates)
+                      account: account, updates: updates)
                 .onAppear { updates.checkInBackground() }
         } label: {
             // slash = off, dimmed = standby (wake listening), solid = live session
             Image(nsImage: .brandMark(height: 15,
                                       slashed: !coordinator.isRunning,
                                       dimmed: coordinator.isRunning && !coordinator.isActive))
+                // The menu-bar icon is always present, so this is the reliable
+                // place to wire sign-in delivery and run the launch sync — unlike
+                // window content, which isn't materialised until it's shown.
+                .onAppear {
+                    account.attach(coordinator: coordinator)
+                    AccountBridge.handler = { url in
+                        Task { await account.handleAuthCallback(url) }
+                    }
+                    Task { await account.syncOnLaunch() }
+                }
+                .onOpenURL { url in AccountBridge.handle(url) }
         }
         .menuBarExtraStyle(.window)
 
@@ -26,6 +39,22 @@ struct LookMomNoHandsApp: App {
     }
 
     static let dashboardTitle = "\(AppIdentity.displayName) — Dashboard"
+}
+
+/// Routes custom-scheme URLs (`lookmomnohands://auth?token=…`) to the account
+/// store. Both the AppKit delegate below and SwiftUI's `.onOpenURL` feed this one
+/// sink, so sign-in completes whichever path the OS uses to deliver the URL.
+enum AccountBridge {
+    @MainActor static var handler: ((URL) -> Void)?
+    static func handle(_ url: URL) { Task { @MainActor in handler?(url) } }
+}
+
+/// A menu-bar (`LSUIElement`) app still wants a delegate to catch URL opens while
+/// it's already running — the common case, since sign-in happens with the app up.
+final class AppDelegate: NSObject, NSApplicationDelegate {
+    func application(_ application: NSApplication, open urls: [URL]) {
+        urls.forEach(AccountBridge.handle)
+    }
 }
 
 /// The app ships as an `LSUIElement` — menu-bar only, no Dock tile — because
@@ -64,14 +93,10 @@ enum DockPresence {
 struct PanelView: View {
     @ObservedObject var coordinator: AppCoordinator
     @ObservedObject var store: AppStore
-    @ObservedObject var license: LicenseStore
+    @ObservedObject var account: AccountStore
     @ObservedObject var updates: UpdateChecker
     @Environment(\.openWindow) private var openWindow
-    @State private var keyField = ""
-    @State private var elevenField = ""
-    @State private var showVoiceSetup = false
-    @State private var licenseField = ""
-    @State private var showLicenseEntry = false
+    @State private var showAccount = false
     @State private var launchAtLogin = LoginItem.isEnabled
 
     var body: some View {
@@ -80,10 +105,10 @@ struct PanelView: View {
 
             updateBanner
 
-            licenseSection
+            accountSection
 
-            if !coordinator.hasKey {
-                keyEntry
+            if account.status.allowsUse && !coordinator.hasKey {
+                keysNotice
                 Divider()
             }
 
@@ -123,22 +148,6 @@ struct PanelView: View {
                 Text(coordinator.hasElevenLabsKey ? "Spoken replies: ElevenLabs" : "Spoken replies: system voice")
                     .font(.caption).foregroundStyle(.secondary)
                 Spacer()
-                Button(showVoiceSetup ? "Close" : (coordinator.hasElevenLabsKey ? "Change" : "Add key")) {
-                    showVoiceSetup.toggle()
-                }
-                .font(.caption)
-            }
-            if showVoiceSetup {
-                HStack {
-                    SecureField("ElevenLabs API key", text: $elevenField)
-                        .textFieldStyle(.roundedBorder)
-                    Button("Save") {
-                        coordinator.setElevenLabsKey(elevenField)
-                        elevenField = ""
-                        showVoiceSetup = false
-                    }
-                    .disabled(elevenField.isEmpty)
-                }
             }
             if coordinator.hasElevenLabsKey {
                 HStack(spacing: 6) {
@@ -254,86 +263,94 @@ struct PanelView: View {
         }
     }
 
-    /// Licence state. Deliberately quiet while things are fine — a paid customer
-    /// sees one caption line, and only a blocked app gets the full banner.
+    /// Account state. Deliberately quiet while things are fine — a signed-in,
+    /// active user sees one caption line; only a signed-out or lapsed app gets the
+    /// full banner. Signing in opens the website, which hands a token back over
+    /// the `lookmomnohands://` scheme; there's no key to paste here anymore.
     @ViewBuilder
-    private var licenseSection: some View {
-        if license.status.allowsUse && license.status.isPaid && !showLicenseEntry {
+    private var accountSection: some View {
+        let fullyActive = { if case .licensed = account.status { return true } else { return false } }()
+        if fullyActive && !showAccount {
             HStack(spacing: 6) {
                 Image(systemName: "checkmark.seal.fill").foregroundStyle(.green)
-                Text(license.status.label).font(.caption).foregroundStyle(.secondary)
+                Text(accountLine).font(.caption).foregroundStyle(.secondary).lineLimit(1)
                 Spacer()
-                Button("Manage") { showLicenseEntry = true }.font(.caption)
+                Button("Manage") { showAccount = true }.font(.caption)
             }
         } else {
             VStack(alignment: .leading, spacing: 8) {
                 HStack(spacing: 6) {
-                    Image(systemName: license.status.allowsUse ? "clock.badge" : "lock.fill")
-                        .foregroundStyle(license.status.allowsUse ? .orange : .red)
-                    Text(license.status.label).font(.callout.weight(.medium))
+                    Image(systemName: account.status.allowsUse ? "person.crop.circle.badge.checkmark" : "lock.fill")
+                        .foregroundStyle(account.status.allowsUse ? .orange : .red)
+                    Text(accountHeading).font(.callout.weight(.medium))
                     Spacer()
-                    if showLicenseEntry && license.status.allowsUse {
-                        Button("Close") { showLicenseEntry = false }.font(.caption)
-                    }
+                    if showAccount { Button("Close") { showAccount = false }.font(.caption) }
                 }
 
-                if !license.status.allowsUse {
-                    Text("Your \(license.status == .trialExpired ? "trial has ended" : "licence has lapsed"). Enter a licence key to keep going.")
+                if let err = account.lastError, !err.isEmpty {
+                    Text(err).font(.caption2)
+                        .foregroundStyle(account.status.allowsUse ? Color.secondary : Color.red)
+                } else if !account.isSignedIn {
+                    Text("Sign in with the account you subscribed with — your plan and keys come with you.")
                         .font(.caption).foregroundStyle(.secondary)
-                }
-
-                HStack {
-                    TextField("NOHANDS-XXXX-XXXX-XXXX", text: $licenseField)
-                        .textFieldStyle(.roundedBorder)
-                        .disabled(license.isActivating)
-                    Button(license.isActivating ? "Checking…" : "Activate") {
-                        Task {
-                            await license.activate(key: licenseField)
-                            if license.status.isPaid {
-                                licenseField = ""
-                                showLicenseEntry = false
-                            }
-                        }
-                    }
-                    .disabled(licenseField.isEmpty || license.isActivating)
-                }
-
-                if let err = license.lastError {
-                    Text(err).font(.caption2).foregroundStyle(.red)
+                } else if !fullyActive, let email = account.info?.email {
+                    Text("Signed in as \(email)").font(.caption).foregroundStyle(.secondary)
                 }
 
                 HStack(spacing: 12) {
-                    Button("Buy a licence") { NSWorkspace.shared.open(LicenseConfig.purchaseURL) }
-                        .font(.caption)
-                    if license.status.isPaid {
-                        Button("Deactivate this Mac") {
-                            license.deactivate()
-                            showLicenseEntry = false
+                    if account.isSignedIn {
+                        if !account.status.isPaid {
+                            Button("Subscribe") { NSWorkspace.shared.open(LicenseConfig.purchaseURL) }
+                                .font(.caption)
                         }
-                        .font(.caption)
+                        Button(account.isWorking ? "Refreshing…" : "Sign out") {
+                            account.signOut()
+                            showAccount = false
+                        }
+                        .font(.caption).disabled(account.isWorking)
+                    } else {
+                        Button(account.isWorking ? "Signing in…" : "Sign in") {
+                            NSWorkspace.shared.open(AccountStore.signInURL)
+                        }
+                        .font(.caption).disabled(account.isWorking)
                     }
                     Spacer()
                 }
             }
             .padding(10)
-            .background((license.status.allowsUse ? Color.orange : Color.red).opacity(0.08),
+            .background((account.status.allowsUse ? Color.orange : Color.red).opacity(0.08),
                         in: RoundedRectangle(cornerRadius: 8))
         }
         Divider()
     }
 
-    private var keyEntry: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text("Anthropic API key").font(.caption).foregroundStyle(.secondary)
-            HStack {
-                SecureField("sk-ant-…", text: $keyField)
-                    .textFieldStyle(.roundedBorder)
-                Button("Save") {
-                    coordinator.setAPIKey(keyField)
-                    keyField = ""
-                }
-                .disabled(keyField.isEmpty)
+    /// One-line "email · Plan" (with a sub-user tag) for the quiet active state.
+    private var accountLine: String {
+        guard let info = account.info else { return account.status.label }
+        let plan = info.plan.capitalized
+        return info.isSubUser ? "\(info.email) · \(plan) (sub-user)" : "\(info.email) · \(plan)"
+    }
+
+    /// The banner heading: the account line when active, otherwise the status
+    /// ("No active subscription", "Not signed in", …).
+    private var accountHeading: String {
+        if !account.isSignedIn { return "Sign in to activate" }
+        if case .licensed = account.status { return accountLine }
+        return account.status.label
+    }
+
+    /// Shown only when signed in and active but the account has no Anthropic key
+    /// set yet — the holder needs to add it once on the website.
+    private var keysNotice: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "key.slash").foregroundStyle(.orange)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("No Anthropic key on your account yet").font(.caption)
+                Text("Set it once at nohandsapp.com — every device picks it up.")
+                    .font(.caption2).foregroundStyle(.secondary)
             }
+            Spacer()
+            Button("Open") { NSWorkspace.shared.open(AccountStore.accountURL) }.font(.caption)
         }
     }
 
@@ -345,7 +362,7 @@ struct PanelView: View {
                 Button("Stop listening") { coordinator.stop() }
             } else {
                 Button("Start listening") { coordinator.start() }
-                    .disabled(!coordinator.hasKey || !license.status.allowsUse)
+                    .disabled(!coordinator.hasKey || !account.status.allowsUse)
             }
             Button("Dashboard") {
                 openWindow(id: "dashboard")
@@ -372,7 +389,7 @@ struct PanelView: View {
                 } label: {
                     Label("Record a note", systemImage: "mic.circle.fill")
                 }
-                .disabled(!coordinator.isRunning || !coordinator.hasKey || !license.status.allowsUse)
+                .disabled(!coordinator.isRunning || !coordinator.hasKey || !account.status.allowsUse)
                 Spacer()
             }
         }
