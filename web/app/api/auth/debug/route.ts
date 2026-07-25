@@ -1,6 +1,15 @@
 import { NextResponse } from "next/server";
 import { appleClientSecret, appleConfig } from "@/lib/apple";
-import { ensureSchema, sql } from "@/lib/db";
+import {
+  activationsFor,
+  ensureSchema,
+  licenceStats,
+  licencesForEmail,
+  searchLicences,
+  sql,
+  subLicencesOf,
+} from "@/lib/db";
+import { catalogue } from "@/lib/catalogue";
 
 /**
  * GET /api/auth/debug — TEMPORARY. Reports which auth env vars reached this
@@ -91,12 +100,37 @@ async function probeDb() {
   }
 }
 
+/** Runs the exact queries the /account and /admin pages run for a given email,
+ *  so a query that 500s a dashboard is reported here with the real message. */
+async function probePages(email: string) {
+  try {
+    await ensureSchema();
+    // /account path (LicenceCard does these per licence, unguarded on the page):
+    const lics = await licencesForEmail(email);
+    for (const l of lics) {
+      await activationsFor(l.key);
+      if (l.resell) await subLicencesOf(l.key);
+    }
+    // /admin path:
+    await Promise.all([licenceStats(), searchLicences(""), catalogue()]);
+    return `ok (account licences: ${lics.length})`;
+  } catch (err) {
+    return `error:${err instanceof Error ? err.message : "unknown"}`;
+  }
+}
+
 export async function GET() {
   const site = process.env.SITE_URL ?? "https://nohandsapp.com";
   const pk = (process.env.APPLE_PRIVATE_KEY ?? "").replace(/\\n/g, "\n");
   const admins = (process.env.ADMIN_EMAILS ?? "").split(",").map((s) => s.trim()).filter(Boolean);
 
-  const [google, apple, db] = await Promise.all([probeGoogle(site), probeApple(site), probeDb()]);
+  const testEmail = admins[0] ?? "probe@example.com";
+  const [google, apple, db, pages] = await Promise.all([
+    probeGoogle(site),
+    probeApple(site),
+    probeDb(),
+    probePages(testEmail),
+  ]);
 
   return NextResponse.json({
     NODE_ENV: process.env.NODE_ENV ?? null,
@@ -118,5 +152,6 @@ export async function GET() {
     google_probe: google,
     apple_probe: apple,
     db_probe: db, // "ok" => reachable; "error:…" => the reason a dashboard 500s
+    pages_probe: pages, // runs the actual /account + /admin queries; "error:…" => the 500
   });
 }
