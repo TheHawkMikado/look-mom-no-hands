@@ -19,9 +19,9 @@ export const DEFAULT_PLANS: PlanRow[] = [
     price_id: null,
     price_label: "$3",
     period: "/ week",
-    features: ["2 Computers", "1 Phone", "Every update while active", "Cancel any time"],
-    computers: 2,
-    phones: 1,
+    features: ["3 devices (Macs & phones)", "1 user", "Every update while active", "Cancel any time"],
+    computers: 3,
+    phones: 0,
     sub_users: 0,
     resell: false,
     featured: false,
@@ -35,31 +35,31 @@ export const DEFAULT_PLANS: PlanRow[] = [
     price_id: null,
     price_label: "$9",
     period: "/ week",
-    features: ["9 Computers", "9 Phones", "Every update while active", "Cancel any time"],
-    computers: 9,
-    phones: 9,
-    sub_users: 0,
+    features: ["3 devices per user", "Add up to 5 sub-users", "Every update while active", "Cancel any time"],
+    computers: 3,
+    phones: 0,
+    sub_users: 5,
     resell: false,
     featured: true,
     visible: true,
     sort: 20,
   },
   {
-    slug: "unlimited",
-    name: "Unlimited",
+    slug: "community",
+    name: "Community",
     tagline: "resell rights",
     price_id: null,
     price_label: "$27",
     period: "/ week",
     features: [
-      "Unlimited* Computers & Phones",
-      "Resell rights",
-      "Includes 27 Solo sub-users",
+      "3 devices per user",
+      "Unlimited sub-users",
+      "First 27 included free",
       "Then $1 / week per extra user",
     ],
-    computers: UNLIMITED,
-    phones: UNLIMITED,
-    sub_users: 27,
+    computers: 3,
+    phones: 0,
+    sub_users: UNLIMITED,
     resell: true,
     featured: false,
     visible: true,
@@ -109,6 +109,9 @@ export async function catalogue(): Promise<PlanRow[]> {
 
 export interface Entitlements {
   plan: string;
+  /** Combined per-user device pool (Macs + phones). Same value as `computers`,
+   *  named for the new model; this is what the app enforces against. */
+  devices: number;
   computers: number;
   phones: number;
   subUsers: number;
@@ -117,6 +120,7 @@ export interface Entitlements {
 
 const toEntitlements = (p: PlanRow): Entitlements => ({
   plan: p.slug,
+  devices: p.computers,
   computers: p.computers,
   phones: p.phones,
   subUsers: p.sub_users,

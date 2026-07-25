@@ -26,13 +26,16 @@ export function stripe(): Stripe {
 /** What a plan entitles the subscriber to. */
 export interface PlanSpec {
   plan: string;
-  /** Macs that may be activated at once. */
+  /** Combined device pool per user — any mix of Macs (and phones later). Stored
+   *  in the `seats` column and enforced against the `activations` count. */
   computers: number;
-  /** Phones allowed. Sold but not yet enforceable — see the note below. */
+  /** Legacy separate-phones allowance. Superseded by the combined `computers`
+   *  pool; kept at 0 so nothing counts it. */
   phones: number;
-  /** Solo sub-licences a reseller may issue before overage billing starts. */
+  /** Sub-users this account may add (beyond the holder). Community past 27 is
+   *  billed per extra user; see Community overage. */
   subUsers: number;
-  /** Resellers may issue sub-licences under their own account. */
+  /** Legacy reseller flag; sub-user creation is now gated on `subUsers`, not this. */
   resell: boolean;
 }
 
@@ -52,13 +55,13 @@ export const UNLIMITED = 9_999;
  * not built. Selling Unlimited before it is means fulfilling those by hand.
  */
 const PLANS: Record<string, PlanSpec> = {
-  solo: { plan: "solo", computers: 2, phones: 1, subUsers: 0, resell: false },
-  family: { plan: "family", computers: 9, phones: 9, subUsers: 0, resell: false },
-  unlimited: {
-    plan: "unlimited",
-    computers: UNLIMITED,
-    phones: UNLIMITED,
-    subUsers: 27,
+  solo: { plan: "solo", computers: 3, phones: 0, subUsers: 0, resell: false },
+  family: { plan: "family", computers: 3, phones: 0, subUsers: 5, resell: false },
+  community: {
+    plan: "community",
+    computers: 3,
+    phones: 0,
+    subUsers: UNLIMITED, // 27 free, then $1/wk each via Stripe overage metering
     resell: true,
   },
 };
@@ -67,8 +70,14 @@ const PLANS: Record<string, PlanSpec> = {
 export const PRICE_ENV: Record<string, string> = {
   solo: "STRIPE_PRICE_SOLO",
   family: "STRIPE_PRICE_FAMILY",
-  unlimited: "STRIPE_PRICE_UNLIMITED",
+  community: "STRIPE_PRICE_COMMUNITY",
 };
+
+/** Stripe price for the Community per-extra-sub-user weekly overage ($1/wk). */
+export const COMMUNITY_OVERAGE_PRICE_ENV = "STRIPE_PRICE_COMMUNITY_OVERAGE";
+
+/** Sub-users included free before overage billing starts, on Community. */
+export const COMMUNITY_FREE_SUBUSERS = 27;
 
 export function planByName(name: string): PlanSpec | null {
   return PLANS[name] ?? null;

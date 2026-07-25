@@ -65,6 +65,11 @@ export interface Claims {
   exp: number;
   issuedAt: number;
   device: string;
+  /** Combined device pool for the plan. Optional so tokens minted before this
+   *  field existed still decode (Swift side reads it as optional too). */
+  devices?: number;
+  /** Sub-users the account may add. Optional for the same reason. */
+  subUsers?: number;
 }
 
 const b64url = (b: Buffer) => b.toString("base64url");

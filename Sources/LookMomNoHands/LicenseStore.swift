@@ -59,6 +59,11 @@ struct LicenseClaims: Codable, Sendable {
     let issuedAt: TimeInterval
     /// The machine this token was minted for; a copied token fails here.
     let device: String
+    /// Combined device pool for the plan. Optional so older tokens (minted before
+    /// this field existed) still decode — must mirror web `Claims`.
+    let devices: Int?
+    /// Sub-users the account may add. Optional for the same reason.
+    let subUsers: Int?
 
     var expiryDate: Date? { exp == 0 ? nil : Date(timeIntervalSince1970: exp) }
 }

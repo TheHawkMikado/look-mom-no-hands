@@ -1,5 +1,6 @@
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import postgres from "postgres";
+import { decryptSecret, encryptSecret } from "@/lib/crypto";
 
 /**
  * Licence storage.
@@ -124,6 +125,32 @@ export async function ensureSchema() {
     )`;
   await db`CREATE INDEX IF NOT EXISTS login_tokens_email_idx ON login_tokens (email)`;
 
+  // The account's shared Anthropic + ElevenLabs keys, encrypted at rest (AES-GCM,
+  // see lib/crypto). One row per account email; a sub-user has no row and reads
+  // its parent's keys. Stored here rather than in the app so every device the
+  // account (and its sub-users) sign in on picks them up automatically.
+  await db`
+    CREATE TABLE IF NOT EXISTS account_keys (
+      email          text PRIMARY KEY,
+      anthropic_enc  text,
+      elevenlabs_enc text,
+      updated_at     timestamptz NOT NULL DEFAULT now()
+    )`;
+
+  // Long-lived per-device bearer tokens the macOS app holds after signing in.
+  // Only the SHA-256 is stored (same reasoning as login_tokens); one row per
+  // device so a single Mac can be signed out without touching the others.
+  await db`
+    CREATE TABLE IF NOT EXISTS app_tokens (
+      token_hash   text PRIMARY KEY,
+      email        text NOT NULL,
+      device       text,
+      created_at   timestamptz NOT NULL DEFAULT now(),
+      last_used_at timestamptz,
+      revoked      boolean NOT NULL DEFAULT false
+    )`;
+  await db`CREATE INDEX IF NOT EXISTS app_tokens_email_idx ON app_tokens (email)`;
+
   // The order form. Rows here drive what the pricing page offers, so plans can
   // be renamed, reordered, hidden or repriced without a deploy. Seeded from the
   // code catalogue on first run; see lib/catalogue.ts.
@@ -144,6 +171,16 @@ export async function ensureSchema() {
       visible     boolean NOT NULL DEFAULT true,
       sort        integer NOT NULL DEFAULT 0
     )`;
+
+  // Migrate the storefront to the Solo / Family / Community model. Entitlement
+  // counts (devices, sub-users) are code-owned now, so they're set canonically
+  // on every run; admin edits to name/price/features/visibility are preserved.
+  // `unlimited` renames to `community` (one-time; no `community` row exists yet
+  // when this first runs, so the slug rename can't collide).
+  await db`UPDATE plans SET slug = 'community', resell = true WHERE slug = 'unlimited'`;
+  await db`UPDATE plans SET computers = 3, phones = 0, sub_users = 0 WHERE slug = 'solo'`;
+  await db`UPDATE plans SET computers = 3, phones = 0, sub_users = 5 WHERE slug = 'family'`;
+  await db`UPDATE plans SET computers = 3, phones = 0, sub_users = 9999, resell = true WHERE slug = 'community'`;
 }
 
 // MARK: - Sign-in tokens
@@ -175,6 +212,96 @@ export async function consumeLoginToken(token: string): Promise<string | null> {
        AND expires_at > now()
     RETURNING email`;
   return rows[0]?.email ?? null;
+}
+
+// MARK: - Account API keys (shared with sub-users)
+
+/**
+ * The email whose shared keys an account uses: a sub-user borrows its parent
+ * account's keys; everyone else uses their own. Resolved via the sub-user's
+ * licence `parent_key` → the parent licence's email.
+ */
+export async function keyOwnerEmail(email: string): Promise<string> {
+  const db = sql();
+  const rows = await db<{ parent_email: string }[]>`
+    SELECT p.email AS parent_email
+      FROM licences c
+      JOIN licences p ON p.key = c.parent_key
+     WHERE lower(c.email) = lower(${email}) AND c.parent_key IS NOT NULL
+     LIMIT 1`;
+  return rows[0]?.parent_email ?? email;
+}
+
+/** Sets (or clears, with null) one of the account's keys. Per-key so saving one
+ *  never clobbers the other. Encrypted before it touches the database. */
+export async function setAccountKey(
+  email: string,
+  which: "anthropic" | "elevenlabs",
+  value: string | null,
+) {
+  const db = sql();
+  const enc = value && value.trim() ? encryptSecret(value.trim()) : null;
+  const col = which === "anthropic" ? "anthropic_enc" : "elevenlabs_enc";
+  await db.unsafe(
+    `INSERT INTO account_keys (email, ${col}, updated_at) VALUES ($1, $2, now())
+     ON CONFLICT (email) DO UPDATE SET ${col} = $2, updated_at = now()`,
+    [email, enc],
+  );
+}
+
+/** The decrypted keys this account should use (its own, or its parent's if a
+ *  sub-user). Either may be null if unset or undecryptable. */
+export async function getAccountKeys(
+  email: string,
+): Promise<{ anthropic: string | null; elevenlabs: string | null }> {
+  const db = sql();
+  const owner = await keyOwnerEmail(email);
+  const rows = await db<{ anthropic_enc: string | null; elevenlabs_enc: string | null }[]>`
+    SELECT anthropic_enc, elevenlabs_enc FROM account_keys WHERE lower(email) = lower(${owner})`;
+  const row = rows[0];
+  return {
+    anthropic: row?.anthropic_enc ? decryptSecret(row.anthropic_enc) : null,
+    elevenlabs: row?.elevenlabs_enc ? decryptSecret(row.elevenlabs_enc) : null,
+  };
+}
+
+/** Whether THIS account (not a parent) has each key set — for the account UI's
+ *  status pills, without decrypting. */
+export async function accountKeyStatus(
+  email: string,
+): Promise<{ anthropic: boolean; elevenlabs: boolean }> {
+  const db = sql();
+  const rows = await db<{ a: boolean; e: boolean }[]>`
+    SELECT anthropic_enc IS NOT NULL AS a, elevenlabs_enc IS NOT NULL AS e
+      FROM account_keys WHERE lower(email) = lower(${email})`;
+  return { anthropic: rows[0]?.a ?? false, elevenlabs: rows[0]?.e ?? false };
+}
+
+// MARK: - App bearer tokens (macOS app sessions)
+
+/** Mints a per-device bearer token for the app; only its hash is stored. */
+export async function createAppToken(email: string, device: string | null): Promise<string> {
+  const db = sql();
+  const raw = randomBytes(32).toString("base64url");
+  await db`
+    INSERT INTO app_tokens (token_hash, email, device)
+    VALUES (${hashToken(raw)}, ${email}, ${device})`;
+  return raw;
+}
+
+/** The email a live (non-revoked) app token belongs to, or null. Touches last_used. */
+export async function appTokenEmail(raw: string): Promise<string | null> {
+  const db = sql();
+  const rows = await db<{ email: string }[]>`
+    UPDATE app_tokens SET last_used_at = now()
+     WHERE token_hash = ${hashToken(raw)} AND NOT revoked
+    RETURNING email`;
+  return rows[0]?.email ?? null;
+}
+
+export async function revokeAppToken(raw: string) {
+  const db = sql();
+  await db`UPDATE app_tokens SET revoked = true WHERE token_hash = ${hashToken(raw)}`;
 }
 
 /**
