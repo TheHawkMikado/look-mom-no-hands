@@ -330,7 +330,7 @@ final class ClaudeClient: @unchecked Sendable {
     // MARK: Dictation report (output_config.format + adaptive thinking where supported)
 
     func buildDictationReport(_ rawTranscript: String, vocabulary: String = "", instructions: String = "") async throws -> DictationReport {
-        let json = try await post(Self.reportRequestBody(transcript: rawTranscript, vocabulary: vocabulary, instructions: instructions, model: .opus48))
+        let json = try await post(Self.reportRequestBody(transcript: rawTranscript, vocabulary: vocabulary, instructions: instructions, model: .opus48), kind: .report)
         try Self.checkRefusal(json)
         return try Self.decodeBlock(json, blockType: "text", payloadKey: "text")
     }
@@ -430,7 +430,7 @@ final class ClaudeClient: @unchecked Sendable {
             ]]
         ]
         if !vocabulary.isEmpty { body["system"] = vocabulary }
-        let json = try await post(body, timeout: 15)
+        let json = try await post(body, timeout: 15, kind: .cleanup)
         try Self.checkRefusal(json)
         guard let text = Self.firstTextBlock(json), !text.isEmpty else {
             throw ClaudeError.decoding("no text block")
@@ -456,7 +456,7 @@ final class ClaudeClient: @unchecked Sendable {
                 """
             ]]
         ]
-        let json = try await post(body, timeout: 30)
+        let json = try await post(body, timeout: 30, kind: .answer)
         try Self.checkRefusal(json)
         guard let text = Self.firstTextBlock(json), !text.isEmpty else { throw ClaudeError.decoding("no text") }
         return text.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -503,7 +503,7 @@ final class ClaudeClient: @unchecked Sendable {
                 ]
             ]]
         ]
-        let json = try await post(body, timeout: 30)
+        let json = try await post(body, timeout: 30, kind: .vision)
         try Self.checkRefusal(json)
         let hit: VisionHit = try Self.decodeBlock(json, blockType: "tool_use", payloadKey: "input")
         // Missing coordinates count as "not found" rather than defaulting to (0,0),
@@ -530,7 +530,7 @@ final class ClaudeClient: @unchecked Sendable {
                 ]
             ]]
         ]
-        let json = try await post(body, timeout: 30)
+        let json = try await post(body, timeout: 30, kind: .vision)
         try Self.checkRefusal(json)
         guard let text = Self.firstTextBlock(json), !text.isEmpty else { throw ClaudeError.decoding("no text") }
         return text.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -585,7 +585,7 @@ final class ClaudeClient: @unchecked Sendable {
             ]]
         ]
         // Web search adds round-trips server-side; give it room.
-        let json = try await post(body, timeout: 90)
+        let json = try await post(body, timeout: 90, kind: .appDocs)
         try Self.checkRefusal(json)
         let text = Self.joinedTextBlocks(json).trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty, text != "UNKNOWN" else { throw ClaudeError.decoding("no capabilities") }
@@ -622,7 +622,8 @@ final class ClaudeClient: @unchecked Sendable {
 
     // MARK: - Transport
 
-    private func post(_ body: [String: Any], timeout: TimeInterval = 30) async throws -> [String: Any] {
+    private func post(_ body: [String: Any], timeout: TimeInterval = 30,
+                      kind: CostMeter.Kind = .command) async throws -> [String: Any] {
         var req = URLRequest(url: endpoint)
         req.httpMethod = "POST"
         req.timeoutInterval = timeout               // fail fast instead of hanging
@@ -638,6 +639,10 @@ final class ClaudeClient: @unchecked Sendable {
         }
         guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             throw ClaudeError.decoding("response not an object")
+        }
+        // Record what this call actually cost, tagged by workload, for the meter.
+        if let usage = json["usage"] as? [String: Any] {
+            CostMeter.shared.recordClaude(kind: kind, model: body["model"] as? String, usage: usage)
         }
         return json
     }

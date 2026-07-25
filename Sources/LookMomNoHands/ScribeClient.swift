@@ -46,7 +46,23 @@ struct ScribeClient: Sendable {
               let text = json["text"] as? String, !text.isEmpty else {
             throw ScribeError.noText
         }
+        // Scribe bills by audio duration — record it for the cost meter (dictation).
+        CostMeter.shared.recordAudio(seconds: Self.audioSeconds(wav: wav))
         return text.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// Duration in seconds of a canonical PCM WAV, read from its header. Used only
+    /// for cost metering, so a best-effort parse (assuming the standard 44-byte
+    /// header the app writes) is enough; anything odd returns 0 and is ignored.
+    static func audioSeconds(wav: Data) -> Double {
+        guard wav.count > 44 else { return 0 }
+        func u16(_ o: Int) -> Int { Int(wav[wav.startIndex + o]) | (Int(wav[wav.startIndex + o + 1]) << 8) }
+        func u32(_ o: Int) -> Int { u16(o) | (u16(o + 2) << 16) }
+        let channels = max(1, u16(22))
+        let sampleRate = u32(24)
+        let bytesPerFrame = channels * max(1, u16(34) / 8)
+        guard sampleRate > 0, bytesPerFrame > 0 else { return 0 }
+        return Double(wav.count - 44) / Double(sampleRate * bytesPerFrame)
     }
 
     // Two form fields: model_id and the audio file. Built by hand — no multipart

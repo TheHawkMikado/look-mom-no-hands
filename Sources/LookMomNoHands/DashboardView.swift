@@ -672,6 +672,7 @@ private struct VocabularyTab: View {
 /// Every control binds to a coordinator property that persists itself on change.
 private struct SettingsTab: View {
     @ObservedObject var coordinator: AppCoordinator
+    @ObservedObject private var meter = CostMeter.shared
     @State private var section: SettingsSection = .general
 
     private enum SettingsSection: String, CaseIterable {
@@ -734,6 +735,14 @@ private struct SettingsTab: View {
                     .font(.caption).foregroundStyle(.secondary)
                 Link("Manage keys at nohandsapp.com", destination: AccountStore.accountURL)
                     .font(.caption)
+            }
+
+            Section("Measured cost (this device)") {
+                costRow("Controller", meter.controller)
+                costRow("Dictation", meter.dictation)
+                Text("Real API spend so far, priced at current rates and split by workload. The per-hour figure is approximate — active time is inferred from usage. Reset before a timed run to measure a clean $/hr.")
+                    .font(.caption).foregroundStyle(.secondary)
+                Button("Reset measurements", role: .destructive) { meter.reset() }
             }
 
             Section("Recording") {
@@ -812,6 +821,23 @@ private struct SettingsTab: View {
         Label(ok ? "Connected" : "Not set", systemImage: ok ? "checkmark.circle.fill" : "xmark.circle")
             .foregroundStyle(ok ? .green : .secondary)
             .font(.caption)
+    }
+
+    private func costRow(_ name: String, _ b: CostMeter.Bucket) -> some View {
+        LabeledContent(name) {
+            VStack(alignment: .trailing, spacing: 1) {
+                Text(String(format: "$%.4f", b.cost)).monospacedDigit()
+                Text("\(b.calls) calls · \(Self.duration(b.activeSeconds)) · "
+                     + (b.perHour > 0 ? String(format: "$%.2f/hr", b.perHour) : "—/hr"))
+                    .font(.caption2).foregroundStyle(.secondary).monospacedDigit()
+            }
+        }
+    }
+
+    private static func duration(_ seconds: Double) -> String {
+        if seconds < 90 { return String(format: "%.0fs", seconds) }
+        if seconds < 5400 { return String(format: "%.0fm", seconds / 60) }
+        return String(format: "%.1fh", seconds / 3600)
     }
 
 }

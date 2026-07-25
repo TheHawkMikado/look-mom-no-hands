@@ -66,6 +66,8 @@ final class Speaker: NSObject, AVAudioPlayerDelegate, AVSpeechSynthesizerDelegat
               let player = try? AVAudioPlayer(data: data) else {
             return false   // caller falls back to the local voice
         }
+        // ElevenLabs bills per character on synthesis — record it (controller side).
+        CostMeter.shared.recordTTS(chars: text.count)
         // Superseded/cancelled while the fetch was in flight — drop this audio
         // rather than clobber the current speak's player/continuation.
         guard mine == epoch else { return true }
