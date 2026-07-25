@@ -427,20 +427,46 @@ export interface PlanRow {
   sort: number;
 }
 
+/**
+ * The `features` jsonb column can come back as a real array OR as a JSON string,
+ * depending on how the driver decodes it — and every page that shows a plan does
+ * `features.map(...)` / `.join(...)`, which throws on a string and 500s the whole
+ * page (including the marketing homepage). Coerce to a string[] on read so no
+ * renderer can crash on it, whatever the driver returns.
+ */
+function asFeatures(f: unknown): string[] {
+  if (Array.isArray(f)) return f.map(String);
+  if (typeof f === "string") {
+    try {
+      const parsed = JSON.parse(f);
+      return Array.isArray(parsed) ? parsed.map(String) : [];
+    } catch {
+      return [];
+    }
+  }
+  return [];
+}
+
+function coercePlan(p: PlanRow): PlanRow {
+  return { ...p, features: asFeatures((p as { features: unknown }).features) };
+}
+
 export async function allPlans(): Promise<PlanRow[]> {
   const db = sql();
-  return db<PlanRow[]>`SELECT * FROM plans ORDER BY sort, slug`;
+  const rows = await db<PlanRow[]>`SELECT * FROM plans ORDER BY sort, slug`;
+  return rows.map(coercePlan);
 }
 
 export async function visiblePlans(): Promise<PlanRow[]> {
   const db = sql();
-  return db<PlanRow[]>`SELECT * FROM plans WHERE visible ORDER BY sort, slug`;
+  const rows = await db<PlanRow[]>`SELECT * FROM plans WHERE visible ORDER BY sort, slug`;
+  return rows.map(coercePlan);
 }
 
 export async function planBySlug(slug: string): Promise<PlanRow | null> {
   const db = sql();
   const rows = await db<PlanRow[]>`SELECT * FROM plans WHERE slug = ${slug}`;
-  return rows[0] ?? null;
+  return rows[0] ? coercePlan(rows[0]) : null;
 }
 
 export async function upsertPlan(p: PlanRow) {

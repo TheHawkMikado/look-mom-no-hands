@@ -120,6 +120,29 @@ async function probePages(email: string) {
   }
 }
 
+/** Reproduces the exact admin render op that throws: PlanEditor does
+ *  `plan.features.join("\n")`. Reports each plan's features shape + whether join
+ *  throws — the smoking gun for the /admin 500. */
+async function probePlansRender() {
+  try {
+    const plans = await catalogue();
+    return plans.map((p) => {
+      let joinOk = true;
+      let joinErr = "";
+      try {
+        // eslint-disable-next-line @typescript-eslint/no-unused-expressions
+        (p.features as unknown as string[]).join("\n");
+      } catch (e) {
+        joinOk = false;
+        joinErr = e instanceof Error ? e.message : String(e);
+      }
+      return { slug: p.slug, featuresType: Array.isArray(p.features) ? "array" : typeof p.features, joinOk, joinErr };
+    });
+  } catch (err) {
+    return `error:${err instanceof Error ? err.message : "unknown"}`;
+  }
+}
+
 export async function GET(req: NextRequest) {
   const site = process.env.SITE_URL ?? "https://nohandsapp.com";
 
@@ -142,11 +165,12 @@ export async function GET(req: NextRequest) {
   const admins = (process.env.ADMIN_EMAILS ?? "").split(",").map((s) => s.trim()).filter(Boolean);
 
   const testEmail = admins[0] ?? "probe@example.com";
-  const [google, apple, db, pages] = await Promise.all([
+  const [google, apple, db, pages, plansRender] = await Promise.all([
     probeGoogle(site),
     probeApple(site),
     probeDb(),
     probePages(testEmail),
+    probePlansRender(),
   ]);
 
   return NextResponse.json({
@@ -170,5 +194,6 @@ export async function GET(req: NextRequest) {
     apple_probe: apple,
     db_probe: db, // "ok" => reachable; "error:…" => the reason a dashboard 500s
     pages_probe: pages, // runs the actual /account + /admin queries; "error:…" => the 500
+    plans_render: plansRender, // features shape + whether .join throws (the /admin + home 500)
   });
 }
