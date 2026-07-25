@@ -41,13 +41,13 @@ export const dynamic = "force-dynamic";
 export default async function Admin({
   searchParams,
 }: {
-  searchParams: Promise<{ q?: string }>;
+  searchParams: Promise<{ q?: string; err?: string }>;
 }) {
   const session = await getSession();
   if (!session) redirect("/login");
   if (!session.admin) redirect("/account");
 
-  const { q = "" } = await searchParams;
+  const { q = "", err = "" } = await searchParams;
 
   // Report a database problem in place rather than 500-ing: the Stripe sections
   // below still work, and knowing *which* dependency is down is the first thing
@@ -102,6 +102,11 @@ export default async function Admin({
 
       <section style={{ borderTop: 0, paddingTop: 40, paddingBottom: 40 }}>
         <h2>Admin</h2>
+        {err && (
+          <p className="err" style={{ textAlign: "left" }}>
+            Action failed: {err}
+          </p>
+        )}
         {dbError && (
           <p className="err" style={{ textAlign: "left" }}>
             Database unavailable — licences and the order form can&rsquo;t be read or

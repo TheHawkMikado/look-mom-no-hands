@@ -1,6 +1,7 @@
 "use server";
 
 import { revalidatePath } from "next/cache";
+import { redirect } from "next/navigation";
 import { requireAdmin } from "@/lib/auth";
 import { mintLicenceKey } from "@/lib/licence";
 import { stripe } from "@/lib/stripe";
@@ -312,18 +313,27 @@ const STANDARD_PRICES: { slug: string; mode: "cloud" | "byok"; dollars: number }
  */
 export async function adminCreateStandardPrices() {
   await requireAdmin();
-  await ensureSchema();
 
-  for (const s of STANDARD_PRICES) {
-    const plan = await planBySlug(s.slug);
-    if (!plan) continue;
-    const wired = s.mode === "byok" ? plan.price_id_byok : plan.price_id;
-    if (wired) continue;
-    await createAndWirePrice(s);
+  // Surface the real failure to the admin instead of an opaque error digest, so a
+  // Stripe or database problem is diagnosable without digging through logs.
+  let failure = "";
+  try {
+    await ensureSchema();
+    for (const s of STANDARD_PRICES) {
+      const plan = await planBySlug(s.slug);
+      if (!plan) continue;
+      const wired = s.mode === "byok" ? plan.price_id_byok : plan.price_id;
+      if (wired) continue;
+      await createAndWirePrice(s);
+    }
+  } catch (err) {
+    console.error("create standard prices failed", err);
+    failure = err instanceof Error ? err.message : String(err);
   }
 
   revalidatePath("/");
   revalidatePath("/admin");
+  if (failure) redirect(`/admin?err=${encodeURIComponent(failure.slice(0, 300))}#orderform`);
 }
 
 /** Archives a price so it can no longer be bought. Stripe never deletes them. */

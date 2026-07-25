@@ -198,13 +198,25 @@ export async function ensureSchema() {
   // "Unlimited devices" to match the no-cap model. Guarded on a digit before the
   // noun so it only touches old capped wording and is idempotent (the rewritten
   // bullet has no number, so it won't re-match) — other bullets are untouched.
+  // First repair any features stored as a JSON *string* rather than an array (a
+  // driver round-trip quirk) — `#>> '{}'` unwraps the scalar to its text, which is
+  // itself a JSON array, and re-casts it to jsonb. Guarded so it only touches
+  // scalars whose text actually looks like an array.
+  await db`
+    UPDATE plans SET features = (features #>> '{}')::jsonb
+     WHERE jsonb_typeof(features) = 'string' AND (features #>> '{}') LIKE '[%]'`;
+
+  // Then rewrite any "N devices / computers / macs / phones" bullet to "Unlimited
+  // devices". `jsonb_typeof = 'array'` keeps jsonb_array_elements from choking on a
+  // non-array; the digit guard makes it idempotent (the rewrite has no number).
   await db`
     UPDATE plans SET features = (
       SELECT jsonb_agg(
         CASE WHEN elem::text ~* '[0-9]+ *(device|computer|mac|phone)'
              THEN '"Unlimited devices"'::jsonb ELSE elem END)
       FROM jsonb_array_elements(features) elem)
-    WHERE features::text ~* '[0-9]+ *(device|computer|mac|phone)'`;
+    WHERE jsonb_typeof(features) = 'array'
+      AND features::text ~* '[0-9]+ *(device|computer|mac|phone)'`;
 
   // The hidden "comp" plan: a free Solo account issued by hand. ON CONFLICT DO
   // NOTHING so it's created once and any later admin edits to it survive re-runs.
