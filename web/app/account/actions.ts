@@ -84,6 +84,7 @@ export async function createSubLicence(formData: FormData) {
     phones: solo.phones,
     subUsers: 0,
     resell: false,
+    mode: licence.mode, // a Cloud account's sub-users run on Cloud too
     parentKey,
     note: note || null,
   });

@@ -12,11 +12,14 @@ import {
   overrideLicence,
   planBySlug,
   setExpiry,
+  setPlatformKey,
   setRevoked,
   setSeats,
   upsertPlan,
   type PlanRow,
 } from "@/lib/db";
+
+const asMode = (v: FormDataEntryValue | null) => (String(v ?? "") === "cloud" ? "cloud" : "byok");
 
 /**
  * Admin actions.
@@ -105,6 +108,7 @@ export async function adminIssue(formData: FormData) {
     phones,
     subUsers,
     resell,
+    mode: asMode(formData.get("mode")),
     parentKey: null,
     note: String(formData.get("note") ?? "").trim() || null,
   });
@@ -136,7 +140,30 @@ export async function adminOverride(formData: FormData) {
     subUsers: Math.max(0, num(formData.get("subUsers"), 0)),
     expiresAt,
     resell: formData.get("resell") === "on",
+    mode: asMode(formData.get("mode")),
   });
+  revalidatePath("/admin");
+}
+
+// MARK: - Platform keys (what Cloud subscribers run on)
+
+/** Saves (or clears, with an empty value) one of the owner's platform keys. */
+export async function adminSavePlatformKey(formData: FormData) {
+  await requireAdmin();
+  await ensureSchema();
+  const which = String(formData.get("which") ?? "");
+  const value = String(formData.get("value") ?? "").trim();
+  if (which !== "anthropic" && which !== "elevenlabs") return;
+  await setPlatformKey(which, value || null);
+  revalidatePath("/admin");
+}
+
+export async function adminClearPlatformKey(formData: FormData) {
+  await requireAdmin();
+  await ensureSchema();
+  const which = String(formData.get("which") ?? "");
+  if (which !== "anthropic" && which !== "elevenlabs") return;
+  await setPlatformKey(which, null);
   revalidatePath("/admin");
 }
 

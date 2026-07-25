@@ -234,6 +234,57 @@ export async function ensureSchema() {
       updated_at   timestamptz NOT NULL DEFAULT now(),
       PRIMARY KEY (email, device)
     )`;
+
+  // Cloud vs BYOK per subscription — which keys the app runs on. Set at checkout
+  // (nohands_mode metadata → webhook) or by an admin. Default 'byok', the app's
+  // original model.
+  await db`ALTER TABLE licences ADD COLUMN IF NOT EXISTS mode text NOT NULL DEFAULT 'byok'`;
+
+  // The platform (owner's) Anthropic + ElevenLabs keys that Cloud subscribers run
+  // on — the app fetches these instead of the account's own. One row, encrypted
+  // exactly like account keys.
+  await db`
+    CREATE TABLE IF NOT EXISTS platform_keys (
+      id             integer PRIMARY KEY DEFAULT 1,
+      anthropic_enc  text,
+      elevenlabs_enc text,
+      updated_at     timestamptz NOT NULL DEFAULT now(),
+      CONSTRAINT platform_keys_singleton CHECK (id = 1)
+    )`;
+}
+
+// MARK: - Platform keys (what Cloud subscribers run on)
+
+/** Sets (or clears) one of the owner's platform keys — the keys Cloud users run
+ *  on. Encrypted at rest; mirrors setAccountKey. */
+export async function setPlatformKey(which: "anthropic" | "elevenlabs", value: string | null) {
+  const db = sql();
+  const enc = value && value.trim() ? encryptSecret(value.trim()) : null;
+  const col = which === "anthropic" ? "anthropic_enc" : "elevenlabs_enc";
+  await db.unsafe(
+    `INSERT INTO platform_keys (id, ${col}, updated_at) VALUES (1, $1, now())
+     ON CONFLICT (id) DO UPDATE SET ${col} = $1, updated_at = now()`,
+    [enc],
+  );
+}
+
+export async function getPlatformKeys(): Promise<{ anthropic: string | null; elevenlabs: string | null }> {
+  const db = sql();
+  const rows = await db<{ anthropic_enc: string | null; elevenlabs_enc: string | null }[]>`
+    SELECT anthropic_enc, elevenlabs_enc FROM platform_keys WHERE id = 1`;
+  const row = rows[0];
+  return {
+    anthropic: row?.anthropic_enc ? decryptSecret(row.anthropic_enc) : null,
+    elevenlabs: row?.elevenlabs_enc ? decryptSecret(row.elevenlabs_enc) : null,
+  };
+}
+
+export async function platformKeyStatus(): Promise<{ anthropic: boolean; elevenlabs: boolean }> {
+  const db = sql();
+  const rows = await db<{ a: boolean; e: boolean }[]>`
+    SELECT anthropic_enc IS NOT NULL AS a, elevenlabs_enc IS NOT NULL AS e
+      FROM platform_keys WHERE id = 1`;
+  return { anthropic: rows[0]?.a ?? false, elevenlabs: rows[0]?.e ?? false };
 }
 
 // MARK: - Sign-in tokens
@@ -461,6 +512,7 @@ export async function createLicence(l: {
   phones: number;
   subUsers: number;
   resell: boolean;
+  mode?: string;
   stripeSession: string;
   stripeCustomer: string | null;
   stripeSubscription: string | null;
@@ -468,9 +520,9 @@ export async function createLicence(l: {
   const db = sql();
   await db`
     INSERT INTO licences (key, email, plan, expires_at, seats, phones, sub_users,
-                          resell, stripe_session, stripe_customer, stripe_subscription)
+                          resell, mode, stripe_session, stripe_customer, stripe_subscription)
     VALUES (${l.key}, ${l.email}, ${l.plan}, ${l.expiresAt}, ${l.seats}, ${l.phones},
-            ${l.subUsers}, ${l.resell}, ${l.stripeSession}, ${l.stripeCustomer},
+            ${l.subUsers}, ${l.resell}, ${l.mode ?? "byok"}, ${l.stripeSession}, ${l.stripeCustomer},
             ${l.stripeSubscription})
     ON CONFLICT (stripe_session) DO NOTHING`;
 }
@@ -519,12 +571,13 @@ export interface LicenceRow extends Licence {
   note: string | null;
   created_at: Date;
   stripe_customer: string | null;
+  mode: string;
   devices: number;
 }
 
 const LICENCE_COLUMNS = `
   l.key, l.email, l.plan, l.expires_at, l.seats, l.revoked, l.phones,
-  l.sub_users, l.resell, l.parent_key, l.note, l.created_at, l.stripe_customer,
+  l.sub_users, l.resell, l.parent_key, l.note, l.created_at, l.stripe_customer, l.mode,
   (SELECT count(*)::int FROM activations a WHERE a.key = l.key) AS devices`;
 
 /** A member's own licences — never sub-licences they were issued by a reseller's parent. */
@@ -621,13 +674,13 @@ export async function deleteLicence(key: string) {
  */
 export async function overrideLicence(
   key: string,
-  f: { plan: string; seats: number; subUsers: number; expiresAt: Date | null; resell: boolean },
+  f: { plan: string; seats: number; subUsers: number; expiresAt: Date | null; resell: boolean; mode: string },
 ) {
   const db = sql();
   await db`
     UPDATE licences
        SET plan = ${f.plan}, seats = ${f.seats}, sub_users = ${f.subUsers},
-           expires_at = ${f.expiresAt}, resell = ${f.resell}
+           expires_at = ${f.expiresAt}, resell = ${f.resell}, mode = ${f.mode}
      WHERE key = ${key}`;
 }
 
@@ -641,15 +694,16 @@ export async function insertLicence(l: {
   phones: number;
   subUsers: number;
   resell: boolean;
+  mode?: string;
   parentKey: string | null;
   note: string | null;
 }) {
   const db = sql();
   await db`
     INSERT INTO licences (key, email, plan, expires_at, seats, phones, sub_users,
-                          resell, parent_key, note)
+                          resell, mode, parent_key, note)
     VALUES (${l.key}, ${l.email}, ${l.plan}, ${l.expiresAt}, ${l.seats}, ${l.phones},
-            ${l.subUsers}, ${l.resell}, ${l.parentKey}, ${l.note})`;
+            ${l.subUsers}, ${l.resell}, ${l.mode ?? "byok"}, ${l.parentKey}, ${l.note})`;
 }
 
 export interface Stats {

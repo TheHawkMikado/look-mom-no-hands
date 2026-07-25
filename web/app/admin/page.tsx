@@ -5,6 +5,7 @@ import { catalogue } from "@/lib/catalogue";
 import {
   ensureSchema,
   licenceStats,
+  platformKeyStatus,
   searchLicences,
   usageSummary,
   type PlanRow,
@@ -16,12 +17,14 @@ import {
   adminArchivePrice,
   adminCreatePrice,
   adminCreatePromo,
+  adminClearPlatformKey,
   adminDelete,
   adminDeletePlan,
   adminExtend,
   adminIssue,
   adminOverride,
   adminSavePlan,
+  adminSavePlatformKey,
   adminSetRevoked,
   adminSetSeats,
   adminTogglePromo,
@@ -52,14 +55,16 @@ export default async function Admin({
   let licences: Awaited<ReturnType<typeof searchLicences>> = [];
   let plans: PlanRow[] = [];
   let usage: UsageSummary | null = null;
+  let pkeys = { anthropic: false, elevenlabs: false };
   let dbError = "";
   try {
     await ensureSchema();
-    [stats, licences, plans, usage] = await Promise.all([
+    [stats, licences, plans, usage, pkeys] = await Promise.all([
       licenceStats(),
       searchLicences(q),
       catalogue(),
       usageSummary(),
+      platformKeyStatus(),
     ]);
   } catch (err) {
     dbError = err instanceof Error ? err.message : String(err);
@@ -85,6 +90,7 @@ export default async function Admin({
           </a>
         </span>
         <a href="#licences">Licences</a>
+        <a href="#platform">Platform keys</a>
         <a href="#orderform">Order form</a>
         <a href="#promos">Promo codes</a>
         <a href="/account">My account</a>
@@ -216,6 +222,12 @@ export default async function Admin({
                           <form action={adminOverride} className="form-grid" style={{ marginTop: 10 }}>
                             <input type="hidden" name="key" value={l.key} />
                             <label>Plan<PlanSelect plans={plans} defaultValue={l.plan} /></label>
+                            <label>Mode
+                              <select className="field" name="mode" defaultValue={l.mode}>
+                                <option value="byok">BYOK (own keys)</option>
+                                <option value="cloud">Cloud (platform keys)</option>
+                              </select>
+                            </label>
                             <label>Devices<input className="field" name="seats" type="number"
                                    min={0} defaultValue={l.seats} /></label>
                             <label>Sub-users<input className="field" name="subUsers" type="number"
@@ -250,10 +262,33 @@ export default async function Admin({
         <form action={adminIssue} className="form-grid">
           <label>Email<input className="field" name="email" type="email" required /></label>
           <label>Plan<PlanSelect plans={plans} defaultValue="comp" /></label>
+          <label>Mode
+            <select className="field" name="mode" defaultValue="byok">
+              <option value="byok">BYOK (own keys)</option>
+              <option value="cloud">Cloud (platform keys)</option>
+            </select>
+          </label>
           <label>Days (0 = never expires)<input className="field" name="days" type="number" defaultValue={0} /></label>
           <label>Note<input className="field" name="note" placeholder="why this was issued" /></label>
           <button className="btn btn-primary">Create user</button>
         </form>
+      </section>
+
+      {/* ---------------- platform keys ---------------- */}
+      <section id="platform">
+        <h2>Platform keys (Cloud)</h2>
+        <p className="sub">
+          The Anthropic and ElevenLabs keys that <strong>Cloud</strong> subscribers run
+          on — set them once here and every Cloud device fetches them. BYOK subscribers
+          use their own keys instead. Stored encrypted; only whether each is set is shown.
+        </p>
+        <div className="panel-card">
+          <PlatformKey which="anthropic" label="Anthropic key" placeholder="sk-ant-…"
+                       isSet={pkeys.anthropic} />
+          <hr className="rule" />
+          <PlatformKey which="elevenlabs" label="ElevenLabs key" placeholder="ElevenLabs API key"
+                       isSet={pkeys.elevenlabs} />
+        </div>
       </section>
 
       {/* ---------------- order form ---------------- */}
@@ -485,6 +520,48 @@ function PlanSelect({
         </option>
       ))}
     </select>
+  );
+}
+
+function PlatformKey({
+  which,
+  label,
+  placeholder,
+  isSet,
+}: {
+  which: "anthropic" | "elevenlabs";
+  label: string;
+  placeholder: string;
+  isSet: boolean;
+}) {
+  return (
+    <div style={{ display: "grid", gap: 10 }}>
+      <div className="row-between">
+        <strong>{label}</strong>
+        {isSet ? <span className="pill good">Set</span> : <span className="pill warn">Not set</span>}
+      </div>
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+        <form action={adminSavePlatformKey} className="inline-form" style={{ flex: 1 }}>
+          <input type="hidden" name="which" value={which} />
+          <input
+            className="field"
+            name="value"
+            type="password"
+            required
+            autoComplete="off"
+            placeholder={isSet ? "Enter a new key to replace it" : placeholder}
+            style={{ flex: 1, minWidth: 220 }}
+          />
+          <button className="btn btn-primary">{isSet ? "Replace" : "Save"}</button>
+        </form>
+        {isSet && (
+          <form action={adminClearPlatformKey}>
+            <input type="hidden" name="which" value={which} />
+            <button className="linkish danger">Remove</button>
+          </form>
+        )}
+      </div>
+    </div>
   );
 }
 

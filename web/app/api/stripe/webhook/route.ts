@@ -112,6 +112,8 @@ async function onCheckoutCompleted(session: any) {
     phones: spec.phones,
     subUsers: spec.subUsers,
     resell: spec.resell,
+    // Which keys this subscription runs on — stamped at checkout.
+    mode: session.metadata?.nohands_mode === "cloud" ? "cloud" : "byok",
     stripeSession: session.id,
     stripeCustomer: typeof session.customer === "string" ? session.customer : null,
     stripeSubscription: subscriptionId,

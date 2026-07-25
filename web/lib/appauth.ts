@@ -18,6 +18,8 @@ export async function appEmail(req: NextRequest): Promise<string | null> {
 export interface AppEntitlement {
   active: boolean;
   plan: string;
+  /** 'cloud' (runs on the platform's keys) or 'byok' (the account's own keys). */
+  mode: string;
   /** Devices the account may activate. Uncapped for every plan — access is tied
    *  to the account, and Cloud usage is metered, so more devices just means more
    *  usage (and revenue), never a limit to police. Reported as UNLIMITED. */
@@ -46,6 +48,7 @@ export async function resolveEntitlement(email: string): Promise<AppEntitlement 
   return {
     active: live(licence),
     plan: licence.plan,
+    mode: licence.mode ?? "byok",
     devices: UNLIMITED,
     subUsers: licence.sub_users,
     isSubUser,

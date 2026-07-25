@@ -26,6 +26,16 @@ export interface PricingPlan {
 
 type Mode = "cloud" | "byok";
 
+// Cloud-only presentation until the Cloud build lands. The top tier is "Company"
+// on Cloud (no resell) but "Community" on BYOK (resell), and Cloud plans lead with
+// their included hours. Keyed by slug; interim, replaced when Cloud ships.
+const CLOUD_NAME: Record<string, string> = { community: "Company" };
+const CLOUD_HOURS: Record<string, string> = {
+  solo: "3h controller + 6h dictation / wk",
+  family: "9h controller + 18h dictation / wk",
+  community: "27h controller + 81h dictation / wk",
+};
+
 export function Pricing({
   plans,
   defaultMode = "cloud",
@@ -93,23 +103,29 @@ export function Pricing({
 
       <div className="prices">
         {plans.map((p) => {
-          const label = mode === "byok" ? p.price_label_byok : p.price_label;
-          const period = mode === "byok" ? p.period_byok : p.period;
-          const available = mode === "cloud" ? !!p.price_id : !!p.price_id_byok;
+          const cloud = mode === "cloud";
+          const label = cloud ? p.price_label : p.price_label_byok;
+          const period = cloud ? p.period : p.period_byok;
+          const available = cloud ? !!p.price_id : !!p.price_id_byok;
+          // On Cloud the top tier is "Company" (no resell); its BYOK "resell
+          // rights" tagline is dropped there.
+          const name = cloud ? CLOUD_NAME[p.slug] ?? p.name : p.name;
+          const tagline = cloud && CLOUD_NAME[p.slug] ? "" : p.tagline;
           return (
             <div key={p.slug} className={`price${p.featured ? " featured" : ""}`}>
               <span className="tag">
-                {p.name}
-                {p.tagline ? ` · ${p.tagline}` : ""}
+                {name}
+                {tagline ? ` · ${tagline}` : ""}
               </span>
               <div className="amount">
-                {available && label ? label : "—"} <span>{available ? period : ""}</span>
+                {label || "—"} <span>{period}</span>
               </div>
               <ul>
+                {cloud && CLOUD_HOURS[p.slug] && <li>{CLOUD_HOURS[p.slug]}</li>}
                 {p.features.map((f, i) => (
                   <li key={i}>{f}</li>
                 ))}
-                {mode === "byok" && <li>Use your own API keys</li>}
+                {cloud ? <li>We run the AI — no key needed</li> : <li>Use your own API keys</li>}
               </ul>
               <button
                 className={`btn ${p.featured ? "btn-primary" : "btn-ghost"}`}
@@ -120,7 +136,7 @@ export function Pricing({
                   ? "Coming soon"
                   : busy === p.slug
                     ? "Opening checkout…"
-                    : `Get ${p.name}`}
+                    : `Get ${name}`}
               </button>
             </div>
           );
