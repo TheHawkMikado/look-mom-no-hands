@@ -323,8 +323,8 @@ export default async function Admin({
               <option value="byok">BYOK (own keys)</option>
             </select>
           </label>
-          <label>Product name<input className="field" name="name"
-                 placeholder="Look Ma No Hands App - Solo" /></label>
+          <label>Product name (optional)<input className="field" name="name"
+                 placeholder="Auto: NoHandsApp.com — Solo (Cloud)" /></label>
           <label>Amount (USD)<input className="field" name="amount" type="number"
                  step="0.01" required placeholder="3" /></label>
           <label>

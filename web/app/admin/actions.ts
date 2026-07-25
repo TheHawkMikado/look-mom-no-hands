@@ -235,12 +235,21 @@ export async function adminCreatePrice(formData: FormData) {
   if (!Number.isFinite(dollars) || dollars <= 0) throw new Error("Enter an amount.");
 
   const interval = String(formData.get("interval") ?? "week") as "day" | "week" | "month" | "year";
-  const name = String(formData.get("name") ?? `Look Ma No Hands App - ${slug}`);
+  const mode = String(formData.get("mode") ?? "cloud") === "byok" ? "byok" : "cloud";
+  const modeLabel = mode === "byok" ? "BYOK" : "Cloud";
+
+  // Every product carries "NoHandsApp.com" so it's identifiable among everything
+  // else in this Stripe account. A custom name that already says so is left as-is.
+  const custom = String(formData.get("name") ?? "").trim();
+  const titleSlug = slug ? slug.charAt(0).toUpperCase() + slug.slice(1) : "Plan";
+  const name = custom
+    ? (/nohandsapp\.com/i.test(custom) ? custom : `NoHandsApp.com — ${custom}`)
+    : `NoHandsApp.com — ${titleSlug} (${modeLabel})`;
 
   const product = await stripe().products.create({
     name,
     description: String(formData.get("description") ?? "") || undefined,
-    metadata: { nohands_plan: slug },
+    metadata: { nohands_plan: slug, nohands_mode: mode },
   });
 
   const price = await stripe().prices.create({
@@ -248,10 +257,9 @@ export async function adminCreatePrice(formData: FormData) {
     unit_amount: Math.round(dollars * 100),
     currency: "usd",
     recurring: { interval, interval_count: 1 },
-    metadata: { nohands_plan: slug },
+    metadata: { nohands_plan: slug, nohands_mode: mode },
   });
 
-  const mode = String(formData.get("mode") ?? "cloud") === "byok" ? "byok" : "cloud";
   const existing = await planBySlug(slug);
   if (existing) {
     // Point the plan at the new price in the right column: Cloud or BYOK.
