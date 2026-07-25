@@ -16,6 +16,9 @@ export const dynamic = "force-dynamic";
 
 export default async function Home() {
   const plans = await storefront();
+  // Open on whichever mode can actually be bought — Cloud once it has prices,
+  // otherwise BYOK, so the storefront never launches on a wall of "coming soon".
+  const defaultMode = plans.some((p) => p.price_id) ? "cloud" : "byok";
 
   return (
     <>
@@ -125,7 +128,7 @@ export default async function Home() {
           <p className="sub">
             Try it free for 7 days — no card. Billed weekly, cancel any time.
           </p>
-          <Pricing plans={plans} />
+          <Pricing plans={plans} defaultMode={defaultMode} />
 
           <p className="footnote">
             *Unlimited includes 27 Solo sub-users. Each additional user is $1 / week.

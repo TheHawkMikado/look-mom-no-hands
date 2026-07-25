@@ -12,6 +12,8 @@ export interface PricingPlan {
   slug: string;
   name: string;
   tagline: string;
+  /** Cloud price. `price_id` presence = purchasable in Cloud mode. */
+  price_id: string | null;
   price_label: string;
   period: string;
   /** Bring-your-own-key price. `price_id_byok` presence = purchasable in BYOK. */
@@ -24,9 +26,17 @@ export interface PricingPlan {
 
 type Mode = "cloud" | "byok";
 
-export function Pricing({ plans }: { plans: PricingPlan[] }) {
-  // Cloud is the default: most people want us to run the AI, not wire up a key.
-  const [mode, setMode] = useState<Mode>("cloud");
+export function Pricing({
+  plans,
+  defaultMode = "cloud",
+}: {
+  plans: PricingPlan[];
+  defaultMode?: Mode;
+}) {
+  // Cloud is the intended default, but the page opens on whichever mode is
+  // actually sellable — so while Cloud has no prices yet, buyers land on BYOK
+  // instead of a wall of "coming soon".
+  const [mode, setMode] = useState<Mode>(defaultMode);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState("");
 
@@ -85,7 +95,7 @@ export function Pricing({ plans }: { plans: PricingPlan[] }) {
         {plans.map((p) => {
           const label = mode === "byok" ? p.price_label_byok : p.price_label;
           const period = mode === "byok" ? p.period_byok : p.period;
-          const available = mode === "cloud" ? true : !!p.price_id_byok;
+          const available = mode === "cloud" ? !!p.price_id : !!p.price_id_byok;
           return (
             <div key={p.slug} className={`price${p.featured ? " featured" : ""}`}>
               <span className="tag">
