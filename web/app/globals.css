@@ -283,6 +283,8 @@ textarea.field { resize: vertical; font-family: inherit; }
 .pill.warn { background: rgba(240,170,60,.16); color: #f0aa3c; }
 .pill.bad  { background: rgba(229,72,77,.16); color: #e5484d; }
 
+.rule { border: 0; border-top: 1px solid var(--line); margin: 20px 0; }
+
 .facts { display: flex; gap: 32px; flex-wrap: wrap; margin: 20px 0 4px; }
 .facts dt { font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); }
 .facts dd { margin: 4px 0 0; font-size: 15px; }

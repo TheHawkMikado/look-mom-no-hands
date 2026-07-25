@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { cookies } from "next/headers";
-import { isAdmin, normaliseEmail, startSession } from "@/lib/auth";
+import { normaliseEmail, postLoginDestination, startSession } from "@/lib/auth";
 import { APPLE_STATE_COOKIE, appleClientSecret, appleConfig } from "@/lib/apple";
 
 /**
@@ -93,7 +93,7 @@ export async function POST(req: NextRequest) {
     }
 
     await startSession(email);
-    return NextResponse.redirect(`${site}${isAdmin(email) ? "/admin" : "/account"}`, 303);
+    return NextResponse.redirect(`${site}${await postLoginDestination(email)}`, 303);
   } catch (err) {
     console.error("apple sign-in failed", err);
     const sessionSecretMissing = err instanceof Error && /SESSION_SECRET/.test(err.message);

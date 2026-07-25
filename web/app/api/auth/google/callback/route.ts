@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { cookies } from "next/headers";
-import { isAdmin, normaliseEmail, OAUTH_STATE_COOKIE, startSession } from "@/lib/auth";
+import { normaliseEmail, OAUTH_STATE_COOKIE, postLoginDestination, startSession } from "@/lib/auth";
 
 /**
  * GET /api/auth/google/callback — Google redirects here with `?code`.
@@ -94,7 +94,7 @@ export async function GET(req: NextRequest) {
     }
 
     await startSession(email);
-    return NextResponse.redirect(`${site}${isAdmin(email) ? "/admin" : "/account"}`);
+    return NextResponse.redirect(`${site}${await postLoginDestination(email)}`);
   } catch (err) {
     console.error("google sign-in failed", err);
     const sessionSecretMissing = err instanceof Error && /SESSION_SECRET/.test(err.message);

@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { ensureSchema } from "@/lib/db";
-import { isAdmin, redeemLoginToken, startSession } from "@/lib/auth";
+import { postLoginDestination, redeemLoginToken, startSession } from "@/lib/auth";
 
 /**
  * GET /api/auth/callback?token=… — the target of the emailed sign-in link.
@@ -28,7 +28,7 @@ export async function GET(req: NextRequest) {
     }
 
     await startSession(email);
-    return NextResponse.redirect(`${site}${isAdmin(email) ? "/admin" : "/account"}`);
+    return NextResponse.redirect(`${site}${await postLoginDestination(email)}`);
   } catch (err) {
     console.error("sign-in callback failed", err);
     return NextResponse.redirect(`${site}/login?error=failed`);

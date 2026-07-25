@@ -9,6 +9,7 @@ import {
   insertLicence,
   licencesForEmail,
   removeActivation,
+  setAccountKey,
 } from "@/lib/db";
 import { DEFAULT_PLANS } from "@/lib/catalogue";
 
@@ -46,12 +47,12 @@ export async function freeSeat(formData: FormData) {
 }
 
 /**
- * Issues a Solo sub-licence under a reseller's licence.
- *
- * The allowance check counts rows rather than trusting a stored tally, so
- * concurrent submissions can't both slip past a stale number. Sub-licences
- * inherit the parent's expiry: a reseller whose own subscription lapses should
- * not leave working keys behind them.
+ * Adds a sub-user under this account. Gated on the plan's `sub_users` allowance
+ * (not "resell" — sub-users are a normal plan feature now). The allowance count
+ * is a live row count so two submissions can't both slip past a stale number.
+ * Sub-users get a Solo entitlement (their own login + a 3-device pool) that
+ * expires with the parent's subscription. Community past its free tier is billed
+ * per extra user; that Stripe quantity sync lives in the webhook/overage code.
  */
 export async function createSubLicence(formData: FormData) {
   const parentKey = String(formData.get("key") ?? "");
@@ -63,15 +64,14 @@ export async function createSubLicence(formData: FormData) {
   }
 
   const { licence } = await ownedLicence(parentKey);
-  if (!licence.resell) throw new Error("This plan doesn't include resell rights.");
   if (licence.revoked) throw new Error("This licence has been revoked.");
+  if (licence.sub_users <= 0) {
+    throw new Error("Your plan doesn't include sub-users — upgrade to Family or Community to add them.");
+  }
 
   const used = await countSubLicences(parentKey);
   if (used >= licence.sub_users) {
-    throw new Error(
-      `You've issued all ${licence.sub_users} included sub-users. ` +
-        "Additional users are billed at $1/week — contact support to raise your allowance.",
-    );
+    throw new Error(`You've reached your ${licence.sub_users} sub-users. Contact support to raise your allowance.`);
   }
 
   const solo = DEFAULT_PLANS.find((p) => p.slug === "solo")!;
@@ -88,5 +88,29 @@ export async function createSubLicence(formData: FormData) {
     note: note || null,
   });
 
+  revalidatePath("/account");
+}
+
+// MARK: - Shared account API keys
+
+/** Saves (or clears, with an empty value) one of the account's shared keys. Only
+ *  the account holder uses this — sub-users inherit the parent's keys. */
+export async function saveAccountKey(formData: FormData) {
+  const session = await requireSession();
+  const which = String(formData.get("which") ?? "");
+  const value = String(formData.get("value") ?? "").trim();
+  if (which !== "anthropic" && which !== "elevenlabs") return;
+  await ensureSchema();
+  await setAccountKey(session.email, which, value || null);
+  revalidatePath("/account");
+}
+
+/** Removes one of the account's shared keys. */
+export async function clearAccountKey(formData: FormData) {
+  const session = await requireSession();
+  const which = String(formData.get("which") ?? "");
+  if (which !== "anthropic" && which !== "elevenlabs") return;
+  await ensureSchema();
+  await setAccountKey(session.email, which, null);
   revalidatePath("/account");
 }

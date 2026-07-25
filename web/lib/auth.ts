@@ -20,6 +20,8 @@ import { consumeLoginToken, createLoginToken } from "@/lib/db";
 const COOKIE = "nh_session";
 /** CSRF cookie for the Google OAuth round-trip (set on start, checked on callback). */
 export const OAUTH_STATE_COOKIE = "nh_oauth_state";
+/** Where to land after sign-in, if set (e.g. the app-login handoff). One-shot. */
+const NEXT_COOKIE = "nh_next";
 const SESSION_DAYS = 14;
 /** Long enough to find the mail, short enough that a leaked link is stale. */
 export const LOGIN_TOKEN_MINUTES = 20;
@@ -60,6 +62,33 @@ export function isAdmin(email: string): boolean {
 
 export function normaliseEmail(raw: string): string {
   return raw.trim().toLowerCase();
+}
+
+// MARK: - Post-login redirect
+
+/** Remembers where to send the user after they sign in (e.g. the app-login
+ *  handoff at /app/login). Only same-site absolute paths are accepted. */
+export async function setPostLoginNext(path: string) {
+  if (!path.startsWith("/") || path.startsWith("//")) return; // no open redirects
+  (await cookies()).set(NEXT_COOKIE, path, {
+    httpOnly: true,
+    sameSite: "lax",
+    secure: process.env.NODE_ENV === "production",
+    path: "/",
+    maxAge: 600,
+  });
+}
+
+/** The path to land on after a successful sign-in: a pending `next` (consumed
+ *  once), else the admin or member dashboard. Every auth callback ends here. */
+export async function postLoginDestination(email: string): Promise<string> {
+  const jar = await cookies();
+  const next = jar.get(NEXT_COOKIE)?.value;
+  if (next) {
+    jar.delete(NEXT_COOKIE);
+    if (next.startsWith("/") && !next.startsWith("//")) return next;
+  }
+  return isAdmin(email) ? "/admin" : "/account";
 }
 
 // MARK: - Session cookie
