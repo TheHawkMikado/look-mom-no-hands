@@ -41,12 +41,21 @@ final class AccountStore: ObservableObject {
 
     /// Set once at launch so key fetches can reach the running coordinator.
     private weak var coordinator: AppCoordinator?
+    private var usageTimer: Timer?
 
     var isSignedIn: Bool { KeychainStore.load(account: appTokenAccount) != nil }
 
     init() { refresh() }
 
-    func attach(coordinator: AppCoordinator) { self.coordinator = coordinator }
+    func attach(coordinator: AppCoordinator) {
+        self.coordinator = coordinator
+        // Report cumulative usage periodically so pricing rests on real fleet-wide
+        // utilization (both Cloud and BYOK). Cheap, counts only — no content.
+        guard usageTimer == nil else { return }
+        usageTimer = Timer.scheduledTimer(withTimeInterval: 600, repeats: true) { [weak self] _ in
+            Task { @MainActor in await self?.reportUsage() }
+        }
+    }
 
     // MARK: - Local state
 
@@ -103,6 +112,27 @@ final class AccountStore: ObservableObject {
         guard isSignedIn else { return }
         await fetchSession(bearer: bearer)
         await fetchKeys(bearer: bearer)
+        await reportUsage()
+    }
+
+    /// Best-effort report of this device's cumulative metered usage. Counts only —
+    /// controller/dictation cost, calls and active seconds — never any content.
+    /// Tagged "byok" while everyone runs on their own keys; becomes mode-aware
+    /// once Cloud lands.
+    func reportUsage() async {
+        guard let bearer = KeychainStore.load(account: appTokenAccount) else { return }
+        let c = CostMeter.shared.controller
+        let d = CostMeter.shared.dictation
+        let payload: [String: Any] = [
+            "device": LicenseStore.deviceID,
+            "mode": "byok",
+            "controller": ["cost": c.cost, "calls": c.calls, "seconds": c.activeSeconds],
+            "dictation": ["cost": d.cost, "calls": d.calls, "seconds": d.activeSeconds],
+        ]
+        var req = request("api/app/usage", method: "POST", bearer: bearer)
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try? JSONSerialization.data(withJSONObject: payload)
+        _ = try? await URLSession.shared.data(for: req)
     }
 
     // MARK: - Networking

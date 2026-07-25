@@ -215,6 +215,25 @@ export async function ensureSchema() {
             ${JSON.stringify(["Unlimited devices", "1 user", "Complimentary — issued by hand"])},
             9999, 0, 0, false, false, false, 100)
     ON CONFLICT (slug) DO NOTHING`;
+
+  // Per-device usage the app reports back: metered controller/dictation hours and
+  // API cost, split by workload, tagged by mode (cloud/byok). Feeds pricing
+  // analysis now and Cloud overage metering later. One cumulative row per device;
+  // no transcripts or content, only counts.
+  await db`
+    CREATE TABLE IF NOT EXISTS usage_reports (
+      email        text NOT NULL,
+      device       text NOT NULL,
+      mode         text NOT NULL DEFAULT 'byok',
+      ctrl_cost    double precision NOT NULL DEFAULT 0,
+      ctrl_calls   integer NOT NULL DEFAULT 0,
+      ctrl_seconds double precision NOT NULL DEFAULT 0,
+      dict_cost    double precision NOT NULL DEFAULT 0,
+      dict_calls   integer NOT NULL DEFAULT 0,
+      dict_seconds double precision NOT NULL DEFAULT 0,
+      updated_at   timestamptz NOT NULL DEFAULT now(),
+      PRIMARY KEY (email, device)
+    )`;
 }
 
 // MARK: - Sign-in tokens
@@ -309,6 +328,72 @@ export async function accountKeyStatus(
     SELECT anthropic_enc IS NOT NULL AS a, elevenlabs_enc IS NOT NULL AS e
       FROM account_keys WHERE lower(email) = lower(${email})`;
   return { anthropic: rows[0]?.a ?? false, elevenlabs: rows[0]?.e ?? false };
+}
+
+// MARK: - Usage reporting (for pricing analysis + Cloud metering)
+
+export interface UsageBucket {
+  cost: number;
+  calls: number;
+  seconds: number;
+}
+
+/** Records the app's cumulative per-device usage. Latest snapshot wins per
+ *  (email, device) — the app reports running totals, so an upsert keeps one
+ *  current row per device rather than an ever-growing log. */
+export async function recordUsage(
+  email: string,
+  device: string,
+  mode: string,
+  controller: UsageBucket,
+  dictation: UsageBucket,
+) {
+  const db = sql();
+  await db`
+    INSERT INTO usage_reports
+      (email, device, mode, ctrl_cost, ctrl_calls, ctrl_seconds,
+       dict_cost, dict_calls, dict_seconds, updated_at)
+    VALUES (${email}, ${device}, ${mode},
+       ${controller.cost}, ${controller.calls}, ${controller.seconds},
+       ${dictation.cost}, ${dictation.calls}, ${dictation.seconds}, now())
+    ON CONFLICT (email, device) DO UPDATE SET
+      mode = EXCLUDED.mode,
+      ctrl_cost = EXCLUDED.ctrl_cost, ctrl_calls = EXCLUDED.ctrl_calls,
+      ctrl_seconds = EXCLUDED.ctrl_seconds, dict_cost = EXCLUDED.dict_cost,
+      dict_calls = EXCLUDED.dict_calls, dict_seconds = EXCLUDED.dict_seconds,
+      updated_at = now()`;
+}
+
+export interface UsageSummary {
+  devices: number;
+  ctrl_cost: number;
+  ctrl_hours: number;
+  ctrl_perHour: number;
+  dict_cost: number;
+  dict_hours: number;
+  dict_perHour: number;
+}
+
+/** Fleet-wide usage totals, optionally filtered by mode — the raw material for
+ *  refining Cloud pricing against real utilization. */
+export async function usageSummary(mode?: string): Promise<UsageSummary> {
+  const db = sql();
+  const rows = await db<Record<string, number>[]>`
+    SELECT count(*)::int AS devices,
+           coalesce(sum(ctrl_cost), 0) AS ctrl_cost,
+           coalesce(sum(ctrl_seconds), 0) / 3600.0 AS ctrl_hours,
+           coalesce(sum(dict_cost), 0) AS dict_cost,
+           coalesce(sum(dict_seconds), 0) / 3600.0 AS dict_hours
+      FROM usage_reports
+     ${mode ? db`WHERE mode = ${mode}` : db``}`;
+  const r = rows[0] ?? {};
+  const ch = Number(r.ctrl_hours ?? 0), dh = Number(r.dict_hours ?? 0);
+  const cc = Number(r.ctrl_cost ?? 0), dc = Number(r.dict_cost ?? 0);
+  return {
+    devices: Number(r.devices ?? 0),
+    ctrl_cost: cc, ctrl_hours: ch, ctrl_perHour: ch > 0 ? cc / ch : 0,
+    dict_cost: dc, dict_hours: dh, dict_perHour: dh > 0 ? dc / dh : 0,
+  };
 }
 
 // MARK: - App bearer tokens (macOS app sessions)

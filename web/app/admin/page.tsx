@@ -2,7 +2,14 @@ import { Fragment } from "react";
 import { redirect } from "next/navigation";
 import { getSession } from "@/lib/auth";
 import { catalogue } from "@/lib/catalogue";
-import { ensureSchema, licenceStats, searchLicences, type PlanRow } from "@/lib/db";
+import {
+  ensureSchema,
+  licenceStats,
+  searchLicences,
+  usageSummary,
+  type PlanRow,
+  type UsageSummary,
+} from "@/lib/db";
 import { stripe } from "@/lib/stripe";
 import { Lockup } from "@/components/Logo";
 import {
@@ -44,13 +51,15 @@ export default async function Admin({
   let stats = { total: 0, active: 0, revoked: 0, devices: 0 };
   let licences: Awaited<ReturnType<typeof searchLicences>> = [];
   let plans: PlanRow[] = [];
+  let usage: UsageSummary | null = null;
   let dbError = "";
   try {
     await ensureSchema();
-    [stats, licences, plans] = await Promise.all([
+    [stats, licences, plans, usage] = await Promise.all([
       licenceStats(),
       searchLicences(q),
       catalogue(),
+      usageSummary(),
     ]);
   } catch (err) {
     dbError = err instanceof Error ? err.message : String(err);
@@ -98,6 +107,34 @@ export default async function Admin({
           <Stat label="Revoked" value={stats.revoked} />
           <Stat label="Devices" value={stats.devices} />
         </div>
+
+        {usage && usage.devices > 0 && (
+          <div className="panel-card" style={{ marginTop: 20 }}>
+            <h3 style={{ marginTop: 0 }}>
+              Measured usage — {usage.devices} device{usage.devices === 1 ? "" : "s"} reporting
+            </h3>
+            <dl className="facts">
+              <div>
+                <dt>Controller</dt>
+                <dd>
+                  ${usage.ctrl_perHour.toFixed(2)}/hr &middot; {usage.ctrl_hours.toFixed(1)}h &middot;{" "}
+                  ${usage.ctrl_cost.toFixed(2)}
+                </dd>
+              </div>
+              <div>
+                <dt>Dictation</dt>
+                <dd>
+                  ${usage.dict_perHour.toFixed(2)}/hr &middot; {usage.dict_hours.toFixed(1)}h &middot;{" "}
+                  ${usage.dict_cost.toFixed(2)}
+                </dd>
+              </div>
+            </dl>
+            <p className="dim small">
+              Real API cost per active hour, summed across every device that has reported —
+              trust this over the estimate once a few hours have accrued.
+            </p>
+          </div>
+        )}
       </section>
 
       {/* ---------------- licences ---------------- */}
