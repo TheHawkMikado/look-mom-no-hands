@@ -19,6 +19,9 @@ export const DEFAULT_PLANS: PlanRow[] = [
     price_id: null,
     price_label: "$3",
     period: "/ week",
+    price_id_byok: null,
+    price_label_byok: "",
+    period_byok: "",
     features: ["3 devices (Macs & phones)", "1 user", "Every update while active", "Cancel any time"],
     computers: 3,
     phones: 0,
@@ -35,6 +38,9 @@ export const DEFAULT_PLANS: PlanRow[] = [
     price_id: null,
     price_label: "$9",
     period: "/ week",
+    price_id_byok: null,
+    price_label_byok: "",
+    period_byok: "",
     features: ["3 devices per user", "Add up to 5 sub-users", "Every update while active", "Cancel any time"],
     computers: 3,
     phones: 0,
@@ -51,6 +57,9 @@ export const DEFAULT_PLANS: PlanRow[] = [
     price_id: null,
     price_label: "$27",
     period: "/ week",
+    price_id_byok: null,
+    price_label_byok: "",
+    period_byok: "",
     features: [
       "3 devices per user",
       "Unlimited sub-users",
@@ -75,6 +84,9 @@ export const DEFAULT_PLANS: PlanRow[] = [
     price_id: null,
     price_label: "Free",
     period: "",
+    price_id_byok: null,
+    price_label_byok: "",
+    period_byok: "",
     features: ["3 devices", "1 user", "Complimentary — issued by hand"],
     computers: 3,
     phones: 0,
@@ -159,7 +171,11 @@ export async function entitlementsForPrice(priceId: string): Promise<Entitlement
   if (priceId) {
     try {
       const rows = await allPlans();
-      const hit = rows.find((p) => p.price_id && p.price_id === priceId);
+      // Match either the Cloud or the BYOK price — both map to the same plan
+      // entitlements; the mode only changes who supplies the AI keys and the price.
+      const hit = rows.find(
+        (p) => (p.price_id && p.price_id === priceId) || (p.price_id_byok && p.price_id_byok === priceId),
+      );
       if (hit) return toEntitlements(hit);
     } catch (err) {
       console.error("plan lookup failed, trying environment:", err);
@@ -175,14 +191,24 @@ export async function entitlementsForPrice(priceId: string): Promise<Entitlement
   return toEntitlements(DEFAULT_PLANS[0]);
 }
 
-/** Resolves the Stripe price for a plan slug: database first, environment second. */
-export async function priceIdForPlan(slug: string): Promise<string | null> {
+/**
+ * Resolves the Stripe price for a plan slug in a given mode: database first,
+ * environment second. BYOK returns the plan's `price_id_byok` (no environment
+ * fallback — BYOK prices are only ever configured in the admin), so a plan with
+ * no BYOK price simply isn't purchasable that way.
+ */
+export async function priceIdForPlan(
+  slug: string,
+  mode: "cloud" | "byok" = "cloud",
+): Promise<string | null> {
   try {
     const rows = await allPlans();
     const hit = rows.find((p) => p.slug === slug && p.visible);
+    if (mode === "byok") return hit?.price_id_byok || null;
     if (hit?.price_id) return hit.price_id;
   } catch (err) {
     console.error("price lookup failed, trying environment:", err);
   }
+  if (mode === "byok") return null;
   return process.env[PRICE_ENV[slug] ?? ""] ?? null;
 }

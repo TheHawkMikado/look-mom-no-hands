@@ -244,6 +244,13 @@ export default async function Admin({
         </p>
         <form action={adminCreatePrice} className="form-grid">
           <label>Plan slug<input className="field" name="slug" required placeholder="solo" /></label>
+          <label>
+            Mode
+            <select className="field" name="mode" defaultValue="cloud">
+              <option value="cloud">Cloud (we supply keys)</option>
+              <option value="byok">BYOK (own keys)</option>
+            </select>
+          </label>
           <label>Product name<input className="field" name="name"
                  placeholder="Look Ma No Hands App - Solo" /></label>
           <label>Amount (USD)<input className="field" name="amount" type="number"
@@ -348,7 +355,8 @@ export default async function Admin({
 function blankPlan(count: number): PlanRow {
   return {
     slug: "", name: "", tagline: "", price_id: null, price_label: "", period: "/ week",
-    features: [], computers: 2, phones: 0, sub_users: 0, resell: false,
+    price_id_byok: null, price_label_byok: "", period_byok: "",
+    features: [], computers: 3, phones: 0, sub_users: 0, resell: false,
     featured: false, visible: true, sort: (count + 1) * 10,
   };
 }
@@ -365,8 +373,14 @@ function PlanEditor({ plan, isNew = false }: { plan: PlanRow; isNew?: boolean })
         <label>Price label<input className="field" name="price_label"
                defaultValue={plan.price_label} placeholder="$3" /></label>
         <label>Period<input className="field" name="period" defaultValue={plan.period} /></label>
-        <label>Stripe price id<input className="field" name="price_id"
+        <label>Stripe price id (Cloud)<input className="field" name="price_id"
                defaultValue={plan.price_id ?? ""} placeholder="price_…" /></label>
+        <label>BYOK price label<input className="field" name="price_label_byok"
+               defaultValue={plan.price_label_byok} placeholder="$2" /></label>
+        <label>BYOK period<input className="field" name="period_byok"
+               defaultValue={plan.period_byok} placeholder="/ week" /></label>
+        <label>Stripe price id (BYOK)<input className="field" name="price_id_byok"
+               defaultValue={plan.price_id_byok ?? ""} placeholder="price_… (leave blank to hide BYOK)" /></label>
         <label>Computers<input className="field" name="computers" type="number"
                defaultValue={plan.computers} /></label>
         <label>Phones<input className="field" name="phones" type="number"

@@ -13,19 +13,30 @@ import { priceIdForPlan } from "@/lib/catalogue";
 export const runtime = "nodejs";
 
 export async function POST(req: NextRequest) {
-  const { plan = "solo" } = await req.json().catch(() => ({ plan: "solo" }));
+  const { plan = "solo", mode = "cloud" } = await req
+    .json()
+    .catch(() => ({ plan: "solo", mode: "cloud" }));
 
   if (typeof plan !== "string" || !/^[a-z0-9_-]{1,40}$/.test(plan)) {
     return NextResponse.json({ error: `Unknown plan "${plan}".` }, { status: 400 });
   }
+  // Cloud (we supply the AI keys) vs BYOK (the buyer supplies their own) select
+  // different Stripe prices for the same plan. Anything unexpected is Cloud.
+  const buyMode: "cloud" | "byok" = mode === "byok" ? "byok" : "cloud";
+
   // A visible plan with no price id means the storefront is half-configured,
   // not that the buyer asked for something silly. Worth separating: the first is
   // something you need to go fix, the second is noise.
-  const priceId = await priceIdForPlan(plan);
+  const priceId = await priceIdForPlan(plan, buyMode);
   if (!priceId) {
-    console.error(`no Stripe price for plan "${plan}"`);
+    console.error(`no Stripe price for plan "${plan}" (${buyMode})`);
     return NextResponse.json(
-      { error: "This plan isn't available for purchase yet. Try again shortly." },
+      {
+        error:
+          buyMode === "byok"
+            ? "Bring-your-own-key isn't available for this plan yet."
+            : "This plan isn't available for purchase yet. Try again shortly.",
+      },
       { status: 503 },
     );
   }
@@ -38,6 +49,10 @@ export async function POST(req: NextRequest) {
       // always creates a customer for a subscription, hence no customer_creation.
       mode: "subscription",
       line_items: [{ price: priceId, quantity: 1 }],
+      // Stamp plan + key-mode so the webhook (and support) can see how this
+      // subscription was sold without re-deriving it from the price id.
+      metadata: { nohands_plan: plan, nohands_mode: buyMode },
+      subscription_data: { metadata: { nohands_plan: plan, nohands_mode: buyMode } },
       success_url: `${origin}/success?session_id={CHECKOUT_SESSION_ID}`,
       cancel_url: `${origin}/#pricing`,
       allow_promotion_codes: true,

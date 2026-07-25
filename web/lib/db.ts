@@ -172,6 +172,15 @@ export async function ensureSchema() {
       sort        integer NOT NULL DEFAULT 0
     )`;
 
+  // Bring-your-own-key pricing: a second Stripe price + labels per plan. Cloud
+  // (we supply the AI keys) uses the original price_id/price_label/period; BYOK
+  // (the customer supplies their own keys) uses these. Nullable/blank until an
+  // admin configures them, so the storefront just doesn't offer BYOK for a plan
+  // that has no BYOK price yet.
+  await db`ALTER TABLE plans ADD COLUMN IF NOT EXISTS price_id_byok text`;
+  await db`ALTER TABLE plans ADD COLUMN IF NOT EXISTS price_label_byok text NOT NULL DEFAULT ''`;
+  await db`ALTER TABLE plans ADD COLUMN IF NOT EXISTS period_byok text NOT NULL DEFAULT ''`;
+
   // Migrate the storefront to the Solo / Family / Community model. Entitlement
   // counts (devices, sub-users) are code-owned now, so they're set canonically
   // on every run; admin edits to name/price/features/visibility are preserved.
@@ -572,6 +581,11 @@ export interface PlanRow {
   price_id: string | null;
   price_label: string;
   period: string;
+  /** Bring-your-own-key pricing (customer supplies their own AI keys). Blank/null
+   *  means this plan isn't offered in BYOK mode. */
+  price_id_byok: string | null;
+  price_label_byok: string;
+  period_byok: string;
   features: string[];
   computers: number;
   phones: number;
@@ -627,14 +641,18 @@ export async function planBySlug(slug: string): Promise<PlanRow | null> {
 export async function upsertPlan(p: PlanRow) {
   const db = sql();
   await db`
-    INSERT INTO plans (slug, name, tagline, price_id, price_label, period, features,
+    INSERT INTO plans (slug, name, tagline, price_id, price_label, period,
+                       price_id_byok, price_label_byok, period_byok, features,
                        computers, phones, sub_users, resell, featured, visible, sort)
     VALUES (${p.slug}, ${p.name}, ${p.tagline}, ${p.price_id}, ${p.price_label},
-            ${p.period}, ${JSON.stringify(p.features)}, ${p.computers}, ${p.phones},
+            ${p.period}, ${p.price_id_byok}, ${p.price_label_byok}, ${p.period_byok},
+            ${JSON.stringify(p.features)}, ${p.computers}, ${p.phones},
             ${p.sub_users}, ${p.resell}, ${p.featured}, ${p.visible}, ${p.sort})
     ON CONFLICT (slug) DO UPDATE SET
       name = EXCLUDED.name, tagline = EXCLUDED.tagline, price_id = EXCLUDED.price_id,
       price_label = EXCLUDED.price_label, period = EXCLUDED.period,
+      price_id_byok = EXCLUDED.price_id_byok, price_label_byok = EXCLUDED.price_label_byok,
+      period_byok = EXCLUDED.period_byok,
       features = EXCLUDED.features, computers = EXCLUDED.computers,
       phones = EXCLUDED.phones, sub_users = EXCLUDED.sub_users,
       resell = EXCLUDED.resell, featured = EXCLUDED.featured,

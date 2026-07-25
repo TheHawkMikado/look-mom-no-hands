@@ -163,6 +163,21 @@ section > .wrap > p.sub { color: var(--muted); margin: 0 0 40px; max-width: 620p
 
 /* ---------- pricing ---------- */
 
+.mode-toggle {
+  display: flex; width: fit-content; margin: 0 auto 12px; padding: 4px; gap: 4px;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 999px;
+}
+.mode-toggle button {
+  border: 0; background: transparent; color: var(--muted); cursor: pointer;
+  font: inherit; font-size: 14px; padding: 8px 18px; border-radius: 999px;
+  transition: background .15s, color .15s;
+}
+.mode-toggle button.on { background: var(--accent); color: #fff; }
+.mode-note {
+  text-align: center; color: var(--muted); font-size: 14px;
+  margin: 0 auto 28px; max-width: 540px;
+}
+
 .prices { display: grid; gap: 20px; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); align-items: start; }
 
 .price {

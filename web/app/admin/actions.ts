@@ -158,6 +158,9 @@ export async function adminSavePlan(formData: FormData) {
     price_id: String(formData.get("price_id") ?? "").trim() || null,
     price_label: String(formData.get("price_label") ?? ""),
     period: String(formData.get("period") ?? "/ week"),
+    price_id_byok: String(formData.get("price_id_byok") ?? "").trim() || null,
+    price_label_byok: String(formData.get("price_label_byok") ?? ""),
+    period_byok: String(formData.get("period_byok") ?? ""),
     // One feature per line is the least fiddly thing to edit in a textarea.
     features: String(formData.get("features") ?? "")
       .split("\n")
@@ -221,15 +224,25 @@ export async function adminCreatePrice(formData: FormData) {
     metadata: { nohands_plan: slug },
   });
 
-  const { planBySlug } = await import("@/lib/db");
+  const mode = String(formData.get("mode") ?? "cloud") === "byok" ? "byok" : "cloud";
   const existing = await planBySlug(slug);
   if (existing) {
-    await upsertPlan({
-      ...existing,
-      price_id: price.id,
-      price_label: `$${dollars}`,
-      period: `/ ${interval}`,
-    });
+    // Point the plan at the new price in the right column: Cloud or BYOK.
+    await upsertPlan(
+      mode === "byok"
+        ? {
+            ...existing,
+            price_id_byok: price.id,
+            price_label_byok: `$${dollars}`,
+            period_byok: `/ ${interval}`,
+          }
+        : {
+            ...existing,
+            price_id: price.id,
+            price_label: `$${dollars}`,
+            period: `/ ${interval}`,
+          },
+    );
   }
 
   revalidatePath("/");
