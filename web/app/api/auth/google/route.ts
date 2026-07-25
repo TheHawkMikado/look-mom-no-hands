@@ -32,9 +32,10 @@ export async function GET(req: NextRequest) {
     maxAge: 600, // 10 minutes — long enough to pick an account, short enough to expire
   });
 
-  // Derive the redirect URI from the actual host so the same code works on
-  // localhost and in production; both must be registered in Google Cloud.
-  const redirectUri = `${req.nextUrl.origin}/api/auth/google/callback`;
+  // Deterministic redirect URI (from SITE_URL) so the value sent here matches the
+  // one sent at token exchange exactly — Google rejects any mismatch. Must be
+  // registered in Google Cloud.
+  const redirectUri = `${site}/api/auth/google/callback`;
   const url = new URL("https://accounts.google.com/o/oauth2/v2/auth");
   url.searchParams.set("client_id", clientId);
   url.searchParams.set("redirect_uri", redirectUri);

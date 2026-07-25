@@ -51,7 +51,7 @@ export async function GET(req: NextRequest) {
     NextResponse.redirect(`${site}/login?error=google&detail=${encodeURIComponent(detail)}`);
 
   try {
-    const redirectUri = `${req.nextUrl.origin}/api/auth/google/callback`;
+    const redirectUri = `${site}/api/auth/google/callback`;
     const tokenRes = await fetch("https://oauth2.googleapis.com/token", {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
