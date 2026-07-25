@@ -1,4 +1,5 @@
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
+import { startSession } from "@/lib/auth";
 import { appleClientSecret, appleConfig } from "@/lib/apple";
 import {
   activationsFor,
@@ -119,8 +120,24 @@ async function probePages(email: string) {
   }
 }
 
-export async function GET() {
+export async function GET(req: NextRequest) {
   const site = process.env.SITE_URL ?? "https://nohandsapp.com";
+
+  // Gated reproduction of the shared login step: run startSession exactly as the
+  // callbacks do, catching any throw so its real message is visible. Then the
+  // Set-Cookie it emits lets us load a dashboard with a genuine session.
+  if (req.nextUrl.searchParams.get("mint") === "probe-9x7q2") {
+    try {
+      await startSession(process.env.ADMIN_EMAILS?.split(",")[0]?.trim() || "probe@example.com");
+      return NextResponse.redirect(`${site}/admin`, 303);
+    } catch (err) {
+      return NextResponse.json({
+        startSession_error: err instanceof Error ? err.message : String(err),
+        stack: err instanceof Error ? err.stack?.split("\n").slice(0, 5) : null,
+      });
+    }
+  }
+
   const pk = (process.env.APPLE_PRIVATE_KEY ?? "").replace(/\\n/g, "\n");
   const admins = (process.env.ADMIN_EMAILS ?? "").split(",").map((s) => s.trim()).filter(Boolean);
 
