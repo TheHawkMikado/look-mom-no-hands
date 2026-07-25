@@ -18,6 +18,7 @@ import {
   adminCreatePrice,
   adminCreatePromo,
   adminClearPlatformKey,
+  adminCreateStandardPrices,
   adminDelete,
   adminDeletePlan,
   adminExtend,
@@ -308,7 +309,18 @@ export default async function Admin({
           <PlanEditor plan={blankPlan(plans.length)} isNew />
         </details>
 
-        <h3 style={{ marginTop: 40 }}>Create a Stripe product &amp; price</h3>
+        <h3 style={{ marginTop: 40 }}>Set up plan prices</h3>
+        <p className="dim small">
+          One click creates all six weekly Stripe prices — Cloud ($9.99 / $27.99 / $99.99)
+          and BYOK ($4.95 / $9.99 / $49.95) — each named{" "}
+          <em>NoHandsApp.com — …</em> and wired to its plan. Idempotent: it only fills in
+          prices that don&rsquo;t exist yet, so it&rsquo;s safe to run more than once.
+        </p>
+        <form action={adminCreateStandardPrices} style={{ marginBottom: 8 }}>
+          <button className="btn btn-primary">Create all standard plan prices</button>
+        </form>
+
+        <h3 style={{ marginTop: 32 }}>Create a single price by hand</h3>
         <p className="dim small">
           Creates the product and a recurring price, then points that plan at it.
           Stripe prices are immutable — changing a price always means a new one,

@@ -226,6 +226,54 @@ export async function adminDeletePlan(formData: FormData) {
  * one and repoint — existing subscribers stay on the price they signed up at
  * until they're migrated deliberately.
  */
+type PriceInterval = "day" | "week" | "month" | "year";
+
+/**
+ * Creates a Stripe product + recurring price and points the plan at the right
+ * column (Cloud or BYOK). Shared by the manual form and the one-click setup.
+ * Product name always carries "NoHandsApp.com" so it stands out in a shared
+ * Stripe account.
+ */
+async function createAndWirePrice(o: {
+  slug: string;
+  mode: "cloud" | "byok";
+  dollars: number;
+  interval?: PriceInterval;
+  name?: string;
+  description?: string;
+}): Promise<string> {
+  const interval = o.interval ?? "week";
+  const modeLabel = o.mode === "byok" ? "BYOK" : "Cloud";
+  const custom = (o.name ?? "").trim();
+  const titleSlug = o.slug ? o.slug.charAt(0).toUpperCase() + o.slug.slice(1) : "Plan";
+  const name = custom
+    ? (/nohandsapp\.com/i.test(custom) ? custom : `NoHandsApp.com — ${custom}`)
+    : `NoHandsApp.com — ${titleSlug} (${modeLabel})`;
+
+  const product = await stripe().products.create({
+    name,
+    description: (o.description ?? "").trim() || undefined,
+    metadata: { nohands_plan: o.slug, nohands_mode: o.mode },
+  });
+  const price = await stripe().prices.create({
+    product: product.id,
+    unit_amount: Math.round(o.dollars * 100),
+    currency: "usd",
+    recurring: { interval, interval_count: 1 },
+    metadata: { nohands_plan: o.slug, nohands_mode: o.mode },
+  });
+
+  const existing = await planBySlug(o.slug);
+  if (existing) {
+    await upsertPlan(
+      o.mode === "byok"
+        ? { ...existing, price_id_byok: price.id, price_label_byok: `$${o.dollars}`, period_byok: `/ ${interval}` }
+        : { ...existing, price_id: price.id, price_label: `$${o.dollars}`, period: `/ ${interval}` },
+    );
+  }
+  return price.id;
+}
+
 export async function adminCreatePrice(formData: FormData) {
   await requireAdmin();
   await ensureSchema();
@@ -234,50 +282,44 @@ export async function adminCreatePrice(formData: FormData) {
   const dollars = Number(String(formData.get("amount") ?? "0"));
   if (!Number.isFinite(dollars) || dollars <= 0) throw new Error("Enter an amount.");
 
-  const interval = String(formData.get("interval") ?? "week") as "day" | "week" | "month" | "year";
-  const mode = String(formData.get("mode") ?? "cloud") === "byok" ? "byok" : "cloud";
-  const modeLabel = mode === "byok" ? "BYOK" : "Cloud";
-
-  // Every product carries "NoHandsApp.com" so it's identifiable among everything
-  // else in this Stripe account. A custom name that already says so is left as-is.
-  const custom = String(formData.get("name") ?? "").trim();
-  const titleSlug = slug ? slug.charAt(0).toUpperCase() + slug.slice(1) : "Plan";
-  const name = custom
-    ? (/nohandsapp\.com/i.test(custom) ? custom : `NoHandsApp.com — ${custom}`)
-    : `NoHandsApp.com — ${titleSlug} (${modeLabel})`;
-
-  const product = await stripe().products.create({
-    name,
-    description: String(formData.get("description") ?? "") || undefined,
-    metadata: { nohands_plan: slug, nohands_mode: mode },
+  await createAndWirePrice({
+    slug,
+    mode: asMode(formData.get("mode")),
+    dollars,
+    interval: String(formData.get("interval") ?? "week") as PriceInterval,
+    name: String(formData.get("name") ?? ""),
+    description: String(formData.get("description") ?? ""),
   });
 
-  const price = await stripe().prices.create({
-    product: product.id,
-    unit_amount: Math.round(dollars * 100),
-    currency: "usd",
-    recurring: { interval, interval_count: 1 },
-    metadata: { nohands_plan: slug, nohands_mode: mode },
-  });
+  revalidatePath("/");
+  revalidatePath("/admin");
+}
 
-  const existing = await planBySlug(slug);
-  if (existing) {
-    // Point the plan at the new price in the right column: Cloud or BYOK.
-    await upsertPlan(
-      mode === "byok"
-        ? {
-            ...existing,
-            price_id_byok: price.id,
-            price_label_byok: `$${dollars}`,
-            period_byok: `/ ${interval}`,
-          }
-        : {
-            ...existing,
-            price_id: price.id,
-            price_label: `$${dollars}`,
-            period: `/ ${interval}`,
-          },
-    );
+/** The canonical plan pricing (BYOK flat; Cloud metered). */
+const STANDARD_PRICES: { slug: string; mode: "cloud" | "byok"; dollars: number }[] = [
+  { slug: "solo", mode: "cloud", dollars: 9.99 },
+  { slug: "family", mode: "cloud", dollars: 27.99 },
+  { slug: "community", mode: "cloud", dollars: 99.99 },
+  { slug: "solo", mode: "byok", dollars: 4.95 },
+  { slug: "family", mode: "byok", dollars: 9.99 },
+  { slug: "community", mode: "byok", dollars: 49.95 },
+];
+
+/**
+ * One click: create every standard plan price that isn't wired yet. Idempotent —
+ * skips a plan/mode that already has a price, so re-running only fills the gaps
+ * and never makes duplicate products.
+ */
+export async function adminCreateStandardPrices() {
+  await requireAdmin();
+  await ensureSchema();
+
+  for (const s of STANDARD_PRICES) {
+    const plan = await planBySlug(s.slug);
+    if (!plan) continue;
+    const wired = s.mode === "byok" ? plan.price_id_byok : plan.price_id;
+    if (wired) continue;
+    await createAndWirePrice(s);
   }
 
   revalidatePath("/");
