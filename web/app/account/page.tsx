@@ -164,7 +164,6 @@ function KeyField({
 async function LicenceCard({ licence }: { licence: LicenceRow }) {
   const devices = await activationsFor(licence.key);
   const subs = licence.sub_users > 0 ? await subLicencesOf(licence.key) : [];
-  const unlimited = licence.seats >= UNLIMITED;
   const expired = licence.expires_at ? licence.expires_at.getTime() < Date.now() : false;
 
   return (
@@ -181,7 +180,7 @@ async function LicenceCard({ licence }: { licence: LicenceRow }) {
         <div>
           <dt>Devices</dt>
           <dd>
-            {devices.length} of {unlimited ? "unlimited" : licence.seats} in use
+            {devices.length} active <span className="dim">· unlimited</span>
           </dd>
         </div>
         <div>
@@ -228,7 +227,7 @@ async function LicenceCard({ licence }: { licence: LicenceRow }) {
                   <form action={freeSeat}>
                     <input type="hidden" name="key" value={licence.key} />
                     <input type="hidden" name="device" value={d.device} />
-                    <button className="linkish danger">Free this seat</button>
+                    <button className="linkish danger">Sign out</button>
                   </form>
                 </td>
               </tr>
@@ -237,8 +236,8 @@ async function LicenceCard({ licence }: { licence: LicenceRow }) {
         </table>
       )}
       <p className="dim small">
-        Freeing a seat lets you activate another Mac. The old one keeps working until
-        its current licence period ends, then stops renewing.
+        Use it on as many devices as you like. Signing a device out here removes it
+        from the list; it keeps working until its current licence period ends.
       </p>
 
       {licence.sub_users > 0 && (
@@ -246,8 +245,8 @@ async function LicenceCard({ licence }: { licence: LicenceRow }) {
           <h4>Sub-users</h4>
           <p className="dim small">
             {licence.sub_users >= UNLIMITED
-              ? `${subs.length} added. Each gets their own login and 3 devices, expiring with your subscription.`
-              : `${subs.length} of ${licence.sub_users} included. Each gets their own login and 3 devices, expiring with your subscription.`}
+              ? `${subs.length} added. Each gets their own login and unlimited devices, expiring with your subscription.`
+              : `${subs.length} of ${licence.sub_users} included. Each gets their own login and unlimited devices, expiring with your subscription.`}
           </p>
 
           {subs.length > 0 && (
@@ -264,9 +263,7 @@ async function LicenceCard({ licence }: { licence: LicenceRow }) {
                   <tr key={s.key}>
                     <td>{s.email}</td>
                     <td>{s.note ?? "—"}</td>
-                    <td>
-                      {s.devices} / {s.seats}
-                    </td>
+                    <td>{s.devices}</td>
                   </tr>
                 ))}
               </tbody>

@@ -186,10 +186,25 @@ export async function ensureSchema() {
   // on every run; admin edits to name/price/features/visibility are preserved.
   // `unlimited` renames to `community` (one-time; no `community` row exists yet
   // when this first runs, so the slug rename can't collide).
+  // Devices are uncapped on every plan now (9999 = the UNLIMITED sentinel), so
+  // `computers` is no longer a limit — access is per-account and Cloud usage is
+  // metered. Set canonically each run alongside the sub-user allowances.
   await db`UPDATE plans SET slug = 'community', resell = true WHERE slug = 'unlimited'`;
-  await db`UPDATE plans SET computers = 3, phones = 0, sub_users = 0 WHERE slug = 'solo'`;
-  await db`UPDATE plans SET computers = 3, phones = 0, sub_users = 5 WHERE slug = 'family'`;
-  await db`UPDATE plans SET computers = 3, phones = 0, sub_users = 9999, resell = true WHERE slug = 'community'`;
+  await db`UPDATE plans SET computers = 9999, phones = 0, sub_users = 0 WHERE slug = 'solo'`;
+  await db`UPDATE plans SET computers = 9999, phones = 0, sub_users = 5 WHERE slug = 'family'`;
+  await db`UPDATE plans SET computers = 9999, phones = 0, sub_users = 9999, resell = true WHERE slug = 'community'`;
+
+  // Rewrite any "N devices / computers / macs / phones" feature bullet to
+  // "Unlimited devices" to match the no-cap model. Guarded on a digit before the
+  // noun so it only touches old capped wording and is idempotent (the rewritten
+  // bullet has no number, so it won't re-match) — other bullets are untouched.
+  await db`
+    UPDATE plans SET features = (
+      SELECT jsonb_agg(
+        CASE WHEN elem::text ~* '[0-9]+ *(device|computer|mac|phone)'
+             THEN '"Unlimited devices"'::jsonb ELSE elem END)
+      FROM jsonb_array_elements(features) elem)
+    WHERE features::text ~* '[0-9]+ *(device|computer|mac|phone)'`;
 
   // The hidden "comp" plan: a free Solo account issued by hand. ON CONFLICT DO
   // NOTHING so it's created once and any later admin edits to it survive re-runs.
@@ -197,8 +212,8 @@ export async function ensureSchema() {
     INSERT INTO plans (slug, name, tagline, price_label, period, features,
                        computers, phones, sub_users, resell, featured, visible, sort)
     VALUES ('comp', 'Comp', 'complimentary', 'Free', '',
-            ${JSON.stringify(["3 devices", "1 user", "Complimentary — issued by hand"])},
-            3, 0, 0, false, false, false, 100)
+            ${JSON.stringify(["Unlimited devices", "1 user", "Complimentary — issued by hand"])},
+            9999, 0, 0, false, false, false, 100)
     ON CONFLICT (slug) DO NOTHING`;
 }
 

@@ -1,13 +1,16 @@
 import { NextRequest, NextResponse } from "next/server";
-import { countDevices, deviceKnown, ensureSchema, recordActivation } from "@/lib/db";
+import { ensureSchema, recordActivation } from "@/lib/db";
 import { appEmail, resolveEntitlement } from "@/lib/appauth";
 import { signToken } from "@/lib/licence";
 
 /**
  * POST /api/app/device { device, version } — register this Mac against the
- * account's combined device pool and return a device-bound offline entitlement
- * token. Reuses the seat-check pattern from /api/activate; a re-checking known
- * device refreshes its timestamp without burning a seat.
+ * account and return a device-bound offline entitlement token.
+ *
+ * There's no device cap: access is tied to the account, and Cloud usage is
+ * metered (more devices = more usage = more revenue), so we record the device
+ * for visibility but never refuse one. A re-checking device just refreshes its
+ * timestamp.
  */
 
 export const runtime = "nodejs";
@@ -26,10 +29,7 @@ export async function POST(req: NextRequest) {
   if (!ent) return NextResponse.json({ error: "no_subscription" }, { status: 403 });
   if (!ent.active) return NextResponse.json({ error: "inactive" }, { status: 403 });
 
-  const known = await deviceKnown(ent.licence.key, device);
-  if (!known && (await countDevices(ent.licence.key)) >= ent.devices) {
-    return NextResponse.json({ error: "device_limit", devices: ent.devices }, { status: 403 });
-  }
+  // No device cap — record for visibility, never refuse.
   await recordActivation(ent.licence.key, device, version);
 
   // Device-bound Ed25519 token for offline grace — same format the Swift app

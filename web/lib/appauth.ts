@@ -1,5 +1,6 @@
 import { NextRequest } from "next/server";
 import { appTokenEmail, keyOwnerEmail, licencesForEmail, type LicenceRow } from "@/lib/db";
+import { UNLIMITED } from "@/lib/stripe";
 
 /**
  * Shared auth for the macOS app's API. The app holds a per-device bearer token
@@ -17,7 +18,9 @@ export async function appEmail(req: NextRequest): Promise<string | null> {
 export interface AppEntitlement {
   active: boolean;
   plan: string;
-  /** Combined device pool the account may activate. */
+  /** Devices the account may activate. Uncapped for every plan — access is tied
+   *  to the account, and Cloud usage is metered, so more devices just means more
+   *  usage (and revenue), never a limit to police. Reported as UNLIMITED. */
   devices: number;
   /** Sub-users the account may add. */
   subUsers: number;
@@ -43,7 +46,7 @@ export async function resolveEntitlement(email: string): Promise<AppEntitlement 
   return {
     active: live(licence),
     plan: licence.plan,
-    devices: licence.seats,
+    devices: UNLIMITED,
     subUsers: licence.sub_users,
     isSubUser,
     parentEmail: isSubUser ? await keyOwnerEmail(email) : null,
