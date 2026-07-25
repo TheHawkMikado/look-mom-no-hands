@@ -45,6 +45,11 @@ export async function POST(req: NextRequest) {
   const cfg = appleConfig();
   if (!cfg) return NextResponse.redirect(`${site}/login?error=apple_unconfigured`, 303);
 
+  // Surface the specific failure reason so a broken sign-in is diagnosable
+  // without server logs.
+  const fail = (detail: string) =>
+    NextResponse.redirect(`${site}/login?error=apple&detail=${encodeURIComponent(detail)}`, 303);
+
   try {
     const redirectUri = `${site}/api/auth/apple/callback`;
     const tokenRes = await fetch("https://appleid.apple.com/auth/token", {
@@ -59,13 +64,20 @@ export async function POST(req: NextRequest) {
       }),
     });
     if (!tokenRes.ok) {
-      console.error("apple token exchange failed", await tokenRes.text());
-      return NextResponse.redirect(`${site}/login?error=apple`, 303);
+      const body = await tokenRes.text();
+      console.error("apple token exchange failed", body);
+      let code = "token_exchange";
+      try {
+        code = (JSON.parse(body) as { error?: string }).error || code;
+      } catch {
+        // non-JSON body — keep the generic code
+      }
+      return fail(code); // e.g. invalid_client (bad key/team/sub) / invalid_grant
     }
 
     const tokens = (await tokenRes.json()) as { id_token?: string };
     const claims = decodeIdToken(tokens.id_token);
-    if (!claims) return NextResponse.redirect(`${site}/login?error=apple`, 303);
+    if (!claims) return fail("no_id_token");
 
     // The token came straight from Apple's token endpoint over TLS, so we trust
     // its signature — but still confirm it was minted for us, is fresh, and
@@ -77,14 +89,15 @@ export async function POST(req: NextRequest) {
     const verified = claims.email_verified === true || claims.email_verified === "true";
 
     if (!issuedForUs || !fromApple || !fresh || !email || !verified) {
-      return NextResponse.redirect(`${site}/login?error=apple`, 303);
+      return fail("token_invalid");
     }
 
     await startSession(email);
     return NextResponse.redirect(`${site}${isAdmin(email) ? "/admin" : "/account"}`, 303);
   } catch (err) {
     console.error("apple sign-in failed", err);
-    return NextResponse.redirect(`${site}/login?error=apple`, 303);
+    const sessionSecretMissing = err instanceof Error && /SESSION_SECRET/.test(err.message);
+    return fail(sessionSecretMissing ? "session_secret_missing" : "server_error");
   }
 }
 

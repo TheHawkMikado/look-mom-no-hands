@@ -29,8 +29,13 @@ export default function Login() {
   // A failed sign-in callback bounces back here with ?error=… — surface it.
   // Read from window rather than useSearchParams to avoid a Suspense boundary.
   useEffect(() => {
-    const code = new URLSearchParams(window.location.search).get("error");
-    if (code) setError(ERRORS[code] ?? "Couldn't sign you in. Try again.");
+    const q = new URLSearchParams(window.location.search);
+    const code = q.get("error");
+    if (!code) return;
+    const base = ERRORS[code] ?? "Couldn't sign you in. Try again.";
+    const detail = q.get("detail");
+    // `detail` is a short machine reason (e.g. invalid_client) for diagnosis.
+    setError(detail ? `${base} [${detail}]` : base);
   }, []);
 
   async function submit(e: React.FormEvent) {

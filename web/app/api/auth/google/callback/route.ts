@@ -45,6 +45,11 @@ export async function GET(req: NextRequest) {
     return NextResponse.redirect(`${site}/login?error=google_unconfigured`);
   }
 
+  // Surface the specific failure reason back to the login page so a broken
+  // sign-in is diagnosable without digging through server logs.
+  const fail = (detail: string) =>
+    NextResponse.redirect(`${site}/login?error=google&detail=${encodeURIComponent(detail)}`);
+
   try {
     const redirectUri = `${req.nextUrl.origin}/api/auth/google/callback`;
     const tokenRes = await fetch("https://oauth2.googleapis.com/token", {
@@ -59,13 +64,20 @@ export async function GET(req: NextRequest) {
       }),
     });
     if (!tokenRes.ok) {
-      console.error("google token exchange failed", await tokenRes.text());
-      return NextResponse.redirect(`${site}/login?error=google`);
+      const body = await tokenRes.text();
+      console.error("google token exchange failed", body);
+      let code = "token_exchange";
+      try {
+        code = (JSON.parse(body) as { error?: string }).error || code;
+      } catch {
+        // non-JSON body — keep the generic code
+      }
+      return fail(code); // e.g. invalid_client (wrong secret) / redirect_uri_mismatch
     }
 
     const tokens = (await tokenRes.json()) as { id_token?: string };
     const claims = decodeIdToken(tokens.id_token);
-    if (!claims) return NextResponse.redirect(`${site}/login?error=google`);
+    if (!claims) return fail("no_id_token");
 
     // The token came straight from Google's token endpoint over TLS, so its
     // signature is implicitly trusted (per Google's OIDC guidance) — but we
@@ -78,14 +90,15 @@ export async function GET(req: NextRequest) {
     const email = typeof claims.email === "string" ? normaliseEmail(claims.email) : "";
 
     if (!issuedForUs || !fromGoogle || !fresh || !email || claims.email_verified !== true) {
-      return NextResponse.redirect(`${site}/login?error=google`);
+      return fail("token_invalid");
     }
 
     await startSession(email);
     return NextResponse.redirect(`${site}${isAdmin(email) ? "/admin" : "/account"}`);
   } catch (err) {
     console.error("google sign-in failed", err);
-    return NextResponse.redirect(`${site}/login?error=google`);
+    const sessionSecretMissing = err instanceof Error && /SESSION_SECRET/.test(err.message);
+    return fail(sessionSecretMissing ? "session_secret_missing" : "server_error");
   }
 }
 
