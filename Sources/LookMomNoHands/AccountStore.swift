@@ -231,6 +231,12 @@ final class AccountStore: ObservableObject {
         let anthropic = (p["anthropic"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
         let eleven = (p["elevenlabs"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
 
+        // Cloud with the weekly hours + credit spent — the server withholds the
+        // keys. Say why rather than showing the generic "no key" prompt.
+        if p["depleted"] as? Bool == true {
+            lastError = "You're out of Cloud hours this week — top up at nohandsapp.com to keep going."
+        }
+
         if let anthropic, !anthropic.isEmpty { coordinator.setAPIKey(anthropic) }
         else { coordinator.clearAPIKey() }
 
