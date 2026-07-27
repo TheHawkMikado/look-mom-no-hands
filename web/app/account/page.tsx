@@ -18,7 +18,13 @@ import {
 } from "@/lib/metering";
 import { Lockup } from "@/components/Logo";
 import { TopUp } from "@/components/TopUp";
-import { clearAccountKey, createSubLicence, freeSeat, saveAccountKey } from "./actions";
+import {
+  clearAccountKey,
+  createSubLicence,
+  freeSeat,
+  removeSubUser,
+  saveAccountKey,
+} from "./actions";
 
 export const dynamic = "force-dynamic";
 
@@ -329,6 +335,7 @@ async function LicenceCard({ licence }: { licence: LicenceRow }) {
                   <th>Email</th>
                   <th>Note</th>
                   <th>Devices</th>
+                  <th />
                 </tr>
               </thead>
               <tbody>
@@ -337,6 +344,13 @@ async function LicenceCard({ licence }: { licence: LicenceRow }) {
                     <td>{s.email}</td>
                     <td>{s.note ?? "—"}</td>
                     <td>{s.devices}</td>
+                    <td style={{ textAlign: "right" }}>
+                      <form action={removeSubUser}>
+                        <input type="hidden" name="key" value={licence.key} />
+                        <input type="hidden" name="subKey" value={s.key} />
+                        <button className="linkish danger">Remove</button>
+                      </form>
+                    </td>
                   </tr>
                 ))}
               </tbody>

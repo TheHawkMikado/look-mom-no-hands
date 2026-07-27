@@ -5,13 +5,16 @@ import { requireSession } from "@/lib/auth";
 import { mintLicenceKey } from "@/lib/licence";
 import {
   countSubLicences,
+  deleteLicence,
   ensureSchema,
   insertLicence,
   licencesForEmail,
   removeActivation,
   setAccountKey,
+  subLicencesOf,
 } from "@/lib/db";
 import { DEFAULT_PLANS } from "@/lib/catalogue";
+import { syncCommunityOverage } from "@/lib/overage";
 
 /**
  * Member actions.
@@ -88,6 +91,34 @@ export async function createSubLicence(formData: FormData) {
     parentKey,
     note: note || null,
   });
+
+  // Bill the reseller for this one if it's past the 27 free (best-effort — the
+  // sub-user is created regardless; billing re-syncs on the next add/remove).
+  try {
+    await syncCommunityOverage(licence);
+  } catch (err) {
+    console.error("community overage sync failed", err);
+  }
+
+  revalidatePath("/account");
+}
+
+/** Removes a sub-user and re-syncs the reseller's overage billing downward. */
+export async function removeSubUser(formData: FormData) {
+  const parentKey = String(formData.get("key") ?? "");
+  const subKey = String(formData.get("subKey") ?? "");
+  const { licence } = await ownedLicence(parentKey);
+
+  const subs = await subLicencesOf(parentKey);
+  if (!subs.some((s) => s.key === subKey)) {
+    throw new Error("That sub-user isn't on your account.");
+  }
+  await deleteLicence(subKey);
+  try {
+    await syncCommunityOverage(licence);
+  } catch (err) {
+    console.error("community overage sync failed", err);
+  }
 
   revalidatePath("/account");
 }

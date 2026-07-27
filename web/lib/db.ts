@@ -292,6 +292,26 @@ export async function ensureSchema() {
       cents          integer NOT NULL,
       created_at     timestamptz NOT NULL DEFAULT now()
     )`;
+
+  // Small key/value store — e.g. the lazily-created Community overage price id.
+  await db`
+    CREATE TABLE IF NOT EXISTS settings (
+      key   text PRIMARY KEY,
+      value text NOT NULL
+    )`;
+}
+
+export async function getSetting(key: string): Promise<string | null> {
+  const db = sql();
+  const rows = await db<{ value: string }[]>`SELECT value FROM settings WHERE key = ${key}`;
+  return rows[0]?.value ?? null;
+}
+
+export async function setSetting(key: string, value: string) {
+  const db = sql();
+  await db`
+    INSERT INTO settings (key, value) VALUES (${key}, ${value})
+    ON CONFLICT (key) DO UPDATE SET value = ${value}`;
 }
 
 // MARK: - Platform keys (what Cloud subscribers run on)
@@ -719,13 +739,15 @@ export interface LicenceRow extends Licence {
   note: string | null;
   created_at: Date;
   stripe_customer: string | null;
+  stripe_subscription: string | null;
   mode: string;
   devices: number;
 }
 
 const LICENCE_COLUMNS = `
   l.key, l.email, l.plan, l.expires_at, l.seats, l.revoked, l.phones,
-  l.sub_users, l.resell, l.parent_key, l.note, l.created_at, l.stripe_customer, l.mode,
+  l.sub_users, l.resell, l.parent_key, l.note, l.created_at, l.stripe_customer,
+  l.stripe_subscription, l.mode,
   (SELECT count(*)::int FROM activations a WHERE a.key = l.key) AS devices`;
 
 /** A member's own licences — never sub-licences they were issued by a reseller's parent. */
