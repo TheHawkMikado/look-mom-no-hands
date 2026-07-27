@@ -48,6 +48,7 @@ export async function POST(req: NextRequest) {
     ok: true,
     email,
     plan: ent.plan,
+    mode: ent.mode,
     isSubUser: ent.isSubUser,
     entitlements: { devices: ent.devices, subUsers: ent.subUsers },
     token,

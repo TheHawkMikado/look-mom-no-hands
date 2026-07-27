@@ -18,6 +18,7 @@ export async function GET(req: NextRequest) {
       email,
       active: ent?.active ?? false,
       plan: ent?.plan ?? null,
+      mode: ent?.mode ?? "byok",
       isSubUser: ent?.isSubUser ?? false,
       parentEmail: ent?.parentEmail ?? null,
       entitlements: ent ? { devices: ent.devices, subUsers: ent.subUsers } : null,

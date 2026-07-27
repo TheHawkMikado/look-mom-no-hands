@@ -27,6 +27,7 @@ final class AccountStore: ObservableObject {
     struct AccountInfo: Codable, Equatable {
         let email: String
         let plan: String
+        let mode: String          // "cloud" | "byok" — which keys this account runs on
         let isSubUser: Bool
         let parentEmail: String?
     }
@@ -125,7 +126,7 @@ final class AccountStore: ObservableObject {
         let d = CostMeter.shared.dictation
         let payload: [String: Any] = [
             "device": LicenseStore.deviceID,
-            "mode": "byok",
+            "mode": info?.mode ?? "byok",
             "controller": ["cost": c.cost, "calls": c.calls, "seconds": c.activeSeconds],
             "dictation": ["cost": d.cost, "calls": d.calls, "seconds": d.activeSeconds],
         ]
@@ -169,7 +170,8 @@ final class AccountStore: ObservableObject {
                 // Capture plan / sub-user from the response for display.
                 let plan = payload?["plan"] as? String ?? claims.plan
                 let isSub = payload?["isSubUser"] as? Bool ?? false
-                saveInfo(AccountInfo(email: claims.email, plan: plan,
+                let mode = payload?["mode"] as? String ?? info?.mode ?? "byok"
+                saveInfo(AccountInfo(email: claims.email, plan: plan, mode: mode,
                                      isSubUser: isSub, parentEmail: info?.parentEmail))
             case .failure(let err):
                 lastError = "The server returned a token this build can't verify: \(err.message)"
@@ -210,6 +212,7 @@ final class AccountStore: ObservableObject {
         saveInfo(AccountInfo(
             email: email,
             plan: p["plan"] as? String ?? info?.plan ?? "—",
+            mode: p["mode"] as? String ?? info?.mode ?? "byok",
             isSubUser: p["isSubUser"] as? Bool ?? info?.isSubUser ?? false,
             parentEmail: p["parentEmail"] as? String))
     }
