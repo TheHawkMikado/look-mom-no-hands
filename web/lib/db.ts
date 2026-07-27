@@ -69,6 +69,7 @@ export interface Licence {
   expires_at: Date | null;
   seats: number;
   revoked: boolean;
+  mode: string;
 }
 
 /** Idempotent — safe to call from any route, and it means no migration step. */
@@ -510,7 +511,7 @@ export async function endSubscription(subscriptionId: string) {
 export async function findLicence(key: string): Promise<Licence | null> {
   const db = sql();
   const rows = await db<Licence[]>`
-    SELECT key, email, plan, expires_at, seats, revoked
+    SELECT key, email, plan, expires_at, seats, revoked, mode
       FROM licences WHERE key = ${key}`;
   return rows[0] ?? null;
 }
@@ -543,7 +544,7 @@ export async function createLicence(l: {
 export async function licenceForSession(sessionId: string): Promise<Licence | null> {
   const db = sql();
   const rows = await db<Licence[]>`
-    SELECT key, email, plan, expires_at, seats, revoked
+    SELECT key, email, plan, expires_at, seats, revoked, mode
       FROM licences WHERE stripe_session = ${sessionId}`;
   return rows[0] ?? null;
 }
