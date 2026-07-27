@@ -459,9 +459,10 @@ function PlanEditor({ plan, isNew = false }: { plan: PlanRow; isNew?: boolean })
                  readOnly={!isNew} required /></label>
         <label>Name<input className="field" name="name" defaultValue={plan.name} /></label>
         <label>Tagline<input className="field" name="tagline" defaultValue={plan.tagline} /></label>
-        <label>Price label<input className="field" name="price_label"
-               defaultValue={plan.price_label} placeholder="$3" /></label>
-        <label>Period<input className="field" name="period" defaultValue={plan.period} /></label>
+        <label>Cloud price label<input className="field" name="price_label"
+               defaultValue={plan.price_label} placeholder="$9.99" /></label>
+        <label>Cloud period<input className="field" name="period" defaultValue={plan.period}
+               placeholder="/ week" /></label>
         <label>Stripe price id (Cloud)<input className="field" name="price_id"
                defaultValue={plan.price_id ?? ""} placeholder="price_…" /></label>
         <label>BYOK price label<input className="field" name="price_label_byok"
@@ -495,7 +496,8 @@ function PlanEditor({ plan, isNew = false }: { plan: PlanRow; isNew?: boolean })
       {!isNew && (
         <div className="row-between" style={{ marginTop: 12 }}>
           <span className="dim small">
-            {plan.price_id ? <code>{plan.price_id}</code> : "no Stripe price — not sellable"}
+            Cloud: {plan.price_id ? <code>{plan.price_id}</code> : "—"}
+            {" · "}BYOK: {plan.price_id_byok ? <code>{plan.price_id_byok}</code> : "—"}
           </span>
           <span className="actions">
             {plan.price_id && (
