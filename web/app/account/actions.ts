@@ -4,19 +4,18 @@ import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 import { requireSession } from "@/lib/auth";
 import { mintLicenceKey } from "@/lib/licence";
-import { stripe } from "@/lib/stripe";
 import {
   countSubLicences,
   deleteLicence,
   ensureSchema,
-  getReseller,
   insertLicence,
   licencesForEmail,
   mintProvisionKey,
+  mintWebhookSecret,
   removeActivation,
   setAccountKey,
-  setResellerConnect,
   setResellerPrice,
+  setResellerWebhookUrl,
   subLicencesOf,
 } from "@/lib/db";
 import { DEFAULT_PLANS } from "@/lib/catalogue";
@@ -163,38 +162,26 @@ export async function clearAccountKey(formData: FormData) {
 
 // MARK: - Reseller tools (Stripe Connect + provisioning)
 
-/**
- * Onboards the reseller onto Stripe Connect (Express) so they take their own
- * payment, then redirects to Stripe's hosted onboarding. Re-runnable — it reuses
- * the account and just issues a fresh onboarding link.
- */
-export async function connectStripe() {
+/** Registers the reseller's webhook URL — where we POST signed provisioning
+ *  events for their integration. Clear it by submitting an empty value. */
+export async function saveResellerWebhook(formData: FormData) {
   const session = await requireSession();
   await ensureSchema();
-  if (!(await resellerLicence(session.email))) {
-    throw new Error("A reseller plan is required to connect Stripe.");
-  }
+  if (!(await resellerLicence(session.email))) throw new Error("A reseller plan is required.");
 
-  const existing = await getReseller(session.email);
-  let accountId = existing?.connect_account_id ?? null;
-  if (!accountId) {
-    const account = await stripe().accounts.create({
-      type: "express",
-      email: session.email,
-      metadata: { nohands_reseller: session.email },
-    });
-    accountId = account.id;
-    await setResellerConnect(session.email, accountId);
-  }
+  const url = String(formData.get("url") ?? "").trim();
+  if (url && !/^https:\/\/.+/i.test(url)) throw new Error("Enter an https:// URL.");
+  await setResellerWebhookUrl(session.email, url || null);
+  revalidatePath("/account");
+}
 
-  const origin = process.env.SITE_URL ?? "https://nohandsapp.com";
-  const link = await stripe().accountLinks.create({
-    account: accountId,
-    refresh_url: `${origin}/account`,
-    return_url: `${origin}/account`,
-    type: "account_onboarding",
-  });
-  redirect(link.url);
+/** Mints a fresh webhook signing secret and shows it once via the URL. */
+export async function newWebhookSecret() {
+  const session = await requireSession();
+  await ensureSchema();
+  if (!(await resellerLicence(session.email))) throw new Error("A reseller plan is required.");
+  const secret = await mintWebhookSecret(session.email);
+  redirect(`/account?whsecret=${encodeURIComponent(secret)}`);
 }
 
 /** Sets what the reseller charges their customers — floored at our Solo price. */

@@ -22,13 +22,14 @@ import { Lockup } from "@/components/Logo";
 import { TopUp } from "@/components/TopUp";
 import {
   clearAccountKey,
-  connectStripe,
   createSubLicence,
   freeSeat,
   newProvisionKey,
+  newWebhookSecret,
   removeSubUser,
   saveAccountKey,
   saveResellerPrice,
+  saveResellerWebhook,
 } from "./actions";
 
 export const dynamic = "force-dynamic";
@@ -37,11 +38,11 @@ export const dynamic = "force-dynamic";
 export default async function Account({
   searchParams,
 }: {
-  searchParams: Promise<{ provkey?: string }>;
+  searchParams: Promise<{ provkey?: string; whsecret?: string }>;
 }) {
   const session = await getSession();
   if (!session) redirect("/login");
-  const { provkey = "" } = await searchParams;
+  const { provkey = "", whsecret = "" } = await searchParams;
 
   // A database that's missing or down should say so plainly rather than throw a
   // stack trace at a paying customer.
@@ -125,50 +126,40 @@ export default async function Account({
 
       {isHolder && !isCloud && <AccountKeys status={keyStatus} />}
       {isCloud && meter?.metered && <CloudUsage meter={meter} />}
-      {isReseller && <ResellerTools reseller={reseller} provkey={provkey} />}
+      {isReseller && <ResellerTools reseller={reseller} provkey={provkey} whsecret={whsecret} />}
     </div>
   );
 }
 
 /**
- * Reseller tools: connect their own Stripe to take payment, set the price they
- * charge (floored at our Solo price), and mint a provisioning API key for
- * creating sub-users programmatically.
+ * Reseller tools: an API key to create sub-users programmatically, a webhook to
+ * receive signed events, and the price they charge (floored at our Solo price).
+ * They handle their own customer payment.
  */
-function ResellerTools({ reseller, provkey }: { reseller: Reseller | null; provkey: string }) {
-  const connected = !!reseller?.connect_account_id;
+function ResellerTools({
+  reseller,
+  provkey,
+  whsecret,
+}: {
+  reseller: Reseller | null;
+  provkey: string;
+  whsecret: string;
+}) {
   const price = ((reseller?.price_cents ?? 300) / 100).toFixed(2);
   const hasKey = !!reseller?.provision_key_hash;
+  const hasSecret = !!reseller?.webhook_secret;
 
   return (
     <section style={{ borderTop: 0, paddingTop: 8 }}>
       <h2>Reseller tools</h2>
       <div className="panel-card">
-        {provkey && (
+        {(provkey || whsecret) && (
           <div style={{ marginBottom: 18 }}>
-            <strong>Your new provisioning key</strong>
+            <strong>Your new {provkey ? "provisioning key" : "webhook secret"}</strong>
             <p className="dim small">Copy it now — it&rsquo;s shown only once.</p>
-            <code className="keychip">{provkey}</code>
+            <code className="keychip">{provkey || whsecret}</code>
           </div>
         )}
-
-        <div className="row-between">
-          <div>
-            <strong>Take payment</strong>
-            <p className="dim small">
-              {connected
-                ? "Stripe connected — your customers pay you directly."
-                : "Connect your own Stripe to bill your customers."}
-            </p>
-          </div>
-          <form action={connectStripe}>
-            <button className="btn btn-primary">
-              {connected ? "Re-onboard" : "Connect Stripe"}
-            </button>
-          </form>
-        </div>
-
-        <hr className="rule" />
 
         <strong>Your price to customers</strong>
         <p className="dim small">
@@ -194,12 +185,34 @@ function ResellerTools({ reseller, provkey }: { reseller: Reseller | null; provk
 
         <strong>Provisioning API</strong>
         <p className="dim small">
-          Create Solo sub-users programmatically for free/bundled distribution: POST{" "}
+          Create Solo sub-users for free/bundled distribution: POST{" "}
           <code>{`{ "email": "..." }`}</code> to <code>/api/reseller/provision</code> with your
           key as a <code>Bearer</code> token.
         </p>
         <form action={newProvisionKey}>
-          <button className="btn btn-ghost">{hasKey ? "Regenerate key" : "Generate key"}</button>
+          <button className="btn btn-ghost">{hasKey ? "Regenerate API key" : "Generate API key"}</button>
+        </form>
+
+        <hr className="rule" />
+
+        <strong>Webhook</strong>
+        <p className="dim small">
+          We POST signed events (e.g. <code>user.provisioned</code>) to your URL. Verify the{" "}
+          <code>X-NoHands-Signature</code> header — HMAC-SHA256 of the body with your secret.
+        </p>
+        <form action={saveResellerWebhook} className="inline-form">
+          <input
+            className="field"
+            name="url"
+            type="url"
+            placeholder="https://your-app.com/nohands-webhook"
+            defaultValue={reseller?.webhook_url ?? ""}
+            style={{ flex: 1, minWidth: 240 }}
+          />
+          <button className="btn btn-ghost">Save URL</button>
+        </form>
+        <form action={newWebhookSecret} style={{ marginTop: 8 }}>
+          <button className="linkish">{hasSecret ? "Regenerate signing secret" : "Generate signing secret"}</button>
         </form>
       </div>
     </section>

@@ -300,9 +300,10 @@ export async function ensureSchema() {
       value text NOT NULL
     )`;
 
-  // Reseller accounts — their connected Stripe (to take their own payment) and a
-  // provisioning API key (SHA-256 only) for creating sub-users programmatically.
-  // `price_cents` is what they charge their customers; floored at the Solo price.
+  // Reseller accounts — a provisioning API key (SHA-256 only) for creating
+  // sub-users programmatically, and a webhook (their URL + a signing secret we
+  // sign outgoing events with). `price_cents` is what they charge their
+  // customers; floored at the Solo price. They handle their own payment.
   await db`
     CREATE TABLE IF NOT EXISTS resellers (
       email               text PRIMARY KEY,
@@ -311,6 +312,8 @@ export async function ensureSchema() {
       price_cents         integer NOT NULL DEFAULT 300,
       created_at          timestamptz NOT NULL DEFAULT now()
     )`;
+  await db`ALTER TABLE resellers ADD COLUMN IF NOT EXISTS webhook_url text`;
+  await db`ALTER TABLE resellers ADD COLUMN IF NOT EXISTS webhook_secret text`;
 }
 
 // MARK: - Resellers (Stripe Connect + provisioning)
@@ -320,14 +323,33 @@ export interface Reseller {
   connect_account_id: string | null;
   provision_key_hash: string | null;
   price_cents: number;
+  webhook_url: string | null;
+  webhook_secret: string | null;
 }
 
 export async function getReseller(email: string): Promise<Reseller | null> {
   const db = sql();
   const rows = await db<Reseller[]>`
-    SELECT email, connect_account_id, provision_key_hash, price_cents
+    SELECT email, connect_account_id, provision_key_hash, price_cents,
+           webhook_url, webhook_secret
       FROM resellers WHERE lower(email) = lower(${email})`;
   return rows[0] ?? null;
+}
+
+export async function setResellerWebhookUrl(email: string, url: string | null) {
+  await ensureReseller(email);
+  const db = sql();
+  await db`UPDATE resellers SET webhook_url = ${url} WHERE lower(email) = lower(${email})`;
+}
+
+/** Mints a webhook signing secret (we HMAC outgoing events with it; the reseller
+ *  verifies). Shown once. */
+export async function mintWebhookSecret(email: string): Promise<string> {
+  await ensureReseller(email);
+  const secret = "whsec_" + randomBytes(24).toString("base64url");
+  const db = sql();
+  await db`UPDATE resellers SET webhook_secret = ${secret} WHERE lower(email) = lower(${email})`;
+  return secret;
 }
 
 async function ensureReseller(email: string) {

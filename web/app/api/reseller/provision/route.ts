@@ -9,6 +9,7 @@ import {
 import { mintLicenceKey } from "@/lib/licence";
 import { DEFAULT_PLANS } from "@/lib/catalogue";
 import { syncCommunityOverage } from "@/lib/overage";
+import { fireResellerWebhook } from "@/lib/reseller";
 
 /**
  * POST /api/reseller/provision  { email }  (Authorization: Bearer <provision key>)
@@ -64,6 +65,14 @@ export async function POST(req: NextRequest) {
   } catch (err) {
     console.error("community overage sync failed", err);
   }
+
+  // Notify the reseller's webhook (best-effort, signed).
+  await fireResellerWebhook(resellerEmail, {
+    type: "user.provisioned",
+    email,
+    key,
+    at: Math.floor(Date.now() / 1000),
+  });
 
   return NextResponse.json({ ok: true, email });
 }
