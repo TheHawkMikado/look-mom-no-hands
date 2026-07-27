@@ -46,7 +46,7 @@ export default async function Home() {
           </p>
           <div className="cta-row">
             <a className="btn btn-primary" href="#pricing">
-              Buy — 7-day free trial
+              Choose your plan
             </a>
             <a className="btn btn-ghost" href={DOWNLOAD_URL} id="download">
               Download for Mac
@@ -126,7 +126,8 @@ export default async function Home() {
         <div className="wrap">
           <h2>Pricing</h2>
           <p className="sub">
-            Try it free for 7 days — no card. Billed weekly, cancel any time.
+            Billed weekly, cancel any time — or{" "}
+            <a href="/lifetime">pay once for lifetime</a>.
           </p>
           <Pricing plans={plans} defaultMode={defaultMode} />
 
@@ -195,19 +196,18 @@ export default async function Home() {
           </details>
 
           <details>
-            <summary>Can I move it to a new Mac?</summary>
+            <summary>Can I use it on more than one Mac?</summary>
             <p>
-              Yes — deactivate from the old Mac&rsquo;s panel and activate on the new one
-              with the same key. Your plan sets how many Macs can be active at once.
+              Yes — as many as you like. Just sign in on each one with your account;
+              there&rsquo;s no key to move and no device limit. Family and up also add
+              sub-users, each with their own sign-in.
             </p>
           </details>
 
           <details>
             <summary>What if it doesn&rsquo;t work for me?</summary>
             <p>
-              The 7-day trial is the real test, and it needs no card. If you buy and
-              it still isn&rsquo;t right, email within 30 days and you&rsquo;ll get a
-              refund.
+              Email within 30 days and you&rsquo;ll get a full refund — no questions.
             </p>
           </details>
         </div>

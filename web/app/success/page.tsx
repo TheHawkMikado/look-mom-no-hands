@@ -78,22 +78,31 @@ export default async function Success({
   }
 
   return (
-    <Shell title="You're in. Here's your key.">
-      <div className="keybox">
-        <code>{licence.key}</code>
-      </div>
-      <p style={{ color: "var(--muted)", fontSize: 14 }}>
-        Also emailed to {licence.email}. Keep it — it&rsquo;s how you reinstall or move
-        Macs.
+    <Shell title="You're in.">
+      <p style={{ color: "var(--muted)", fontSize: 15 }}>
+        Your account is <strong>{licence.email}</strong>. There&rsquo;s no key to paste —
+        you sign in on the app and everything loads.
       </p>
       <ol className="steps">
         <li>
           <a href={process.env.NEXT_PUBLIC_DOWNLOAD_URL ?? "/#download"}>Download the app</a>{" "}
           and drag it into Applications.
         </li>
-        <li>Open it and click the waveform icon in your menu bar.</li>
-        <li>Paste the key above and hit Activate.</li>
-        <li>Add your Anthropic API key, then click Start listening.</li>
+        <li>
+          Open it, click the menu-bar icon, and choose <strong>Sign in</strong>.
+        </li>
+        <li>
+          Sign in with <strong>{licence.email}</strong> — the same address you paid with.
+        </li>
+        {licence.mode === "byok" ? (
+          <li>
+            Set your Anthropic (and ElevenLabs) key once on{" "}
+            <a href="/account">your account</a> — every device picks it up. Then click
+            Start listening.
+          </li>
+        ) : (
+          <li>That&rsquo;s it — the AI is already set up for you. Click Start listening.</li>
+        )}
       </ol>
       {(() => {
         const upsell = upsellAfter(licence.plan);
