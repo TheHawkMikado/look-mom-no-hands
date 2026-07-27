@@ -131,7 +131,10 @@ export default async function Home() {
           <Pricing plans={plans} defaultMode={defaultMode} />
 
           <p className="footnote">
-            *Unlimited includes 27 Solo sub-users. Each additional user is $1 / week.
+            *Community includes 27 sub-users free. Each additional user is $1 / week.
+          </p>
+          <p className="footnote">
+            Prefer to pay once? <a href="/lifetime">See lifetime plans →</a>
           </p>
         </div>
       </section>

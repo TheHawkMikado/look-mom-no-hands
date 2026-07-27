@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { ensureSchema, licenceForSession } from "@/lib/db";
 import { stripe } from "@/lib/stripe";
+import { upsellAfter } from "@/lib/lifetime";
 
 /**
  * Post-checkout receipt. Reads the licence the *webhook* created rather than
@@ -94,6 +95,20 @@ export default async function Success({
         <li>Paste the key above and hit Activate.</li>
         <li>Add your Anthropic API key, then click Start listening.</li>
       </ol>
+      {(() => {
+        const upsell = upsellAfter(licence.plan);
+        return upsell ? (
+          <div className="panel-card" style={{ marginTop: 32, textAlign: "left" }}>
+            <strong>{upsell.headline}</strong>
+            <p className="dim small" style={{ margin: "6px 0 14px" }}>
+              {upsell.pitch}
+            </p>
+            <Link className="btn btn-primary" href={`/upsell/${upsell.slug}`}>
+              See the offer →
+            </Link>
+          </div>
+        ) : null;
+      })()}
     </Shell>
   );
 }
