@@ -299,6 +299,69 @@ export async function ensureSchema() {
       key   text PRIMARY KEY,
       value text NOT NULL
     )`;
+
+  // Reseller accounts — their connected Stripe (to take their own payment) and a
+  // provisioning API key (SHA-256 only) for creating sub-users programmatically.
+  // `price_cents` is what they charge their customers; floored at the Solo price.
+  await db`
+    CREATE TABLE IF NOT EXISTS resellers (
+      email               text PRIMARY KEY,
+      connect_account_id  text,
+      provision_key_hash  text,
+      price_cents         integer NOT NULL DEFAULT 300,
+      created_at          timestamptz NOT NULL DEFAULT now()
+    )`;
+}
+
+// MARK: - Resellers (Stripe Connect + provisioning)
+
+export interface Reseller {
+  email: string;
+  connect_account_id: string | null;
+  provision_key_hash: string | null;
+  price_cents: number;
+}
+
+export async function getReseller(email: string): Promise<Reseller | null> {
+  const db = sql();
+  const rows = await db<Reseller[]>`
+    SELECT email, connect_account_id, provision_key_hash, price_cents
+      FROM resellers WHERE lower(email) = lower(${email})`;
+  return rows[0] ?? null;
+}
+
+async function ensureReseller(email: string) {
+  const db = sql();
+  await db`INSERT INTO resellers (email) VALUES (${email}) ON CONFLICT (email) DO NOTHING`;
+}
+
+export async function setResellerConnect(email: string, accountId: string) {
+  await ensureReseller(email);
+  const db = sql();
+  await db`UPDATE resellers SET connect_account_id = ${accountId} WHERE lower(email) = lower(${email})`;
+}
+
+export async function setResellerPrice(email: string, cents: number) {
+  await ensureReseller(email);
+  const db = sql();
+  await db`UPDATE resellers SET price_cents = ${cents} WHERE lower(email) = lower(${email})`;
+}
+
+/** Mints a provisioning API key for a reseller (stores only its hash). */
+export async function mintProvisionKey(email: string): Promise<string> {
+  await ensureReseller(email);
+  const raw = "nhk_" + randomBytes(24).toString("base64url");
+  const db = sql();
+  await db`UPDATE resellers SET provision_key_hash = ${hashToken(raw)} WHERE lower(email) = lower(${email})`;
+  return raw;
+}
+
+/** The reseller email behind a raw provisioning key, or null. */
+export async function resellerByProvisionKey(raw: string): Promise<string | null> {
+  const db = sql();
+  const rows = await db<{ email: string }[]>`
+    SELECT email FROM resellers WHERE provision_key_hash = ${hashToken(raw)}`;
+  return rows[0]?.email ?? null;
 }
 
 export async function getSetting(key: string): Promise<string | null> {

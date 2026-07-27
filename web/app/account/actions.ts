@@ -1,20 +1,34 @@
 "use server";
 
 import { revalidatePath } from "next/cache";
+import { redirect } from "next/navigation";
 import { requireSession } from "@/lib/auth";
 import { mintLicenceKey } from "@/lib/licence";
+import { stripe } from "@/lib/stripe";
 import {
   countSubLicences,
   deleteLicence,
   ensureSchema,
+  getReseller,
   insertLicence,
   licencesForEmail,
+  mintProvisionKey,
   removeActivation,
   setAccountKey,
+  setResellerConnect,
+  setResellerPrice,
   subLicencesOf,
 } from "@/lib/db";
 import { DEFAULT_PLANS } from "@/lib/catalogue";
 import { syncCommunityOverage } from "@/lib/overage";
+
+/** The floor a reseller may charge their customers — our Solo weekly price. */
+const RESELL_FLOOR_CENTS = 300;
+
+async function resellerLicence(email: string) {
+  const mine = await licencesForEmail(email);
+  return mine.find((l) => !l.parent_key && l.resell) ?? null;
+}
 
 /**
  * Member actions.
@@ -145,4 +159,64 @@ export async function clearAccountKey(formData: FormData) {
   await ensureSchema();
   await setAccountKey(session.email, which, null);
   revalidatePath("/account");
+}
+
+// MARK: - Reseller tools (Stripe Connect + provisioning)
+
+/**
+ * Onboards the reseller onto Stripe Connect (Express) so they take their own
+ * payment, then redirects to Stripe's hosted onboarding. Re-runnable — it reuses
+ * the account and just issues a fresh onboarding link.
+ */
+export async function connectStripe() {
+  const session = await requireSession();
+  await ensureSchema();
+  if (!(await resellerLicence(session.email))) {
+    throw new Error("A reseller plan is required to connect Stripe.");
+  }
+
+  const existing = await getReseller(session.email);
+  let accountId = existing?.connect_account_id ?? null;
+  if (!accountId) {
+    const account = await stripe().accounts.create({
+      type: "express",
+      email: session.email,
+      metadata: { nohands_reseller: session.email },
+    });
+    accountId = account.id;
+    await setResellerConnect(session.email, accountId);
+  }
+
+  const origin = process.env.SITE_URL ?? "https://nohandsapp.com";
+  const link = await stripe().accountLinks.create({
+    account: accountId,
+    refresh_url: `${origin}/account`,
+    return_url: `${origin}/account`,
+    type: "account_onboarding",
+  });
+  redirect(link.url);
+}
+
+/** Sets what the reseller charges their customers — floored at our Solo price. */
+export async function saveResellerPrice(formData: FormData) {
+  const session = await requireSession();
+  await ensureSchema();
+  if (!(await resellerLicence(session.email))) throw new Error("A reseller plan is required.");
+
+  const dollars = Number(String(formData.get("price") ?? "0"));
+  const cents = Math.round(dollars * 100);
+  if (!Number.isFinite(cents) || cents < RESELL_FLOOR_CENTS) {
+    throw new Error(`Your price must be at least $${(RESELL_FLOOR_CENTS / 100).toFixed(2)}/week.`);
+  }
+  await setResellerPrice(session.email, cents);
+  revalidatePath("/account");
+}
+
+/** Mints a fresh provisioning API key and shows it once via the URL. */
+export async function newProvisionKey() {
+  const session = await requireSession();
+  await ensureSchema();
+  if (!(await resellerLicence(session.email))) throw new Error("A reseller plan is required.");
+  const raw = await mintProvisionKey(session.email);
+  redirect(`/account?provkey=${encodeURIComponent(raw)}`);
 }

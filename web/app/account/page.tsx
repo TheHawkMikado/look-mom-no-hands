@@ -4,9 +4,11 @@ import {
   accountKeyStatus,
   activationsFor,
   ensureSchema,
+  getReseller,
   licencesForEmail,
   subLicencesOf,
   type LicenceRow,
+  type Reseller,
 } from "@/lib/db";
 import { UNLIMITED } from "@/lib/stripe";
 import {
@@ -20,18 +22,26 @@ import { Lockup } from "@/components/Logo";
 import { TopUp } from "@/components/TopUp";
 import {
   clearAccountKey,
+  connectStripe,
   createSubLicence,
   freeSeat,
+  newProvisionKey,
   removeSubUser,
   saveAccountKey,
+  saveResellerPrice,
 } from "./actions";
 
 export const dynamic = "force-dynamic";
 
 /** Member dashboard: your keys, the Macs using them, and reseller sub-users. */
-export default async function Account() {
+export default async function Account({
+  searchParams,
+}: {
+  searchParams: Promise<{ provkey?: string }>;
+}) {
   const session = await getSession();
   if (!session) redirect("/login");
+  const { provkey = "" } = await searchParams;
 
   // A database that's missing or down should say so plainly rather than throw a
   // stack trace at a paying customer.
@@ -59,6 +69,17 @@ export default async function Account() {
       meter = await meterStatusFor(session.email);
     } catch (err) {
       console.error("account page could not read the meter", err);
+    }
+  }
+
+  // Resellers (a resell plan holder) get Connect + provisioning tools.
+  const isReseller = holderLicence?.resell ?? false;
+  let reseller: Reseller | null = null;
+  if (isReseller) {
+    try {
+      reseller = await getReseller(session.email);
+    } catch (err) {
+      console.error("account page could not read the reseller", err);
     }
   }
 
@@ -104,7 +125,84 @@ export default async function Account() {
 
       {isHolder && !isCloud && <AccountKeys status={keyStatus} />}
       {isCloud && meter?.metered && <CloudUsage meter={meter} />}
+      {isReseller && <ResellerTools reseller={reseller} provkey={provkey} />}
     </div>
+  );
+}
+
+/**
+ * Reseller tools: connect their own Stripe to take payment, set the price they
+ * charge (floored at our Solo price), and mint a provisioning API key for
+ * creating sub-users programmatically.
+ */
+function ResellerTools({ reseller, provkey }: { reseller: Reseller | null; provkey: string }) {
+  const connected = !!reseller?.connect_account_id;
+  const price = ((reseller?.price_cents ?? 300) / 100).toFixed(2);
+  const hasKey = !!reseller?.provision_key_hash;
+
+  return (
+    <section style={{ borderTop: 0, paddingTop: 8 }}>
+      <h2>Reseller tools</h2>
+      <div className="panel-card">
+        {provkey && (
+          <div style={{ marginBottom: 18 }}>
+            <strong>Your new provisioning key</strong>
+            <p className="dim small">Copy it now — it&rsquo;s shown only once.</p>
+            <code className="keychip">{provkey}</code>
+          </div>
+        )}
+
+        <div className="row-between">
+          <div>
+            <strong>Take payment</strong>
+            <p className="dim small">
+              {connected
+                ? "Stripe connected — your customers pay you directly."
+                : "Connect your own Stripe to bill your customers."}
+            </p>
+          </div>
+          <form action={connectStripe}>
+            <button className="btn btn-primary">
+              {connected ? "Re-onboard" : "Connect Stripe"}
+            </button>
+          </form>
+        </div>
+
+        <hr className="rule" />
+
+        <strong>Your price to customers</strong>
+        <p className="dim small">
+          At least $3.00/week — our Solo price. You keep the difference; give it away free
+          or bundle it into a ≥ $15/month product.
+        </p>
+        <form action={saveResellerPrice} className="inline-form">
+          <span>$</span>
+          <input
+            className="field"
+            name="price"
+            type="number"
+            step="0.01"
+            min={3}
+            defaultValue={price}
+            style={{ maxWidth: 120 }}
+          />
+          <span className="dim small">/ week</span>
+          <button className="btn btn-ghost">Save</button>
+        </form>
+
+        <hr className="rule" />
+
+        <strong>Provisioning API</strong>
+        <p className="dim small">
+          Create Solo sub-users programmatically for free/bundled distribution: POST{" "}
+          <code>{`{ "email": "..." }`}</code> to <code>/api/reseller/provision</code> with your
+          key as a <code>Bearer</code> token.
+        </p>
+        <form action={newProvisionKey}>
+          <button className="btn btn-ghost">{hasKey ? "Regenerate key" : "Generate key"}</button>
+        </form>
+      </div>
+    </section>
   );
 }
 
