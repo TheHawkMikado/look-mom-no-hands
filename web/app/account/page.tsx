@@ -9,7 +9,15 @@ import {
   type LicenceRow,
 } from "@/lib/db";
 import { UNLIMITED } from "@/lib/stripe";
+import {
+  meterStatusFor,
+  OVERAGE_CTRL_PER_HOUR,
+  OVERAGE_DICT_PER_HOUR,
+  TOPUP_BLOCKS,
+  type MeterStatus,
+} from "@/lib/metering";
 import { Lockup } from "@/components/Logo";
+import { TopUp } from "@/components/TopUp";
 import { clearAccountKey, createSubLicence, freeSeat, saveAccountKey } from "./actions";
 
 export const dynamic = "force-dynamic";
@@ -34,7 +42,19 @@ export default async function Account() {
   }
 
   // Anyone with a plan of their own (not purely a sub-user) sets the shared keys.
-  const isHolder = licences.some((l) => !l.parent_key);
+  const holderLicence = licences.find((l) => !l.parent_key);
+  const isHolder = !!holderLicence;
+  const isCloud = holderLicence?.mode === "cloud";
+
+  // Cloud holders see usage + top-up instead of the BYOK key editor.
+  let meter: MeterStatus | null = null;
+  if (isCloud) {
+    try {
+      meter = await meterStatusFor(session.email);
+    } catch (err) {
+      console.error("account page could not read the meter", err);
+    }
+  }
 
   return (
     <div className="wrap">
@@ -76,8 +96,61 @@ export default async function Account() {
         )}
       </section>
 
-      {isHolder && <AccountKeys status={keyStatus} />}
+      {isHolder && !isCloud && <AccountKeys status={keyStatus} />}
+      {isCloud && meter?.metered && <CloudUsage meter={meter} />}
     </div>
+  );
+}
+
+/**
+ * Cloud usage this week against the plan's included hours, the credit balance,
+ * and top-up. Cloud runs on the platform's keys, so there's no key to set — this
+ * replaces the BYOK key editor.
+ */
+function CloudUsage({ meter }: { meter: MeterStatus }) {
+  return (
+    <section style={{ borderTop: 0, paddingTop: 8 }}>
+      <h2>Cloud usage this week</h2>
+      <div className="panel-card">
+        <dl className="facts">
+          <div>
+            <dt>Controller</dt>
+            <dd>
+              {meter.ctrlHours.toFixed(1)} / {meter.allowance.ctrl} hrs
+            </dd>
+          </div>
+          <div>
+            <dt>Dictation</dt>
+            <dd>
+              {meter.dictHours.toFixed(1)} / {meter.allowance.dict} hrs
+            </dd>
+          </div>
+          <div>
+            <dt>Credit</dt>
+            <dd>${meter.creditDollars.toFixed(2)}</dd>
+          </div>
+        </dl>
+        {meter.ok ? (
+          meter.overageDue > 0 && (
+            <p className="dim small">
+              You&rsquo;re over your included hours — ${meter.overageDue.toFixed(2)} of overage
+              this week, covered by your credit.
+            </p>
+          )
+        ) : (
+          <p className="err" style={{ textAlign: "left" }}>
+            You&rsquo;re out of included hours and credit — the app is paused until the week
+            resets or you top up.
+          </p>
+        )}
+        <hr className="rule" />
+        <p className="dim small">
+          Beyond your weekly hours, usage draws from credit at ${OVERAGE_CTRL_PER_HOUR}/hr
+          controller and ${OVERAGE_DICT_PER_HOUR}/hr dictation. Add credit:
+        </p>
+        <TopUp blocks={TOPUP_BLOCKS} />
+      </div>
+    </section>
   );
 }
 

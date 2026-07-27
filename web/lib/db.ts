@@ -264,6 +264,34 @@ export async function ensureSchema() {
       updated_at     timestamptz NOT NULL DEFAULT now(),
       CONSTRAINT platform_keys_singleton CHECK (id = 1)
     )`;
+
+  // Cloud metering — this billing week's controller/dictation usage per account,
+  // plus how much overage has already been drawn from the wallet this period.
+  await db`
+    CREATE TABLE IF NOT EXISTS usage_meter (
+      email                 text PRIMARY KEY,
+      period_start          timestamptz NOT NULL DEFAULT now(),
+      ctrl_seconds          double precision NOT NULL DEFAULT 0,
+      dict_seconds          double precision NOT NULL DEFAULT 0,
+      overage_charged_cents integer NOT NULL DEFAULT 0
+    )`;
+
+  // Prepaid overage credit, in cents. Topped up via one-time checkout.
+  await db`
+    CREATE TABLE IF NOT EXISTS credit_wallet (
+      email text PRIMARY KEY,
+      cents integer NOT NULL DEFAULT 0
+    )`;
+
+  // One row per processed top-up payment — the idempotency guard so a redelivered
+  // webhook can't credit a wallet twice (top-ups create no licence to key off).
+  await db`
+    CREATE TABLE IF NOT EXISTS credit_topups (
+      stripe_session text PRIMARY KEY,
+      email          text NOT NULL,
+      cents          integer NOT NULL,
+      created_at     timestamptz NOT NULL DEFAULT now()
+    )`;
 }
 
 // MARK: - Platform keys (what Cloud subscribers run on)
@@ -402,17 +430,24 @@ export interface UsageBucket {
   seconds: number;
 }
 
-/** Records the app's cumulative per-device usage. Latest snapshot wins per
- *  (email, device) — the app reports running totals, so an upsert keeps one
- *  current row per device rather than an ever-growing log. */
+/** Records the app's cumulative per-device usage and returns the delta (in
+ *  seconds) since the last report from this device — the amount to add to the
+ *  metering week. Reports are running totals, so an upsert keeps one row per
+ *  device; a decrease (the app's meter was reset) yields a zero delta. */
 export async function recordUsage(
   email: string,
   device: string,
   mode: string,
   controller: UsageBucket,
   dictation: UsageBucket,
-) {
+): Promise<{ dCtrlSeconds: number; dDictSeconds: number }> {
   const db = sql();
+  const prev = await db<{ ctrl_seconds: number; dict_seconds: number }[]>`
+    SELECT ctrl_seconds, dict_seconds FROM usage_reports
+     WHERE email = ${email} AND device = ${device}`;
+  const dCtrlSeconds = Math.max(0, controller.seconds - (prev[0]?.ctrl_seconds ?? 0));
+  const dDictSeconds = Math.max(0, dictation.seconds - (prev[0]?.dict_seconds ?? 0));
+
   await db`
     INSERT INTO usage_reports
       (email, device, mode, ctrl_cost, ctrl_calls, ctrl_seconds,
@@ -426,6 +461,106 @@ export async function recordUsage(
       ctrl_seconds = EXCLUDED.ctrl_seconds, dict_cost = EXCLUDED.dict_cost,
       dict_calls = EXCLUDED.dict_calls, dict_seconds = EXCLUDED.dict_seconds,
       updated_at = now()`;
+
+  return { dCtrlSeconds, dDictSeconds };
+}
+
+// MARK: - Cloud metering (usage_meter + credit_wallet)
+
+interface MeterRow {
+  period_start: Date;
+  ctrl_seconds: number;
+  dict_seconds: number;
+  overage_charged_cents: number;
+}
+
+const PERIOD_MS = 7 * 24 * 60 * 60 * 1000;
+
+/** Adds this report's delta to the account's metering week and, if it pushes
+ *  past the included hours, draws the overage from the prepaid wallet (down to
+ *  zero — an empty wallet is what the key gate checks). The week resets lazily
+ *  when the stored period is over 7 days old. */
+export async function chargeMeter(
+  email: string,
+  allowance: { ctrl: number; dict: number },
+  overageDollars: (ctrlHours: number, dictHours: number) => number,
+  dCtrlSeconds: number,
+  dDictSeconds: number,
+) {
+  const db = sql();
+  const rows = await db<MeterRow[]>`SELECT * FROM usage_meter WHERE email = ${email}`;
+  const now = Date.now();
+  const cur =
+    rows[0] && now - new Date(rows[0].period_start).getTime() < PERIOD_MS
+      ? rows[0]
+      : { period_start: new Date(), ctrl_seconds: 0, dict_seconds: 0, overage_charged_cents: 0 };
+
+  const ctrl = cur.ctrl_seconds + dCtrlSeconds;
+  const dict = cur.dict_seconds + dDictSeconds;
+  const dueCents = Math.round(overageDollars(ctrl / 3600, dict / 3600) * 100);
+  const toCharge = Math.max(0, dueCents - cur.overage_charged_cents);
+
+  let chargedCents = cur.overage_charged_cents;
+  if (toCharge > 0) {
+    const bal = await walletCents(email);
+    const take = Math.min(toCharge, bal);
+    if (take > 0) {
+      await db`UPDATE credit_wallet SET cents = cents - ${take} WHERE email = ${email}`;
+      chargedCents += take;
+    }
+  }
+
+  await db`
+    INSERT INTO usage_meter (email, period_start, ctrl_seconds, dict_seconds, overage_charged_cents)
+    VALUES (${email}, ${cur.period_start}, ${ctrl}, ${dict}, ${chargedCents})
+    ON CONFLICT (email) DO UPDATE SET
+      period_start = EXCLUDED.period_start, ctrl_seconds = EXCLUDED.ctrl_seconds,
+      dict_seconds = EXCLUDED.dict_seconds, overage_charged_cents = EXCLUDED.overage_charged_cents`;
+}
+
+export async function walletCents(email: string): Promise<number> {
+  const db = sql();
+  const rows = await db<{ cents: number }[]>`SELECT cents FROM credit_wallet WHERE email = ${email}`;
+  return rows[0]?.cents ?? 0;
+}
+
+/** Adds prepaid credit (from a top-up payment). */
+export async function addCredit(email: string, cents: number) {
+  const db = sql();
+  await db`
+    INSERT INTO credit_wallet (email, cents) VALUES (${email}, ${cents})
+    ON CONFLICT (email) DO UPDATE SET cents = credit_wallet.cents + ${cents}`;
+}
+
+/** Credits a top-up exactly once (guarded by the Stripe session id). Returns
+ *  false if this session was already processed. */
+export async function creditTopup(sessionId: string, email: string, cents: number): Promise<boolean> {
+  const db = sql();
+  const rows = await db`
+    INSERT INTO credit_topups (stripe_session, email, cents)
+    VALUES (${sessionId}, ${email}, ${cents})
+    ON CONFLICT (stripe_session) DO NOTHING
+    RETURNING stripe_session`;
+  if (rows.length === 0) return false;
+  await addCredit(email, cents);
+  return true;
+}
+
+/** The account's current metering week (zeroed if the stored period has lapsed). */
+export async function currentMeter(
+  email: string,
+): Promise<{ ctrlSeconds: number; dictSeconds: number; overageChargedCents: number }> {
+  const db = sql();
+  const rows = await db<MeterRow[]>`SELECT * FROM usage_meter WHERE email = ${email}`;
+  const r = rows[0];
+  if (!r || Date.now() - new Date(r.period_start).getTime() >= PERIOD_MS) {
+    return { ctrlSeconds: 0, dictSeconds: 0, overageChargedCents: 0 };
+  }
+  return {
+    ctrlSeconds: r.ctrl_seconds,
+    dictSeconds: r.dict_seconds,
+    overageChargedCents: r.overage_charged_cents,
+  };
 }
 
 export interface UsageSummary {

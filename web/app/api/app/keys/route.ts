@@ -1,21 +1,21 @@
 import { NextRequest, NextResponse } from "next/server";
 import { ensureSchema, getAccountKeys, getPlatformKeys } from "@/lib/db";
 import { appEmail, resolveEntitlement } from "@/lib/appauth";
+import { meterStatusFor } from "@/lib/metering";
 
 /**
- * GET /api/app/keys — the Anthropic + ElevenLabs keys the signed-in app should
- * run on.
+ * GET /api/app/keys — the Anthropic + ElevenLabs keys the signed-in app runs on.
  *
- * - **Cloud** subscriptions run on the **platform's** keys (the owner's, set in
- *   the admin) — that's what "we supply the AI" means.
- * - **BYOK** subscriptions run on the **account's own** keys (a sub-user
- *   transparently gets its parent's, resolved in getAccountKeys).
- *
- * This is the shared-key delivery: the keys are set once (on the account for
- * BYOK, in the admin for Cloud) and every signed-in device fetches them here.
+ * - **Cloud** runs on the **platform's** keys — but only while the account is
+ *   within its weekly hours or its prepaid credit covers the overage. Once that's
+ *   spent, we return no keys (`depleted`) so the app stops until the week resets
+ *   or they top up. That's the meter's teeth.
+ * - **BYOK** runs on the account's own keys and is never metered.
  */
 
 export const runtime = "nodejs";
+
+const noStore = { headers: { "cache-control": "no-store" } };
 
 export async function GET(req: NextRequest) {
   const email = await appEmail(req);
@@ -23,9 +23,16 @@ export async function GET(req: NextRequest) {
 
   await ensureSchema();
   const ent = await resolveEntitlement(email);
-  const keys = ent?.mode === "cloud" ? await getPlatformKeys() : await getAccountKeys(email);
-  return NextResponse.json(
-    { anthropic: keys.anthropic, elevenlabs: keys.elevenlabs },
-    { headers: { "cache-control": "no-store" } },
-  );
+
+  if (ent?.mode === "cloud") {
+    const meter = await meterStatusFor(email);
+    if (!meter.ok) {
+      return NextResponse.json({ anthropic: null, elevenlabs: null, depleted: true }, noStore);
+    }
+    const keys = await getPlatformKeys();
+    return NextResponse.json({ anthropic: keys.anthropic, elevenlabs: keys.elevenlabs }, noStore);
+  }
+
+  const keys = await getAccountKeys(email);
+  return NextResponse.json({ anthropic: keys.anthropic, elevenlabs: keys.elevenlabs }, noStore);
 }

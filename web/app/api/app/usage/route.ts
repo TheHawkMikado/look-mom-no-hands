@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { ensureSchema, recordUsage, type UsageBucket } from "@/lib/db";
 import { appEmail } from "@/lib/appauth";
+import { chargeCloudMeter } from "@/lib/metering";
 
 /**
  * POST /api/app/usage — the app reports its cumulative per-device usage (metered
@@ -30,6 +31,8 @@ export async function POST(req: NextRequest) {
   const mode = body.mode === "cloud" ? "cloud" : "byok";
 
   await ensureSchema();
-  await recordUsage(email, device, mode, bucket(body.controller), bucket(body.dictation));
+  const delta = await recordUsage(email, device, mode, bucket(body.controller), bucket(body.dictation));
+  // Cloud usage draws down the weekly allowance (and then the wallet); BYOK no-ops.
+  await chargeCloudMeter(email, delta.dCtrlSeconds, delta.dDictSeconds);
   return NextResponse.json({ ok: true });
 }

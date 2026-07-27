@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import {
   createLicence,
+  creditTopup,
   endSubscription,
   ensureSchema,
   extendSubscription,
@@ -92,6 +93,16 @@ async function onCheckoutCompleted(session: any) {
 
   const email: string | null =
     session.customer_details?.email ?? session.customer_email ?? null;
+
+  // Cloud credit top-up — adds prepaid overage credit to the account's wallet.
+  // Idempotent on the session id, so a redelivered event can't credit twice.
+  const topupCents = session.metadata?.nohands_topup_cents as string | undefined;
+  if (topupCents) {
+    const creditEmail = (session.metadata?.nohands_topup_email as string) ?? email;
+    if (creditEmail) await creditTopup(session.id, creditEmail, parseInt(topupCents, 10));
+    return;
+  }
+
   if (!email) throw new Error(`session ${session.id} has no email`);
 
   // Lifetime purchase (one-time payment) — mint a perpetual BYOK licence with the
