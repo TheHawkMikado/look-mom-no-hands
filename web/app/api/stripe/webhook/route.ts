@@ -7,8 +7,9 @@ import {
   licenceForSession,
 } from "@/lib/db";
 import { mintLicenceKey } from "@/lib/licence";
-import { stripe } from "@/lib/stripe";
+import { stripe, UNLIMITED } from "@/lib/stripe";
 import { entitlementsForPrice } from "@/lib/catalogue";
+import { lifetimeTier } from "@/lib/lifetime";
 import { sendLicenceEmail } from "@/lib/email";
 
 /**
@@ -92,6 +93,35 @@ async function onCheckoutCompleted(session: any) {
   const email: string | null =
     session.customer_details?.email ?? session.customer_email ?? null;
   if (!email) throw new Error(`session ${session.id} has no email`);
+
+  // Lifetime purchase (one-time payment) — mint a perpetual BYOK licence with the
+  // tier's entitlements and no subscription. Distinct from the weekly flow below.
+  const lifetimeKey = session.metadata?.nohands_lifetime as string | undefined;
+  if (lifetimeKey) {
+    const tier = lifetimeTier(lifetimeKey);
+    if (!tier) throw new Error(`session ${session.id} names unknown lifetime tier ${lifetimeKey}`);
+    const key = mintLicenceKey();
+    await createLicence({
+      key,
+      email,
+      plan: tier.key,
+      expiresAt: null, // perpetual — no renewal
+      seats: UNLIMITED,
+      phones: 0,
+      subUsers: tier.subUsers,
+      resell: tier.resell,
+      mode: "byok",
+      stripeSession: session.id,
+      stripeCustomer: typeof session.customer === "string" ? session.customer : null,
+      stripeSubscription: null,
+    });
+    try {
+      await sendLicenceEmail(email, key);
+    } catch (err) {
+      console.error("lifetime licence email failed (key was still issued)", err);
+    }
+    return;
+  }
 
   const items = await stripe().checkout.sessions.listLineItems(session.id, { limit: 1 });
   const spec = await entitlementsForPrice(items.data[0]?.price?.id ?? "");

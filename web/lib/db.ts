@@ -618,6 +618,16 @@ export async function countSubLicences(parentKey: string): Promise<number> {
   return rows[0]?.n ?? 0;
 }
 
+/** How many lifetime accounts (Startup/Team/Reseller) have sold — drives founder
+ *  pricing. Top-level only; sub-users a reseller issues don't count. */
+export async function countLifetimeLicences(): Promise<number> {
+  const db = sql();
+  const rows = await db<{ n: number }[]>`
+    SELECT count(*)::int AS n FROM licences
+     WHERE plan IN ('startup', 'team', 'reseller') AND parent_key IS NULL`;
+  return rows[0]?.n ?? 0;
+}
+
 export interface Activation {
   device: string;
   app_version: string | null;
