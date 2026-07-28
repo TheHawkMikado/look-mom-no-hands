@@ -394,11 +394,10 @@ struct PanelView: View {
         HStack {
             if !(coordinator.micAuthorized && coordinator.speechAuthorized) {
                 Button("Grant mic & speech") { coordinator.requestPermissions { _ in } }
-            } else if coordinator.isRunning {
-                Button("Stop listening") { coordinator.stop() }
-            } else {
-                Button("Start listening") { coordinator.start() }
-                    .disabled(!coordinator.hasKey || !account.status.allowsUse)
+            } else if !coordinator.isRunning {
+                // Always-listening starts itself; this shows only when the audio
+                // pipeline died and needs a manual kick.
+                Button("Resume listening") { coordinator.start() }
             }
             Button("Dashboard") {
                 openWindow(id: "dashboard")

@@ -312,19 +312,30 @@ final class AppCoordinator: ObservableObject {
         loadKey()
         refreshAuthFlags()
         store.log("app", "auth at launch: mic=\(micAuthorized) speech=\(speechAuthorized)")
+        // Always-listening: the app's whole job is waiting for the wake word, so
+        // the mic turns on at launch — start() prompts for mic/speech itself on
+        // first run. Quit is the off switch.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
-            guard let self else { return }
-            guard !(self.micAuthorized && self.speechAuthorized) else { return }
-            self.requestPermissions { _ in }
+            self?.start()
         }
         // Returning from System Settings reactivates the app — a free, event-
         // driven way to notice a just-granted permission with no timer at all.
         NotificationCenter.default.addObserver(
             forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main
         ) { [weak self] _ in
-            Task { @MainActor in self?.refreshAuthFlags() }
+            Task { @MainActor in
+                self?.refreshAuthFlags()
+                self?.autoStartIfIdle()
+            }
         }
         armAuthPoll()   // also catch a grant that lands while the panel sits open
+    }
+
+    /// Restarts listening after a permission grant or a dead audio pipeline —
+    /// anything that left the app silent when it should always be listening.
+    func autoStartIfIdle() {
+        guard !isRunning, !starting, micAuthorized, speechAuthorized else { return }
+        start()
     }
 
     private func refreshAuthFlags() {
@@ -364,6 +375,7 @@ final class AppCoordinator: ObservableObject {
         let wasGranted = allPermissionsGranted
         refreshAuthFlags()
         if allPermissionsGranted, !wasGranted { store.log("perm", "all permissions granted") }
+        autoStartIfIdle()
         if allPermissionsGranted || Date() > authPollDeadline {
             authPoll?.invalidate(); authPoll = nil
         }
@@ -2192,13 +2204,18 @@ final class AppCoordinator: ObservableObject {
             return
         }
         if NSWorkspace.shared.frontmostApplication?.processIdentifier != target.processIdentifier {
-            target.activate(options: [])
+            if !target.activate(options: []) {
+                store.log("dictation", "couldn't bring \(target.localizedName ?? "target app") frontmost — pasting anyway")
+            }
             try? await Task.sleep(nanoseconds: 120_000_000)
         }
         try? await Task.sleep(nanoseconds: 40_000_000)   // let the app register the clipboard
         guard gen == runGeneration, !Task.isCancelled else { return }
         try? ScreenController.sendPaste()
-        store.log("dictation", "pasted \(final.count) chars into \(target.localizedName ?? "target app")")
+        // "sent", not "pasted": delivery is unverifiable, and macOS silently drops
+        // synthesized keys when the TCC grant predates the current binary — a log
+        // that claims success hides exactly that failure.
+        store.log("dictation", "sent ⌘V (\(final.count) chars) to \(target.localizedName ?? "target app")")
         if shouldSubmit {
             // Let the paste settle in the field before Enter submits it.
             try? await Task.sleep(nanoseconds: 60_000_000)

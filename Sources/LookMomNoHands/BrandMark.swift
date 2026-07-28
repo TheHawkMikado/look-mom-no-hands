@@ -106,33 +106,23 @@ extension NSImage {
             image.isTemplate = true
             return image
         case .standby:
-            return colouredMark(size: size, colour: .systemPurple, highlight: nil)
+            return colouredMark(size: size, base: .systemPurple, moving: .white, highlight: nil)
         case .active(let step):
-            return colouredMark(size: size, colour: .systemPurple, highlight: step)
+            return colouredMark(size: size, base: .white, moving: .systemPurple, highlight: step)
         case .dictating(let step):
-            return colouredMark(size: size, colour: .systemRed, highlight: step)
+            return colouredMark(size: size, base: .white, moving: .systemRed, highlight: step)
         }
     }
 
-    /// A rounded plate in the state colour with the hand knocked out in white —
-    /// bare coloured strokes vanish against a busy menu bar, a filled plate
-    /// doesn't. `highlight` nil = every capsule solid white; otherwise that
-    /// capsule burns at full strength while the rest sit dimmed — the
-    /// level-meter sweep reads as white light moving across the plate.
-    private static func colouredMark(size: NSSize, colour: NSColor, highlight: Int?) -> NSImage {
+    /// Bare glyph, no backing plate. `highlight` nil = the whole hand in `base`;
+    /// otherwise that capsule is drawn in `moving` — the sweep reads as a spot of
+    /// colour travelling across a white hand.
+    private static func colouredMark(size: NSSize, base: NSColor, moving: NSColor, highlight: Int?) -> NSImage {
         let image = NSImage(size: size, flipped: true) { rect in
             guard let ctx = NSGraphicsContext.current?.cgContext else { return false }
-            let plate = CGPath(roundedRect: rect, cornerWidth: rect.height * 0.28,
-                               cornerHeight: rect.height * 0.28, transform: nil)
-            ctx.addPath(plate)
-            ctx.setFillColor(colour.cgColor)
-            ctx.fillPath()
-
-            let glyphRect = rect.insetBy(dx: 3, dy: 2.5)
-            for (i, capsule) in MarkShape.fittedCapsules(in: glyphRect).enumerated() {
-                let alpha: CGFloat = (highlight == nil || highlight == i) ? 1 : 0.4
+            for (i, capsule) in MarkShape.fittedCapsules(in: rect).enumerated() {
                 ctx.addPath(capsule.cgPath)
-                ctx.setFillColor(NSColor.white.withAlphaComponent(alpha).cgColor)
+                ctx.setFillColor((highlight == i ? moving : base).cgColor)
                 ctx.fillPath()
             }
             return true
