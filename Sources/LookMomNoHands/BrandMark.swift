@@ -114,15 +114,25 @@ extension NSImage {
         }
     }
 
-    /// `highlight` nil = every capsule solid; otherwise that capsule burns at
-    /// full strength while the rest sit dimmed — the level-meter sweep.
+    /// A rounded plate in the state colour with the hand knocked out in white —
+    /// bare coloured strokes vanish against a busy menu bar, a filled plate
+    /// doesn't. `highlight` nil = every capsule solid white; otherwise that
+    /// capsule burns at full strength while the rest sit dimmed — the
+    /// level-meter sweep reads as white light moving across the plate.
     private static func colouredMark(size: NSSize, colour: NSColor, highlight: Int?) -> NSImage {
         let image = NSImage(size: size, flipped: true) { rect in
             guard let ctx = NSGraphicsContext.current?.cgContext else { return false }
-            for (i, capsule) in MarkShape.fittedCapsules(in: rect).enumerated() {
-                let alpha: CGFloat = (highlight == nil || highlight == i) ? 1 : 0.35
+            let plate = CGPath(roundedRect: rect, cornerWidth: rect.height * 0.28,
+                               cornerHeight: rect.height * 0.28, transform: nil)
+            ctx.addPath(plate)
+            ctx.setFillColor(colour.cgColor)
+            ctx.fillPath()
+
+            let glyphRect = rect.insetBy(dx: 3, dy: 2.5)
+            for (i, capsule) in MarkShape.fittedCapsules(in: glyphRect).enumerated() {
+                let alpha: CGFloat = (highlight == nil || highlight == i) ? 1 : 0.4
                 ctx.addPath(capsule.cgPath)
-                ctx.setFillColor(colour.withAlphaComponent(alpha).cgColor)
+                ctx.setFillColor(NSColor.white.withAlphaComponent(alpha).cgColor)
                 ctx.fillPath()
             }
             return true
