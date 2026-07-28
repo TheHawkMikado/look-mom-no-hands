@@ -19,24 +19,45 @@ struct MarkShape: Shape {
     /// same size whether or not it's slashed.
     private static let designBox = CGRect(x: 197, y: 312, width: 614, height: 400)
 
-    private static let bars: [(x: CGFloat, top: CGFloat)] = [
-        (434, 430),   // index
-        (546, 370),   // middle
-        (658, 410),   // ring
-        (770, 490),   // pinky
+    /// Centre-lines, thumb first then index→pinky — also the visual left-to-right
+    /// order the animated menu-bar states sweep through.
+    private static let strokes: [(from: CGPoint, to: CGPoint)] = [
+        (CGPoint(x: 344, y: 654), CGPoint(x: 255, y: 486)),   // thumb
+        (CGPoint(x: 434, y: 430), CGPoint(x: 434, y: 654)),   // index
+        (CGPoint(x: 546, y: 370), CGPoint(x: 546, y: 654)),   // middle
+        (CGPoint(x: 658, y: 410), CGPoint(x: 658, y: 654)),   // ring
+        (CGPoint(x: 770, y: 490), CGPoint(x: 770, y: 654)),   // pinky
     ]
 
-    func path(in rect: CGRect) -> Path {
-        var centreLines = Path()
-        centreLines.move(to: CGPoint(x: 344, y: 654))       // thumb
-        centreLines.addLine(to: CGPoint(x: 255, y: 486))
-        for bar in Self.bars {
-            centreLines.move(to: CGPoint(x: bar.x, y: bar.top))
-            centreLines.addLine(to: CGPoint(x: bar.x, y: 654))
-        }
+    static var capsuleCount: Int { strokes.count }
 
-        let capsules = StrokeStyle(lineWidth: lineWidth, lineCap: .round)
-        var glyph = centreLines.strokedPath(capsules)
+    private static func capsule(_ i: Int, lineWidth: CGFloat) -> Path {
+        var line = Path()
+        line.move(to: strokes[i].from)
+        line.addLine(to: strokes[i].to)
+        return line.strokedPath(StrokeStyle(lineWidth: lineWidth, lineCap: .round))
+    }
+
+    private static func fitTransform(for rect: CGRect) -> CGAffineTransform {
+        let box = designBox
+        let scale = min(rect.width / box.width, rect.height / box.height)
+        return CGAffineTransform(scaleX: scale, y: scale)
+            .concatenating(CGAffineTransform(translationX: rect.midX - box.midX * scale,
+                                             y: rect.midY - box.midY * scale))
+    }
+
+    /// The five capsules as separate fitted paths so each can carry its own
+    /// colour — what the animated menu-bar states need.
+    static func fittedCapsules(in rect: CGRect, lineWidth: CGFloat = 62) -> [Path] {
+        let transform = fitTransform(for: rect)
+        return strokes.indices.map { capsule($0, lineWidth: lineWidth).applying(transform) }
+    }
+
+    func path(in rect: CGRect) -> Path {
+        var glyph = Path()
+        for i in Self.strokes.indices {
+            glyph.addPath(Self.capsule(i, lineWidth: lineWidth))
+        }
 
         if slashed {
             let slash = Path { p in
@@ -48,35 +69,65 @@ struct MarkShape: Shape {
                 .union(slash.strokedPath(StrokeStyle(lineWidth: lineWidth * 0.9, lineCap: .round)))
         }
 
-        let box = Self.designBox
-        let scale = min(rect.width / box.width, rect.height / box.height)
-        return glyph.applying(
-            CGAffineTransform(scaleX: scale, y: scale)
-                .concatenating(CGAffineTransform(translationX: rect.midX - box.midX * scale,
-                                                 y: rect.midY - box.midY * scale)))
+        return glyph.applying(Self.fitTransform(for: rect))
     }
 }
 
+/// Menu-bar icon states. Colour carries the state so it reads at a glance:
+/// grey slash = off, purple hand = standby (listening for the wake word),
+/// purple sweep = live command session, red sweep = recording/dictation.
+enum MenuBarMark: Equatable {
+    case off
+    case standby
+    case active(step: Int)
+    case dictating(step: Int)
+}
+
 extension NSImage {
-    /// Menu-bar template image of the mark.
+    /// Menu-bar image of the mark for a given state.
     ///
-    /// Template means pure black on transparent: macOS recolours it for light and
-    /// dark menu bars and inverts it while the panel is open, which it can only do
-    /// if we never bake in a colour. `dimmed` therefore rides on the alpha
-    /// channel — the template mask reads alpha, so a faded glyph stays faded in
-    /// either appearance.
-    static func brandMark(height: CGFloat, slashed: Bool, dimmed: Bool) -> NSImage {
+    /// `.off` stays a template image — pure black on transparent — so macOS
+    /// recolours the slashed glyph for light/dark menu bars exactly as before.
+    /// The coloured states are deliberately NOT templates: purple/red is the
+    /// information, so the system must not repaint it.
+    static func brandMark(height: CGFloat, state: MenuBarMark) -> NSImage {
         let aspect = 614.0 / 400.0
         let size = NSSize(width: (height * aspect).rounded(), height: height)
 
+        switch state {
+        case .off:
+            let image = NSImage(size: size, flipped: true) { rect in
+                guard let ctx = NSGraphicsContext.current?.cgContext else { return false }
+                ctx.addPath(MarkShape(slashed: true).path(in: rect).cgPath)
+                ctx.setFillColor(NSColor.black.cgColor)
+                ctx.fillPath()
+                return true
+            }
+            image.isTemplate = true
+            return image
+        case .standby:
+            return colouredMark(size: size, colour: .systemPurple, highlight: nil)
+        case .active(let step):
+            return colouredMark(size: size, colour: .systemPurple, highlight: step)
+        case .dictating(let step):
+            return colouredMark(size: size, colour: .systemRed, highlight: step)
+        }
+    }
+
+    /// `highlight` nil = every capsule solid; otherwise that capsule burns at
+    /// full strength while the rest sit dimmed — the level-meter sweep.
+    private static func colouredMark(size: NSSize, colour: NSColor, highlight: Int?) -> NSImage {
         let image = NSImage(size: size, flipped: true) { rect in
             guard let ctx = NSGraphicsContext.current?.cgContext else { return false }
-            ctx.addPath(MarkShape(slashed: slashed).path(in: rect).cgPath)
-            ctx.setFillColor(NSColor.black.withAlphaComponent(dimmed ? 0.5 : 1).cgColor)
-            ctx.fillPath()
+            for (i, capsule) in MarkShape.fittedCapsules(in: rect).enumerated() {
+                let alpha: CGFloat = (highlight == nil || highlight == i) ? 1 : 0.35
+                ctx.addPath(capsule.cgPath)
+                ctx.setFillColor(colour.withAlphaComponent(alpha).cgColor)
+                ctx.fillPath()
+            }
             return true
         }
-        image.isTemplate = true
+        image.isTemplate = false
         return image
     }
 }

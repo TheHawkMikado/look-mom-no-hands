@@ -14,10 +14,7 @@ struct LookMomNoHandsApp: App {
                       account: account, updates: updates)
                 .onAppear { updates.checkInBackground() }
         } label: {
-            // slash = off, dimmed = standby (wake listening), solid = live session
-            Image(nsImage: .brandMark(height: 15,
-                                      slashed: !coordinator.isRunning,
-                                      dimmed: coordinator.isRunning && !coordinator.isActive))
+            MenuBarIcon(coordinator: coordinator)
                 // The menu-bar icon is always present, so this is the reliable
                 // place to wire sign-in delivery and run the launch sync — unlike
                 // window content, which isn't materialised until it's shown.
@@ -39,6 +36,45 @@ struct LookMomNoHandsApp: App {
     }
 
     static let dashboardTitle = "\(AppIdentity.displayName) — Dashboard"
+}
+
+/// The status-item glyph plus its animation clock. Grey slash = off, purple
+/// hand = standby, purple finger-sweep = live command session, red sweep =
+/// recording/dictation.
+///
+/// The sweep is frame-by-frame image swaps, not an implicit animation —
+/// MenuBarExtra labels don't run those. The ticker only writes state while a
+/// sweep is on screen, so standby/off never re-render on the tick.
+struct MenuBarIcon: View {
+    @ObservedObject var coordinator: AppCoordinator
+    @State private var step = 0
+    private let ticker = Timer.publish(every: 0.18, on: .main, in: .common).autoconnect()
+
+    var body: some View {
+        Image(nsImage: .brandMark(height: 15, state: state))
+            .onReceive(ticker) { _ in
+                guard isSweeping else { return }
+                step = (step + 1) % MarkShape.capsuleCount
+            }
+    }
+
+    private var isSweeping: Bool {
+        switch state {
+        case .active, .dictating: return true
+        case .off, .standby: return false
+        }
+    }
+
+    private var state: MenuBarMark {
+        guard coordinator.isRunning else { return .off }
+        if coordinator.phase == .recording || coordinator.liveActive { return .dictating(step: step) }
+        switch coordinator.phase {
+        case .capturingCommand, .thinking, .acting, .clarifying, .watching:
+            return .active(step: step)
+        default:
+            return .standby
+        }
+    }
 }
 
 /// Routes custom-scheme URLs (`lookmomnohands://auth?token=…`) to the account
