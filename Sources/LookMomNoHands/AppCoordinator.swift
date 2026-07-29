@@ -2203,6 +2203,11 @@ final class AppCoordinator: ObservableObject {
             store.log("dictation", "\(final.count) chars on clipboard — no target window; press ⌘V where you want it")
             return
         }
+        if !ScreenController.axResponds() {
+            // The checkbox can be ON while the grant is dead (recorded against a
+            // replaced binary). Say so — the paste below will be silently dropped.
+            store.log("dictation", "AX API not responding despite trusted=true — remove the app from System Settings → Accessibility, re-add it, relaunch")
+        }
         if NSWorkspace.shared.frontmostApplication?.processIdentifier != target.processIdentifier {
             if !target.activate(options: []) {
                 store.log("dictation", "couldn't bring \(target.localizedName ?? "target app") frontmost — pasting anyway")
@@ -2211,16 +2216,18 @@ final class AppCoordinator: ObservableObject {
         }
         try? await Task.sleep(nanoseconds: 40_000_000)   // let the app register the clipboard
         guard gen == runGeneration, !Task.isCancelled else { return }
-        try? ScreenController.sendPaste()
+        // Deliver straight to the target's pid: another utility's event tap
+        // (Krisp, Karabiner, …) can eat a ⌘V posted to the global HID stream.
+        try? ScreenController.sendPaste(toPid: target.processIdentifier)
         // "sent", not "pasted": delivery is unverifiable, and macOS silently drops
         // synthesized keys when the TCC grant predates the current binary — a log
         // that claims success hides exactly that failure.
-        store.log("dictation", "sent ⌘V (\(final.count) chars) to \(target.localizedName ?? "target app")")
+        store.log("dictation", "sent ⌘V (\(final.count) chars) direct to \(target.localizedName ?? "target app") pid \(target.processIdentifier)")
         if shouldSubmit {
             // Let the paste settle in the field before Enter submits it.
             try? await Task.sleep(nanoseconds: 60_000_000)
             guard gen == runGeneration, !Task.isCancelled else { return }
-            try? ScreenController.keystroke("return")
+            try? ScreenController.keystroke("return", pid: target.processIdentifier)
             store.log("dictation", "submitted with Enter")
         }
     }

@@ -574,8 +574,22 @@ enum ScreenController {
     }
 
     /// Sends ⌘V to paste the clipboard at the cursor. Needs Accessibility.
-    static func sendPaste() throws {
-        try keystroke("cmd+v")
+    /// With a pid, the events are delivered straight to that process — skipping
+    /// the HID tap chain, where another utility's event tap (Krisp, Karabiner,
+    /// launcher apps) can swallow synthesized keys without a trace.
+    static func sendPaste(toPid pid: pid_t? = nil) throws {
+        try keystroke("cmd+v", pid: pid)
+    }
+
+    /// Whether the AX API actually answers for this process. AXIsProcessTrusted()
+    /// can keep returning a stale true after the binary is replaced, while every
+    /// AX call and posted event is silently dropped — a live read is the only
+    /// honest probe.
+    static func axResponds() -> Bool {
+        var value: CFTypeRef?
+        let err = AXUIElementCopyAttributeValue(AXUIElementCreateSystemWide(),
+                                                kAXFocusedApplicationAttribute as CFString, &value)
+        return err == .success || err == .noValue
     }
 
     static func scroll(direction: ScrollDirection) throws {
@@ -737,17 +751,17 @@ enum ScreenController {
 
     // MARK: - Keystrokes
 
-    static func keystroke(_ spec: String) throws {
+    static func keystroke(_ spec: String, pid: pid_t? = nil) throws {
         guard let combo = parseKeystroke(spec) else { throw ControlError.unknownKeystroke(spec) }
         try Task.checkCancellation()
         let source = CGEventSource(stateID: .combinedSessionState)
         if let down = CGEvent(keyboardEventSource: source, virtualKey: combo.key, keyDown: true) {
             down.flags = combo.flags
-            down.post(tap: .cghidEventTap)
+            if let pid { down.postToPid(pid) } else { down.post(tap: .cghidEventTap) }
         }
         if let up = CGEvent(keyboardEventSource: source, virtualKey: combo.key, keyDown: false) {
             up.flags = combo.flags
-            up.post(tap: .cghidEventTap)
+            if let pid { up.postToPid(pid) } else { up.post(tap: .cghidEventTap) }
         }
     }
 
