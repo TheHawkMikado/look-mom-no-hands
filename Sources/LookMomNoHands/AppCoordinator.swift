@@ -524,6 +524,9 @@ final class AppCoordinator: ObservableObject {
 
     /// Routes a fired chord to its action. The id strings match `refreshHotkeys`.
     private func handleHotkey(_ id: String) {
+        // Every fire is logged: "the chord did nothing" bugs are undebuggable
+        // when the log can't distinguish not-fired from fired-and-swallowed.
+        store.log("hotkey", "chord fired: \(id) (mode: \(mode))")
         switch id {
         case "dictate": toggleHotkeyDictation(submit: false)
         case "submit": toggleHotkeyDictation(submit: true)
@@ -539,6 +542,9 @@ final class AppCoordinator: ObservableObject {
     func toggleHotkeyDictation(submit: Bool = false) {
         if demonstrating { return }   // a chord press during a demo would fight the recording
         if mode == .recording {
+            // The submit chord works at EITHER end: a dictation started plain
+            // (voice or ⌃⌥) but ended with the submit chord still pastes + Enter.
+            if submit { submitAfterInsert = true }
             stopRecording()
             return
         }
