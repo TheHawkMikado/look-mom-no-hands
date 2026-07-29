@@ -390,7 +390,11 @@ struct EnvWindow: Sendable, Equatable, Identifiable {
     var tabs: [String] = []    // browser tabs, empty otherwise
     var activeTab: String? = nil
     var display: Int = 0       // 0 = main display, 1 = second, …
-    var id: String { "\(app)›\(title)" }
+    var onScreen: Bool = true  // false = on another Space/desktop or minimized
+    var seq: Int = 0           // disambiguates same-titled windows (untitled ×N)
+    // seq matters: eleven untitled Chrome windows once shared one id, and
+    // SwiftUI ForEach renders duplicate ids as blank rows.
+    var id: String { "\(app)›\(title)#\(seq)" }
 }
 
 /// One running app and its windows. Grouped from the flat window list so the
@@ -419,8 +423,9 @@ struct EnvSnapshot: Sendable, Equatable {
         }
         for app in apps.prefix(14) {
             s += "\n- \(app.name)\(app.active ? " (frontmost)" : "")"
+            if app.windows.count > 1 { s += " — \(app.windows.count) windows" }
             for w in app.windows.prefix(8) where !w.title.isEmpty {
-                s += "\n    • \(w.title.prefix(100))\(w.focused ? " (focused)" : "")\(w.display > 0 ? " [display \(w.display + 1)]" : "")"
+                s += "\n    • \(w.title.prefix(100))\(w.focused ? " (focused)" : "")\(w.display > 0 ? " [display \(w.display + 1)]" : "")\(w.onScreen ? "" : " [another desktop]")"
                 if !w.tabs.isEmpty {
                     let shown = w.tabs.prefix(12).map { $0.prefix(60) }.joined(separator: " | ")
                     s += "\n        tabs: \(shown)\(w.tabs.count > 12 ? " …+\(w.tabs.count - 12)" : "")"

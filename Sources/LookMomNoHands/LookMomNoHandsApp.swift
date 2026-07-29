@@ -47,6 +47,7 @@ struct LookMomNoHandsApp: App {
 /// sweep is on screen, so standby/off never re-render on the tick.
 struct MenuBarIcon: View {
     @ObservedObject var coordinator: AppCoordinator
+    @Environment(\.openWindow) private var openWindow
     @State private var step = 0
     private let ticker = Timer.publish(every: 0.18, on: .main, in: .common).autoconnect()
 
@@ -55,6 +56,12 @@ struct MenuBarIcon: View {
             .onReceive(ticker) { _ in
                 guard isSweeping else { return }
                 step = (step + 1) % MarkShape.capsuleCount
+            }
+            // The voice command "open the dashboard" lands here: this label is the
+            // only view that's guaranteed alive, so it owns the openWindow bridge.
+            .onReceive(NotificationCenter.default.publisher(for: .lmnhOpenDashboard)) { _ in
+                openWindow(id: "dashboard")
+                NSApplication.shared.activate(ignoringOtherApps: true)
             }
     }
 
@@ -75,6 +82,12 @@ struct MenuBarIcon: View {
             return .standby
         }
     }
+}
+
+extension Notification.Name {
+    /// Posted by the action executor when a voice command targets our own
+    /// dashboard; observed by the menu-bar label, which opens the window scene.
+    static let lmnhOpenDashboard = Notification.Name("lmnhOpenDashboard")
 }
 
 /// Routes custom-scheme URLs (`lookmomnohands://auth?token=…`) to the account

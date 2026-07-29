@@ -128,12 +128,23 @@ private struct MemoryTab: View {
                              : "Grant Accessibility to track open windows.")
                             .font(.caption).foregroundStyle(.secondary)
                     }
+                    if !environment.snapshot.apps.isEmpty && !CGPreflightScreenCaptureAccess() {
+                        Text("Grant Screen Recording to see the titles of windows on other desktops.")
+                            .font(.caption2).foregroundStyle(.orange)
+                    }
                     ForEach(environment.snapshot.apps) { app in
                         DisclosureGroup {
                             ForEach(app.windows) { win in
                                 VStack(alignment: .leading, spacing: 2) {
-                                    Text(win.title.isEmpty ? "(untitled window)" : win.title)
-                                        .font(.callout)
+                                    HStack(spacing: 6) {
+                                        Text(win.title.isEmpty ? "(untitled window)" : win.title)
+                                            .font(.callout)
+                                        if !win.onScreen {
+                                            Text("another desktop").font(.caption2)
+                                                .padding(.horizontal, 5).padding(.vertical, 1)
+                                                .background(.quaternary, in: Capsule())
+                                        }
+                                    }
                                     if !win.tabs.isEmpty {
                                         Text(win.tabs.map { $0 == win.activeTab ? "▸ \($0)" : $0 }.joined(separator: "  ·  "))
                                             .font(.caption2).foregroundStyle(.secondary).lineLimit(2)

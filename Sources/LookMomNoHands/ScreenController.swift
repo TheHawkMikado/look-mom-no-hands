@@ -277,17 +277,49 @@ enum ScreenController {
     /// tab titles. Cancellable/bounded like `openWindows`. Runs off the main actor.
     static func environmentSnapshot(includeTabs: Bool = true) throws -> EnvSnapshot {
         let front = NSWorkspace.shared.frontmostApplication
-        // Quartz bounds per display (same space as AX positions) so each window can
-        // be tagged with the display it's on — what "move it to my main screen" needs.
+        // Quartz bounds per display (same space as CG window bounds) so each window
+        // can be tagged with the display it's on — what "move it to my main screen" needs.
         let displayBounds: [CGRect] = NSScreen.screens.compactMap {
             ($0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID)
                 .map { CGDisplayBounds($0) }
         }
+
+        // Every real window on every Space, straight from the window server.
+        // AX's kAXWindows only returns the CURRENT Space, which is how eleven
+        // Chrome windows once read as "3 open". Titles need Screen Recording;
+        // without it the windows still count, they're just untitled.
+        struct CGWin { let title: String; let bounds: CGRect; let onScreen: Bool }
+        var byPid: [pid_t: [CGWin]] = [:]
+        let all = (CGWindowListCopyWindowInfo([.optionAll, .excludeDesktopElements],
+                                              kCGNullWindowID) as? [[String: Any]]) ?? []
+        let visible = Set(((CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements],
+                                                       kCGNullWindowID) as? [[String: Any]]) ?? [])
+            .compactMap { $0[kCGWindowNumber as String] as? Int })
+        for info in all {
+            guard (info[kCGWindowLayer as String] as? Int) == 0,   // layer 0 = real windows
+                  let pidInt = info[kCGWindowOwnerPID as String] as? Int,
+                  let num = info[kCGWindowNumber as String] as? Int,
+                  let bDict = info[kCGWindowBounds as String] as? NSDictionary,
+                  let bounds = CGRect(dictionaryRepresentation: bDict as CFDictionary)
+            else { continue }
+            if let alpha = info[kCGWindowAlpha as String] as? Double, alpha == 0 { continue }
+            // Palettes, tooltips and 1-px helpers aren't windows the user means.
+            guard bounds.width >= 80, bounds.height >= 60 else { continue }
+            byPid[pid_t(pidInt), default: []].append(
+                CGWin(title: info[kCGWindowName as String] as? String ?? "",
+                      bounds: bounds, onScreen: visible.contains(num)))
+        }
+
         var byApp: [String: EnvApp] = [:]
         var order: [String] = []
         for app in NSWorkspace.shared.runningApplications where app.activationPolicy == .regular {
             try Task.checkCancellation()
             guard let name = app.localizedName else { continue }
+            let cgWins = byPid[app.processIdentifier] ?? []
+
+            // AX supplies what the window server can't — the focused window and
+            // tab strips — but only for windows on the current Space, so it
+            // decorates the CG list by title instead of defining the list.
             let axApp = AXUIElementCreateApplication(app.processIdentifier)
             // Bound every AX call to this app so one wedged process can't stall the
             // whole poll (AX has no default timeout; this poller runs unattended).
@@ -295,37 +327,44 @@ enum ScreenController {
             // Unlock Electron/Chromium trees so their tabs/buttons are readable.
             // Done every poll (idempotent) so newly-launched apps warm up quickly.
             enableFullAccessibility(axApp)
+            var focusedTitle: String?
+            var tabsByTitle: [String: (tabs: [String], active: String?)] = [:]
             var value: CFTypeRef?
-            guard AXUIElementCopyAttributeValue(axApp, kAXWindowsAttribute as CFString, &value) == .success,
-                  let windows = value as? [AXUIElement] else { continue }
-            // The app's focused window (to mark it in the hierarchy). Status-checked
-            // + conditional cast: a backgrounded app can return kCFNull here, and a
-            // force-cast of that would crash.
-            // Type-ID check, not `as?`: a conditional CF downcast "always succeeds",
-            // so kCFNull would slip through and later CFEqual would misbehave.
-            var focusedRef: CFTypeRef?
-            AXUIElementCopyAttributeValue(axApp, kAXFocusedWindowAttribute as CFString, &focusedRef)
-            let focused: AXUIElement? = focusedRef.flatMap {
-                CFGetTypeID($0) == AXUIElementGetTypeID() ? ($0 as! AXUIElement) : nil
+            if AXUIElementCopyAttributeValue(axApp, kAXWindowsAttribute as CFString, &value) == .success,
+               let axWindows = value as? [AXUIElement] {
+                // The app's focused window. Status-checked + type-ID checked: a
+                // backgrounded app can return kCFNull, a conditional CF downcast
+                // "always succeeds", and CFEqual on kCFNull would misbehave.
+                var focusedRef: CFTypeRef?
+                AXUIElementCopyAttributeValue(axApp, kAXFocusedWindowAttribute as CFString, &focusedRef)
+                let focused: AXUIElement? = focusedRef.flatMap {
+                    CFGetTypeID($0) == AXUIElementGetTypeID() ? ($0 as! AXUIElement) : nil
+                }
+                for w in axWindows {
+                    let title = string(w, kAXTitleAttribute) ?? ""
+                    if let f = focused, CFEqual(f, w) { focusedTitle = title }
+                    if includeTabs, tabsByTitle[title] == nil {
+                        let t = windowTabs(w)
+                        if !t.0.isEmpty { tabsByTitle[title] = t }
+                    }
+                }
             }
 
             var envWindows: [EnvWindow] = []
-            for w in windows {
-                let title = string(w, kAXTitleAttribute) ?? ""
-                let isFocused = focused.map { CFEqual($0, w) } ?? false
-                let (tabs, active) = includeTabs ? windowTabs(w) : ([], nil)
-                // Which display holds this window (by its top-left, nudged inward).
+            var seqByTitle: [String: Int] = [:]
+            for win in cgWins {
                 var display = 0
-                var posRef: CFTypeRef?
-                if displayBounds.count > 1,
-                   AXUIElementCopyAttributeValue(w, kAXPositionAttribute as CFString, &posRef) == .success,
-                   let pr = posRef, CFGetTypeID(pr) == AXValueGetTypeID() {
-                    var p = CGPoint.zero
-                    AXValueGetValue((pr as! AXValue), .cgPoint, &p)
-                    display = displayBounds.firstIndex { $0.contains(CGPoint(x: p.x + 20, y: p.y + 20)) } ?? 0
+                if displayBounds.count > 1 {
+                    let mid = CGPoint(x: win.bounds.midX, y: win.bounds.midY)
+                    display = displayBounds.firstIndex { $0.contains(mid) } ?? 0
                 }
-                envWindows.append(EnvWindow(app: name, title: title, focused: isFocused,
-                                            tabs: tabs, activeTab: active, display: display))
+                let deco = tabsByTitle[win.title]
+                let seq = seqByTitle[win.title, default: 0]
+                seqByTitle[win.title] = seq + 1
+                envWindows.append(EnvWindow(app: name, title: win.title,
+                                            focused: win.onScreen && win.title == focusedTitle,
+                                            tabs: deco?.tabs ?? [], activeTab: deco?.active,
+                                            display: display, onScreen: win.onScreen, seq: seq))
             }
             if byApp[name] == nil { order.append(name) }
             byApp[name] = EnvApp(name: name, bundleID: app.bundleIdentifier,

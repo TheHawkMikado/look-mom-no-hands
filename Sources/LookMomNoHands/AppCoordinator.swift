@@ -1550,6 +1550,14 @@ final class AppCoordinator: ObservableObject {
                 try await self.describeScreen(question: step.target, gen: gen)
             case .none:
                 continue
+            case .openApp where Self.namesOurDashboard(step.target),
+                 .focusWindow where Self.namesOurDashboard(step.target):
+                // "Open the dashboard" aimed at our own UI: `open -a` can't do it
+                // (the app is already running and owns no default window), so
+                // open the window scene directly via the menu-bar label.
+                NotificationCenter.default.post(name: .lmnhOpenDashboard, object: nil)
+                performed.append("opened the dashboard")
+                self.store.log("action", "opened our own dashboard")
             default:
                 self.phase = .acting
                 // Idempotent navigation: `open <url>` spawns a NEW browser tab every
@@ -1802,6 +1810,18 @@ final class AppCoordinator: ObservableObject {
 
     /// Clears the sticky focus (dashboard control / "work anywhere").
     func clearWorkingContext() { workingContext = WorkingContext() }
+
+    /// "Open the dashboard" / "open Look Ma No Hands" — commands aimed at our own
+    /// UI. Bare "dashboard" only counts unqualified, so a window legitimately
+    /// NAMED Dashboard (an analytics page) can still be focused by voice.
+    nonisolated static func namesOurDashboard(_ target: String) -> Bool {
+        let t = target.lowercased()
+        if t.contains("look ma") || t.contains("look mom") || t.contains("no hands")
+            || t.contains("lookmomnohands") { return true }
+        let bare = t.trimmingCharacters(in: CharacterSet(charactersIn: " .,!?"))
+        return ["dashboard", "the dashboard", "your dashboard", "my dashboard", "its dashboard",
+                "the app dashboard", "app dashboard"].contains(bare)
+    }
 
     /// Clicks `target`, first via the Accessibility tree; if that finds nothing and
     /// vision is enabled, screenshots the screen and lets Claude locate it by pixel.
