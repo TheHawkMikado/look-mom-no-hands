@@ -10,6 +10,15 @@ import Foundation
 /// Everything here fails open: no network, a garbled manifest, a server outage —
 /// all leave `status` at `.upToDate` (or its last good value) and never block or
 /// nag. An update check that got in the way would be worse than no check.
+///
+/// ## Version format
+///
+/// Versions are `#.##.YYMMDD` — marketing version, then the release date
+/// (`0.02.260730`). `compare` reads dot-separated components numerically, so the
+/// date is simply a third component that only ever climbs, and two releases on
+/// the same day are separated by the marketing version. Pre-dated builds order
+/// correctly against it without a special case: `0.1.0` → `[0, 1, 0]`, which is
+/// behind `0.02.260730` → `[0, 2, 260730]`.
 @MainActor
 final class UpdateChecker: ObservableObject {
     enum Status: Equatable {
@@ -28,7 +37,22 @@ final class UpdateChecker: ObservableObject {
         }
     }
 
+    /// What a *hand-clicked* check should say when there's no update to show.
+    /// Silence is right for the background poll and wrong for a button press —
+    /// a click that changes nothing on screen reads as a broken button.
+    enum ManualResult: Equatable {
+        case current(String)
+        case unreachable
+    }
+
     @Published private(set) var status: Status = .upToDate
+    @Published private(set) var isChecking = false
+    /// Set only by a forced check, so the confirmation appears when a human asked
+    /// and never as a side effect of the launch poll.
+    @Published private(set) var manualResult: ManualResult?
+
+    /// The running build, for display next to the check button.
+    var currentVersion: String { current }
 
     private let manifestURL = URL(string: "https://nohandsapp.com/api/version")!
     /// Don't poll more than this often, even across relaunches — the check is a
@@ -52,6 +76,12 @@ final class UpdateChecker: ObservableObject {
             return
         }
 
+        if force {
+            isChecking = true
+            manualResult = nil
+        }
+        defer { if force { isChecking = false } }
+
         var req = URLRequest(url: manifestURL)
         req.timeoutInterval = 10
         req.cachePolicy = .reloadIgnoringLocalCacheData
@@ -59,7 +89,12 @@ final class UpdateChecker: ObservableObject {
         guard let (data, response) = try? await URLSession.shared.data(for: req),
               (response as? HTTPURLResponse)?.statusCode == 200,
               let manifest = try? JSONDecoder().decode(Manifest.self, from: data)
-        else { return }  // fail open — keep whatever status we had
+        else {
+            // Fail open — keep whatever status we had. But if a human clicked,
+            // say so rather than leaving them staring at an unchanged panel.
+            if force { manualResult = .unreachable }
+            return
+        }
 
         UserDefaults.standard.set(Date(), forKey: lastCheckKey)
 
@@ -70,6 +105,7 @@ final class UpdateChecker: ObservableObject {
             status = .available(version: manifest.version, url: url, notes: manifest.notes)
         } else {
             status = .upToDate
+            if force { manualResult = .current(current) }
         }
     }
 

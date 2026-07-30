@@ -19,7 +19,11 @@ export async function GET() {
   const site = process.env.SITE_URL ?? "https://nohandsapp.com";
 
   const body = {
-    // Marketing-facing latest version. Keep it a plain semver string ("0.2.0").
+    // Latest version, as #.##.YYMMDD — marketing version then release date
+    // ("0.02.260730"). The app compares components numerically, so every part
+    // must stay numeric; the date is what usually moves between releases.
+    // The fallback is the last release predating the scheme, so a missing env
+    // var can only ever under-report and nag nobody.
     version: process.env.LATEST_APP_VERSION ?? "0.1.0",
     // Where the app sends the user to get it. The GitHub "latest release" page
     // is a good default — it always points at the newest DMG.

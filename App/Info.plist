@@ -16,8 +16,17 @@
     <string>AppIcon</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
+    <!-- Format: #.##.YYMMDD — marketing version, then the release date
+         (0.02.260730). Written by Scripts/release.sh, which is the only thing
+         that should ever change it: this states what the *last release* was, and
+         the update checker compares it component-wise against /api/version, so
+         the date is a third numeric component that only ever climbs.
+         0.1.0 predates the scheme and orders correctly below it ([0,1,0] is
+         behind [0,2,260730]); the next release replaces it. -->
     <key>CFBundleShortVersionString</key>
     <string>0.1.0</string>
+    <!-- Monotonic build counter macOS uses to order installs. Unrelated to the
+         string above; it just has to keep increasing. -->
     <key>CFBundleVersion</key>
     <string>1</string>
     <key>LSMinimumSystemVersion</key>

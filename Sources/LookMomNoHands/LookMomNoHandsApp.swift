@@ -557,11 +557,27 @@ struct PanelView: View {
     /// Version + manual update check. The banner above handles the "there's an
     /// update" case on its own; this is for the user who wants to check on demand
     /// and to see what they're running.
+    ///
+    /// Every press has to visibly land. When the answer is "nothing new" the
+    /// banner stays empty by design, so without the spinner and the confirmation
+    /// line here the button looks broken — indistinguishable from an update check
+    /// that never fired.
     private var versionRow: some View {
         HStack(spacing: 6) {
-            Text("v\(Self.appVersion)").font(.caption2).foregroundStyle(.secondary)
+            Text("v\(updates.currentVersion)").font(.caption2).foregroundStyle(.secondary)
             Spacer()
-            if case .upToDate = updates.status {
+            if updates.isChecking {
+                ProgressView().controlSize(.small)
+                Text("Checking…").font(.caption2).foregroundStyle(.secondary)
+            } else if case .upToDate = updates.status {
+                switch updates.manualResult {
+                case .current:
+                    Text("Up to date").font(.caption2).foregroundStyle(.secondary)
+                case .unreachable:
+                    Text("Couldn't reach the server").font(.caption2).foregroundStyle(.orange)
+                case .none:
+                    EmptyView()
+                }
                 Button("Check for updates") { updates.checkInBackground(force: true) }
                     .font(.caption2)
             } else {
@@ -569,10 +585,6 @@ struct PanelView: View {
             }
         }
         .padding(.top, 2)
-    }
-
-    private static var appVersion: String {
-        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0"
     }
 }
 

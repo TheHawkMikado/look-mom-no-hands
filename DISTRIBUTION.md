@@ -70,6 +70,59 @@ ship direct rather than through the store. Tier 2 above is the equivalent
 experience: a notarized DMG opens with no warnings anywhere, and the Apple
 Developer membership is what pays for it.
 
+## Version numbers
+
+`#.##.YYMMDD` — marketing version, then the release date:
+
+```
+0.02.260730
+│    └── released 30 July 2026
+└── second release
+```
+
+The app compares versions component-wise as numbers, so the date is just a third
+component that only ever climbs. Two releases in one day are separated by the
+marketing version (`0.02` → `0.03`), which outranks the date.
+
+Every component must be numeric — the comparison reads anything else as `0`, so
+a `0.02.260730-beta` would compare *equal* to `0.02.260730` and be invisible as
+an update. `v0.1.0` predates the scheme and orders correctly below it (`[0,1,0]`
+is behind `[0,2,260730]`), so no forced upgrade is needed to move onto it.
+
+## Cutting a release installed apps can see
+
+`package_release.sh` only produces a DMG. Getting that DMG in front of someone
+who already has the app installed takes three more steps, and skipping any one
+of them leaves every installed copy reporting "up to date" indefinitely:
+
+| Step | What it is | Who reads it |
+|---|---|---|
+| `App/Info.plist` | `CFBundleShortVersionString` | the app, about itself |
+| GitHub release | tag + attached DMG | `download_url` → `releases/latest` |
+| `LATEST_APP_VERSION` | Vercel env var behind `/api/version` | **every installed app** |
+
+`Scripts/release.sh` does all of it except the last (a Vercel env change flips
+the update prompt on for everyone at once, so it stays a deliberate act):
+
+```sh
+SIGN_ID="Developer ID Application: Your Name (ABCDE12345)" \
+NOTARY_PROFILE="LookMaNotary" \
+./Scripts/release.sh 0.02 --notes "What changed in this build."
+```
+
+You pass the marketing version; today's date is appended (`--date YYMMDD` to
+override). It refuses to publish a version that doesn't compare *newer* than the
+one in `Info.plist`, since that release would be invisible to every installed app.
+
+It refuses to run from a dirty tree, off `main`, out of sync with `origin`, on
+an existing tag, or without a stapled notarisation ticket. `--dry-run` builds
+and tags locally without pushing or publishing; `--allow-unsigned` packages
+without a Developer ID (recipients get the Gatekeeper block described above).
+
+Afterwards, `curl -s https://nohandsapp.com/api/version` shows exactly what
+installed apps will see. If `version` there still reads old, the release has
+not happened as far as any user is concerned.
+
 ## Where to host the download
 
 Once you have the `.dmg`, host it anywhere static: GitHub Releases (simplest —
