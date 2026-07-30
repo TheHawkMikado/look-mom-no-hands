@@ -99,8 +99,14 @@ is_older() {
     IFS=. read -ra l <<< "$1"
     IFS=. read -ra r <<< "$2"
     local n=$(( ${#l[@]} > ${#r[@]} ? ${#l[@]} : ${#r[@]} ))
+    local i a b
     for (( i = 0; i < n; i++ )); do
-        local a=$(( 10#${l[i]:-0} )) b=$(( 10#${r[i]:-0} ))
+        # Leading digits only, matching the Swift side's prefix(while:isNumber):
+        # a component like "0-beta" reads as 0 rather than blowing up the
+        # arithmetic, so a malformed version can only compare equal-or-older.
+        a="${l[i]:-0}"; a="${a%%[!0-9]*}"
+        b="${r[i]:-0}"; b="${b%%[!0-9]*}"
+        a=$(( 10#${a:-0} )); b=$(( 10#${b:-0} ))
         (( a != b )) && return $(( a < b ? 0 : 1 ))
     done
     return 1
@@ -114,7 +120,9 @@ if [ -z "${SIGN_ID:-}" ] && [ "${ALLOW_UNSIGNED}" = 0 ]; then
     Set SIGN_ID + NOTARY_PROFILE (see DISTRIBUTION.md), or pass --allow-unsigned if that's intended."
 fi
 
-echo "▸ ${CURRENT} → ${VERSION}${DRY_RUN:+ (dry run)}"
+SUFFIX=""
+[ "${DRY_RUN}" = 1 ] && SUFFIX=" (dry run)"
+echo "▸ ${CURRENT} → ${VERSION}${SUFFIX}"
 
 # --- 1. bump ---------------------------------------------------------------
 # CFBundleVersion is the monotonic build number macOS uses to order installs;
@@ -125,10 +133,14 @@ NEXT_BUILD=$(( BUILD + 1 ))
 /usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${NEXT_BUILD}" App/Info.plist
 echo "  Info.plist: ${VERSION} (build ${NEXT_BUILD})"
 
-# Any failure past here leaves an edited plist behind; put it back so a retry
-# starts from the same place rather than a half-bumped tree.
+# Any exit past here leaves an edited plist behind; put it back so a retry starts
+# from the same place rather than a half-bumped tree. This is EXIT rather than
+# ERR on purpose: the guards below bail via `die`, and `exit` does not fire an
+# ERR trap, so an ERR trap would sail straight past exactly the failures it
+# exists for. Once the bump is committed the checkout is a harmless no-op, so
+# the success path needs no special case.
 restore_plist() { git checkout -- App/Info.plist 2>/dev/null || true; }
-trap restore_plist ERR
+trap restore_plist EXIT
 
 # --- 2. build --------------------------------------------------------------
 ./Scripts/package_release.sh
@@ -142,7 +154,8 @@ if [ -n "${SIGN_ID:-}" ] && [ -n "${NOTARY_PROFILE:-}" ]; then
 fi
 
 # --- 3. tag + publish ------------------------------------------------------
-trap - ERR
+# The EXIT trap stays armed: committing the bump makes it a no-op, and if the
+# commit itself fails the plist still needs putting back.
 git add App/Info.plist
 git commit -qm "Release v${VERSION}"
 git tag -a "v${VERSION}" -m "v${VERSION}"

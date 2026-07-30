@@ -2,57 +2,42 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-    <key>CFBundleName</key>
-    <string>Look Ma No Hands</string>
-    <key>CFBundleDisplayName</key>
-    <string>Look Ma, No Hands</string>
-    <key>CFBundleIdentifier</key>
-    <string>com.lookmomnohands.app</string>
-    <key>CFBundleExecutable</key>
-    <string>LookMomNoHands</string>
-    <!-- No Dock icon (LSUIElement below), but this is still what Finder, the
-         About box, notifications, the privacy panes and the DMG all show. -->
-    <key>CFBundleIconFile</key>
-    <string>AppIcon</string>
-    <key>CFBundlePackageType</key>
-    <string>APPL</string>
-    <!-- Format: #.##.YYMMDD — marketing version, then the release date
-         (0.02.260730). Written by Scripts/release.sh, which is the only thing
-         that should ever change it: this states what the *last release* was, and
-         the update checker compares it component-wise against /api/version, so
-         the date is a third numeric component that only ever climbs.
-         0.1.0 predates the scheme and orders correctly below it ([0,1,0] is
-         behind [0,2,260730]); the next release replaces it. -->
-    <key>CFBundleShortVersionString</key>
-    <string>0.1.0</string>
-    <!-- Monotonic build counter macOS uses to order installs. Unrelated to the
-         string above; it just has to keep increasing. -->
-    <key>CFBundleVersion</key>
-    <string>1</string>
-    <key>LSMinimumSystemVersion</key>
-    <string>14.0</string>
-    <!-- Menu-bar-only app: no Dock icon, no main window. -->
-    <key>LSUIElement</key>
-    <true/>
-    <!-- Browser -> app sign-in handoff: the website redirects to
-         lookmomnohands://auth?token=… after login and macOS routes it here. -->
-    <key>CFBundleURLTypes</key>
-    <array>
-        <dict>
-            <key>CFBundleURLName</key>
-            <string>com.lookmomnohands.app.auth</string>
-            <key>CFBundleURLSchemes</key>
-            <array>
-                <string>lookmomnohands</string>
-            </array>
-        </dict>
-    </array>
-    <!-- Usage strings drive the TCC permission prompts. -->
-    <key>NSMicrophoneUsageDescription</key>
-    <string>Look Ma, No Hands listens to your voice so you can control your Mac hands-free.</string>
-    <key>NSSpeechRecognitionUsageDescription</key>
-    <string>Speech is transcribed on-device to detect the wake word and understand your commands.</string>
-    <key>NSScreenCaptureUsageDescription</key>
-    <string>When the app can't find a button through Accessibility, it screenshots the screen to locate what you asked it to click.</string>
+	<key>CFBundleDisplayName</key>
+	<string>Look Ma, No Hands</string>
+	<key>CFBundleExecutable</key>
+	<string>LookMomNoHands</string>
+	<key>CFBundleIconFile</key>
+	<string>AppIcon</string>
+	<key>CFBundleIdentifier</key>
+	<string>com.lookmomnohands.app</string>
+	<key>CFBundleName</key>
+	<string>Look Ma No Hands</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>0.02.260730</string>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>com.lookmomnohands.app.auth</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>lookmomnohands</string>
+			</array>
+		</dict>
+	</array>
+	<key>CFBundleVersion</key>
+	<string>2</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>14.0</string>
+	<key>LSUIElement</key>
+	<true/>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Look Ma, No Hands listens to your voice so you can control your Mac hands-free.</string>
+	<key>NSScreenCaptureUsageDescription</key>
+	<string>When the app can't find a button through Accessibility, it screenshots the screen to locate what you asked it to click.</string>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>Speech is transcribed on-device to detect the wake word and understand your commands.</string>
 </dict>
 </plist>
