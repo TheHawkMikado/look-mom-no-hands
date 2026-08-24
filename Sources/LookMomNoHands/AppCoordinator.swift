@@ -180,6 +180,7 @@ final class AppCoordinator: ObservableObject {
     let profiles: ProfileStore
     let procedures: ProcedureStore
     let agentRoles: AgentRoleStore
+    let mcp: MCPManager
     private var scheduler: ProcedureScheduler?
     private var scheduledTask: Task<Void, Never>?
     let knowledge: KnowledgeStore
@@ -253,6 +254,7 @@ final class AppCoordinator: ObservableObject {
         profiles = ProfileStore(directory: store.directory)
         procedures = ProcedureStore(directory: store.directory)
         agentRoles = AgentRoleStore(directory: store.directory)
+        mcp = MCPManager(store: MCPStore(directory: store.directory))
         knowledge = KnowledgeStore(directory: store.directory)
         insertRules = InsertRulesStore(directory: store.directory)
         learnedControls = ElementMemoryStore(directory: store.directory)
@@ -315,6 +317,9 @@ final class AppCoordinator: ObservableObject {
         environment.start()   // track open apps/windows/tabs continuously, even before listening
         scheduler = ProcedureScheduler(procedures: procedures, coordinator: self)
         scheduler?.start()
+        // Warm configured MCP servers off the command path — an npx cold-start
+        // mid-task would eat the whole 20s parse budget.
+        Task { await self.mcp.connectAll() }
         loadKey()
         refreshAuthFlags()
         store.log("app", "auth at launch: mic=\(micAuthorized) speech=\(speechAuthorized)")
@@ -1325,7 +1330,11 @@ final class AppCoordinator: ObservableObject {
             } else {
                 screen = try await gatherScreen(for: text, round: round)
             }
-            let context = buildPlannerContext(command: text, taskProgress: performedAll)
+            var context = buildPlannerContext(command: text, taskProgress: performedAll)
+            // Per-turn, not in the cached stable block: connecting a server must
+            // show up on the next command, not when the cache rolls.
+            let mcpBlock = mcp.promptBlock
+            if !mcpBlock.isEmpty { context += "\n\n" + mcpBlock }
             // `vocabulary` is the cached half of the prompt, so only genuinely stable
             // things belong here — the word list and durable facts about the user.
             // Anything that changes between turns goes in `context`/`screen` instead,
@@ -1649,6 +1658,18 @@ final class AppCoordinator: ObservableObject {
             case .spawnBackgroundAgent:
                 self.spawnBackgroundAgent(goal: step.prompt, gen: gen)
                 performed.append("started a background agent")
+            case .useTool:
+                self.phase = .acting
+                do {
+                    let output = try await self.mcp.call(qualified: step.target, argumentsJSON: step.text)
+                    // The result rides in task progress so the NEXT round can act
+                    // on it — capped, or one big API response evicts the plan.
+                    performed.append("tool \(step.target) returned: \(output.prefix(700))")
+                    self.store.log("tool", "\(step.target) ok (\(output.count) chars)")
+                } catch {
+                    performed.append("tool \(step.target) FAILED: \(error) — fall back to the screen if it matters")
+                    self.store.log("tool", "\(step.target) failed: \(error)")
+                }
             case .none:
                 continue
             case .openApp where Self.namesOurDashboard(step.target),

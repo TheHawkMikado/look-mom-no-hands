@@ -32,6 +32,7 @@ struct ScreenAction: Decodable, Sendable {
         case describeScreen = "describe_screen" // read/answer about what's on screen (vision)
         case watchStart = "watch_start"       // record the user's demonstration as a procedure
         case spawnBackgroundAgent = "spawn_background_agent" // runs a headless background agent
+        case useTool = "use_tool"             // call a connected MCP tool instead of clicking
         case none                             // nothing actionable
     }
 

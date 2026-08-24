@@ -83,7 +83,7 @@ struct DashboardView: View {
         case .procedures:
             ProceduresTab(procedures: coordinator.procedures)
         case .agents:
-            AgentsTab(roles: coordinator.agentRoles)
+            AgentsTab(roles: coordinator.agentRoles, mcp: coordinator.mcp)
         case .paste:
             PasteRulesTab(rules: coordinator.insertRules)
         case .activity:
@@ -431,6 +431,7 @@ private struct PasteRulesTab: View {
 /// the named roles work can be routed to by saying their name.
 private struct AgentsTab: View {
     @ObservedObject var roles: AgentRoleStore
+    let mcp: MCPManager
     @ObservedObject private var manager = BackgroundAgentManager.shared
     @ObservedObject private var meter = CostMeter.shared
     @State private var editingRole: AgentRole?
@@ -438,7 +439,12 @@ private struct AgentsTab: View {
     var body: some View {
         HSplitView {
             runsColumn.frame(minWidth: 340)
-            rolesColumn.frame(minWidth: 280)
+            VStack(spacing: 0) {
+                rolesColumn
+                Divider().padding(.vertical, 8)
+                ConnectionsSection(mcp: mcp)
+            }
+            .frame(minWidth: 280)
         }
         .padding(12)
     }
@@ -505,6 +511,104 @@ private struct AgentsTab: View {
         .sheet(item: $editingRole) { role in
             RoleEditor(role: role, roles: roles)
         }
+    }
+}
+
+/// Connected MCP servers: the API escape hatch. A server's tools appear in the
+/// planner's context, and use_tool beats ten clicks whenever one covers the task.
+private struct ConnectionsSection: View {
+    @ObservedObject var mcp: MCPManager
+    @ObservedObject var store: MCPStore
+    @State private var adding = false
+
+    init(mcp: MCPManager) {
+        self.mcp = mcp
+        self.store = mcp.store
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("Connections").font(.headline)
+                Spacer()
+                Button { adding = true } label: { Image(systemName: "plus") }
+            }
+            Text("MCP servers give her real APIs — Gmail, Slack, Notion — so those tasks stop being clicks. Secrets go to the Keychain, never to disk.")
+                .font(.caption).foregroundStyle(.secondary)
+            List(store.servers) { server in
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack {
+                        Circle()
+                            .fill(mcp.tools.contains { $0.server == server.name } ? Color.green
+                                  : mcp.connectionErrors[server.id] != nil ? Color.red : Color.secondary)
+                            .frame(width: 7, height: 7)
+                        Text(server.name).font(.callout.bold())
+                        Spacer()
+                        Button { Task { await mcp.connect(server) } } label: { Image(systemName: "arrow.clockwise") }
+                            .buttonStyle(.plain)
+                        Button { mcp.disconnect(server.id); store.remove(server.id) } label: { Image(systemName: "trash") }
+                            .buttonStyle(.plain).foregroundStyle(.secondary)
+                    }
+                    Text(server.command).font(.caption2.monospaced()).foregroundStyle(.secondary).lineLimit(1)
+                    if let error = mcp.connectionErrors[server.id] {
+                        Text(error).font(.caption2).foregroundStyle(.red).lineLimit(2)
+                    } else {
+                        let count = mcp.tools.filter { $0.server == server.name }.count
+                        if count > 0 { Text("\(count) tools").font(.caption2).foregroundStyle(.secondary) }
+                    }
+                }
+                .padding(.vertical, 2)
+            }
+            .listStyle(.inset)
+        }
+        .padding(.leading, 10)
+        .sheet(isPresented: $adding) {
+            AddConnectionSheet(mcp: mcp)
+        }
+    }
+}
+
+private struct AddConnectionSheet: View {
+    let mcp: MCPManager
+    @Environment(\.dismiss) private var dismiss
+    @State private var name = ""
+    @State private var command = ""
+    @State private var envText = ""   // KEY=value per line
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Add MCP server").font(.headline)
+            TextField("Name (becomes the tool prefix, e.g. slack)", text: $name)
+                .textFieldStyle(.roundedBorder)
+            TextField("Command (e.g. npx -y @modelcontextprotocol/server-slack)", text: $command)
+                .textFieldStyle(.roundedBorder)
+            Text("Secrets — one KEY=value per line. Values are stored in the Keychain; only the names touch disk.")
+                .font(.caption).foregroundStyle(.secondary)
+            TextEditor(text: $envText)
+                .font(.callout.monospaced())
+                .frame(height: 80)
+                .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.secondary.opacity(0.3)))
+            HStack {
+                Spacer()
+                Button("Cancel") { dismiss() }
+                Button("Add & connect") {
+                    var secrets: [String: String] = [:]
+                    for line in envText.split(separator: "\n") {
+                        guard let eq = line.firstIndex(of: "=") else { continue }
+                        secrets[String(line[..<eq]).trimmingCharacters(in: .whitespaces)] =
+                            String(line[line.index(after: eq)...]).trimmingCharacters(in: .whitespaces)
+                    }
+                    let config = MCPServerConfig(name: name, command: command, envKeys: Array(secrets.keys))
+                    mcp.store.upsert(config, secrets: secrets)
+                    Task { await mcp.connect(config) }
+                    dismiss()
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(name.trimmingCharacters(in: .whitespaces).isEmpty || command.trimmingCharacters(in: .whitespaces).isEmpty)
+            }
+        }
+        .padding(16)
+        .frame(width: 460)
     }
 }
 

@@ -140,7 +140,7 @@ final class ClaudeClient: @unchecked Sendable {
             "additionalProperties": false,
             "properties": [
                 "kind": ["type": "string",
-                         "enum": ["click", "type", "scroll", "open_app", "open_url", "focus_window", "move_window", "switch_tab", "keystroke", "dictate_start", "describe_screen", "watch_start", "spawn_background_agent", "none"]],
+                         "enum": ["click", "type", "scroll", "open_app", "open_url", "focus_window", "move_window", "switch_tab", "keystroke", "dictate_start", "describe_screen", "watch_start", "spawn_background_agent", "use_tool", "none"]],
                 "target": ["type": "string", "description": "UI element / app name; for open_url optionally the browser; for focus_window/move_window the window description to match (empty for move_window = the current/context window); for switch_tab the browser tab title; for describe_screen the question to answer about the screen; for watch_start a short name for the task being demonstrated; empty if unused"],
                 "text": ["type": "string", "description": "text to type; for move_window the destination display (\"main display\", \"second display\", \"display 2\"); empty if unused"],
                 "url": ["type": "string", "description": "open_url only: the website, e.g. \"youtube.com\"; empty if unused"],
@@ -170,6 +170,13 @@ final class ClaudeClient: @unchecked Sendable {
             send. Use a single dictate_start step for note-taking. Use spawn_background_agent \
             for long-running, non-UI tasks (like writing code, terminal work, "build an app"). \
             Use a single none step when nothing is actionable.
+
+            When the context lists API tools, use_tool (target = the tool id like \
+            "slack.send_message", text = a JSON object of its arguments) beats driving \
+            that service's website — it's one reliable call instead of many clicks. \
+            The tool's output arrives in the next turn's task progress; act on it \
+            (answer the user, or continue) rather than re-calling the same tool. \
+            If no listed tool covers the task, use the screen as usual.
 
             If the request is ambiguous or you are not confident what the user wants, \
             emit NO steps and set clarify with one concise question and 2-4 short \
