@@ -12,6 +12,7 @@ final class ScreenLease: ObservableObject {
     enum Holder: Equatable, Sendable {
         case voice              // the user's live command session
         case scheduled(String)  // a scheduled procedure run, by goal id
+        case remote(String)     // a goal sent by a paired fleet machine
     }
 
     @Published private(set) var holder: Holder?
@@ -22,8 +23,8 @@ final class ScreenLease: ObservableObject {
         case (nil, _):
             holder = who
             return true
-        case (.some(.scheduled), .voice):
-            // Revocation, not queueing: the scheduled run polls `revoked(_:)`
+        case (.some(.scheduled), .voice), (.some(.remote), .voice):
+            // Revocation, not queueing: the automated run polls `revoked(_:)`
             // at its cancellation points and abandons the screen.
             holder = .voice
             return true

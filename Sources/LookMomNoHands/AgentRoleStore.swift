@@ -45,6 +45,19 @@ final class AgentRoleStore: ObservableObject {
         persist()
     }
 
+    /// Fleet sync: id-union, newer createdAt wins; deletes stay local.
+    func mergeSnapshot(_ remote: [AgentRole]) {
+        var changed = false
+        for r in remote {
+            if let i = roles.firstIndex(where: { $0.id == r.id }) {
+                if r.createdAt > roles[i].createdAt { roles[i] = r; changed = true }
+            } else if !roles.contains(where: { $0.name.lowercased() == r.name.lowercased() }) {
+                roles.append(r); changed = true
+            }
+        }
+        if changed { persist() }
+    }
+
     /// The role whose name appears in the goal, longest name first so "Scout Two"
     /// wins over "Scout". Word-boundary match: a role named "Ed" must not fire
     /// on "download the PDF".

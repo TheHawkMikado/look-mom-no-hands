@@ -39,6 +39,28 @@ final class ProcedureStore: ObservableObject {
         persist()
     }
 
+    /// Fleet sync: id-union, newer createdAt wins — teach a procedure on one
+    /// Mac, run it on any of them. Deletes and schedules stay local: a schedule
+    /// that synced would fire on EVERY machine at once.
+    func mergeSnapshot(_ remote: [Procedure]) {
+        var changed = false
+        for var r in remote {
+            r.schedule = nil        // schedules never travel
+            r.lastFiredAt = nil
+            if let i = procedures.firstIndex(where: { $0.id == r.id }) {
+                if r.createdAt > procedures[i].createdAt {
+                    r.schedule = procedures[i].schedule   // keep the local schedule on update
+                    r.lastFiredAt = procedures[i].lastFiredAt
+                    procedures[i] = r
+                    changed = true
+                }
+            } else if !procedures.contains(where: { $0.name.lowercased() == r.name.lowercased() }) {
+                procedures.append(r); changed = true
+            }
+        }
+        if changed { persist() }
+    }
+
     /// Stamped when the scheduler DISPATCHES, not when the run succeeds — a slot
     /// that found the screen busy is skipped, not retried into the user's work
     /// all morning.

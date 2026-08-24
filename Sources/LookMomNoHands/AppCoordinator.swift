@@ -2,6 +2,7 @@ import Foundation
 import SwiftUI
 import Speech
 import AVFoundation
+import Combine
 
 /// The brain: interprets the single always-on speech stream according to mode
 /// (the mic is never released while on), routes commands through Claude,
@@ -182,8 +183,10 @@ final class AppCoordinator: ObservableObject {
     let agentRoles: AgentRoleStore
     let mcp: MCPManager
     let events = EventReporter()
+    let fleet: FleetService
     private var scheduler: ProcedureScheduler?
     private var scheduledTask: Task<Void, Never>?
+    private var fleetSync: Set<AnyCancellable> = []
     let knowledge: KnowledgeStore
     let insertRules: InsertRulesStore
     let learnedControls: ElementMemoryStore
@@ -256,6 +259,7 @@ final class AppCoordinator: ObservableObject {
         procedures = ProcedureStore(directory: store.directory)
         agentRoles = AgentRoleStore(directory: store.directory)
         mcp = MCPManager(store: MCPStore(directory: store.directory))
+        fleet = FleetService(peers: FleetPeerStore(directory: store.directory))
         knowledge = KnowledgeStore(directory: store.directory)
         insertRules = InsertRulesStore(directory: store.directory)
         learnedControls = ElementMemoryStore(directory: store.directory)
@@ -329,6 +333,7 @@ final class AppCoordinator: ObservableObject {
         BackgroundAgentManager.shared.onApprovalResolved = { [weak self] id in
             self?.events.approvalResolvedLocally(id)
         }
+        wireFleet()
         loadKey()
         refreshAuthFlags()
         store.log("app", "auth at launch: mic=\(micAuthorized) speech=\(speechAuthorized)")
@@ -1272,6 +1277,20 @@ final class AppCoordinator: ObservableObject {
                     self.lastActionableCommand = text
                 }
                 self.store.log("asr", answeringClarification ? "answer: \(text)" : "command: \(text)")
+                // "On the mac mini, …" → the goal runs THERE; nothing local happens.
+                // Matched against paired machines only, so ordinary sentences that
+                // start with "on" can't be hijacked.
+                if !answeringClarification,
+                   let (peerName, remoteGoal) = FleetService.parseTarget(command: text, peerNames: self.fleet.peers.peers.map(\.name)) {
+                    if self.fleet.dispatch(goal: remoteGoal, toPeerNamed: peerName) {
+                        self.store.log("fleet", "dispatched to \(peerName): \(remoteGoal.prefix(120))")
+                        self.events.report(kind: "goal_started", title: peerName, detail: remoteGoal)
+                        await self.speak("Sent to \(peerName).", gen: gen)
+                    } else {
+                        await self.speak("\(peerName) isn't reachable right now.", gen: gen)
+                    }
+                    return
+                }
                 try await self.runGoal(text: text, gen: gen, seedProgress: seedProgress)
             } catch {
                 // Cancellation isn't a failure: Stop was pressed while the call was
@@ -1557,6 +1576,81 @@ final class AppCoordinator: ObservableObject {
         Task { await self.speak("Got it — I learned how to \(self.demoName).\(tail)", gen: self.runGeneration) }
     }
 
+    // MARK: Fleet
+
+    private func wireFleet() {
+        // Worker side: a paired Mac sent a goal — run it exactly like a
+        // scheduled run: same loop, revocable lease, local user always wins.
+        fleet.onRemoteGoal = { [weak self] text, goalID, reply in
+            guard let self else { return }
+            guard !self.processing, !self.demonstrating else { reply("goal_failed", "this Mac is mid-task"); return }
+            guard self.claude != nil else { reply("goal_failed", "no API key on this machine"); return }
+            self.store.log("fleet", "remote goal: \(text.prefix(120))")
+            reply("goal_progress", "started")
+            self.scheduledTask = Task {
+                do {
+                    try await self.runGoal(text: text, gen: self.runGeneration, seedProgress: [], holder: .remote(goalID))
+                    self.store.log("fleet", "remote goal done")
+                    reply("goal_done", "finished")
+                } catch {
+                    let preempted = ScreenLease.shared.revoked(.remote(goalID))
+                    self.store.log("fleet", "remote goal stopped: \(preempted ? "local user took the screen" : "\(error)")")
+                    reply("goal_failed", preempted ? "the local user took the screen" : "\(error)")
+                }
+            }
+        }
+        // Dispatcher side: narrate what workers report, and mirror it to the
+        // phone — the fleet reads as one system from /status.
+        fleet.onWorkerEvent = { [weak self] peerName, kind, detail in
+            guard let self else { return }
+            self.store.log("fleet", "\(peerName): \(kind) \(detail.prefix(120))")
+            self.events.report(kind: kind == "goal_progress" ? "goal_progress" : kind,
+                               title: peerName, detail: detail)
+            if kind == "goal_done" {
+                Task { await self.speak("\(peerName) finished its task.", gen: self.runGeneration) }
+            } else if kind == "goal_failed" {
+                Task { await self.speak("\(peerName) couldn't finish: \(detail.prefix(60))", gen: self.runGeneration) }
+            }
+        }
+        // Phase 7, receive side: merge a paired machine's snapshot. Id-union,
+        // newest-wins; deletes and schedules stay local by design.
+        fleet.onStoreSync = { [weak self] storeName, json in
+            guard let self else { return }
+            let data = Data(json.utf8)
+            let decoder = JSONDecoder()
+            switch storeName {
+            case "procedures": (try? decoder.decode([Procedure].self, from: data)).map { self.procedures.mergeSnapshot($0) }
+            case "knowledge": (try? decoder.decode([KnowledgeFact].self, from: data)).map { self.knowledge.mergeSnapshot($0) }
+            case "vocabulary":
+                (try? decoder.decode([VocabEntry].self, from: data)).map { self.vocabulary.mergeSnapshot($0) }
+                self.refreshContextualPhrases()   // synced words must bias ASR here too
+            case "roles": (try? decoder.decode([AgentRole].self, from: data)).map { self.agentRoles.mergeSnapshot($0) }
+            default: break
+            }
+        }
+        // Phase 7, send side: any local change pushes fresh snapshots to every
+        // paired machine, debounced — teaching a 40-step procedure is one sync.
+        for change in [procedures.objectWillChange.eraseToAnyPublisher(),
+                       knowledge.objectWillChange.eraseToAnyPublisher(),
+                       vocabulary.objectWillChange.eraseToAnyPublisher(),
+                       agentRoles.objectWillChange.eraseToAnyPublisher()] {
+            change.debounce(for: .seconds(3), scheduler: RunLoop.main)
+                .sink { [weak self] _ in self?.broadcastStores() }
+                .store(in: &fleetSync)
+        }
+    }
+
+    private func broadcastStores() {
+        let encoder = JSONEncoder()
+        func json<T: Encodable>(_ value: T) -> String? {
+            (try? encoder.encode(value)).map { String(decoding: $0, as: UTF8.self) }
+        }
+        if let s = json(procedures.procedures) { fleet.broadcastStore("procedures", json: s) }
+        if let s = json(knowledge.facts) { fleet.broadcastStore("knowledge", json: s) }
+        if let s = json(vocabulary.entries) { fleet.broadcastStore("vocabulary", json: s) }
+        if let s = json(agentRoles.roles) { fleet.broadcastStore("roles", json: s) }
+    }
+
     // MARK: Scheduled procedures
 
     /// Runs a due procedure through the SAME act-observe loop as a spoken
@@ -1566,6 +1660,14 @@ final class AppCoordinator: ObservableObject {
     /// stalking the user all morning.
     func runScheduledProcedure(_ p: Procedure) {
         guard !processing, !demonstrating, scheduledTask?.isCancelled != false else {
+            // Busy here doesn't have to mean skipped: an idle paired worker can
+            // take the slot — the fleet version of "runs while you sleep".
+            if let idle = fleet.peers.peers.first(where: { fleet.status[$0.keyHex]?.online == true && fleet.status[$0.keyHex]?.runningGoal == nil }),
+               fleet.dispatch(goal: p.triggers.first ?? p.name, toPeerNamed: idle.name) {
+                store.log("schedule", "\(p.name): this Mac is busy — sent to \(idle.name)")
+                events.report(kind: "goal_started", title: idle.name, detail: "scheduled: \(p.name)")
+                return
+            }
             store.log("schedule", "skipped \(p.name) — a session is active")
             return
         }

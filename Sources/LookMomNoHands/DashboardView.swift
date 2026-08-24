@@ -83,7 +83,7 @@ struct DashboardView: View {
         case .procedures:
             ProceduresTab(procedures: coordinator.procedures)
         case .agents:
-            AgentsTab(roles: coordinator.agentRoles, mcp: coordinator.mcp)
+            AgentsTab(roles: coordinator.agentRoles, mcp: coordinator.mcp, fleet: coordinator.fleet)
         case .paste:
             PasteRulesTab(rules: coordinator.insertRules)
         case .activity:
@@ -432,13 +432,19 @@ private struct PasteRulesTab: View {
 private struct AgentsTab: View {
     @ObservedObject var roles: AgentRoleStore
     let mcp: MCPManager
+    @ObservedObject var fleet: FleetService
     @ObservedObject private var manager = BackgroundAgentManager.shared
     @ObservedObject private var meter = CostMeter.shared
     @State private var editingRole: AgentRole?
 
     var body: some View {
         HSplitView {
-            runsColumn.frame(minWidth: 340)
+            VStack(spacing: 0) {
+                runsColumn
+                Divider().padding(.vertical, 8)
+                FleetSection(fleet: fleet)
+            }
+            .frame(minWidth: 340)
             VStack(spacing: 0) {
                 rolesColumn
                 Divider().padding(.vertical, 8)
@@ -511,6 +517,73 @@ private struct AgentsTab: View {
         .sheet(item: $editingRole) { role in
             RoleEditor(role: role, roles: roles)
         }
+    }
+}
+
+/// Other Macs you own, paired into a fleet: enable worker mode to accept goals
+/// here; pair a discovered machine to send goals there ("on the mac mini, …").
+private struct FleetSection: View {
+    @ObservedObject var fleet: FleetService
+    @ObservedObject var peers: FleetPeerStore
+
+    init(fleet: FleetService) {
+        self.fleet = fleet
+        self.peers = fleet.peers
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Fleet").font(.headline)
+            Toggle(isOn: $fleet.workerModeEnabled) {
+                Text("Let paired Macs send work here (worker mode)").font(.caption)
+            }
+            .toggleStyle(.checkbox)
+
+            if let pending = fleet.pendingPair {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("“\(pending.peerName)” wants to pair").font(.callout.bold())
+                    Text("Only approve if the same code shows on that Mac: \(pending.code)")
+                        .font(.caption).foregroundStyle(.secondary)
+                    HStack(spacing: 8) {
+                        Button("Pair") { fleet.approvePendingPair() }
+                        Button("Reject") { fleet.rejectPendingPair() }
+                    }
+                    .controlSize(.small)
+                }
+                .padding(8)
+                .background(RoundedRectangle(cornerRadius: 6).fill(Color.orange.opacity(0.12)))
+            }
+
+            if !peers.peers.isEmpty {
+                Text("Paired").font(.caption).foregroundStyle(.secondary)
+                ForEach(peers.peers) { peer in
+                    HStack(spacing: 6) {
+                        Circle()
+                            .fill(fleet.status[peer.keyHex]?.online == true ? Color.green : Color.secondary)
+                            .frame(width: 7, height: 7)
+                        Text(peer.name).font(.caption)
+                        Spacer()
+                        Button { peers.remove(peer.keyHex) } label: { Image(systemName: "trash") }
+                            .buttonStyle(.plain).foregroundStyle(.secondary)
+                    }
+                }
+                Text("Say “on the \(peers.peers.first?.name.lowercased() ?? "mac mini"), …” to send a task there.")
+                    .font(.caption2).foregroundStyle(.secondary)
+            }
+
+            let unpaired = fleet.discovered.filter { worker in !peers.peers.contains { $0.name == worker.endpointName } }
+            if !unpaired.isEmpty {
+                Text("On your network").font(.caption).foregroundStyle(.secondary)
+                ForEach(unpaired) { worker in
+                    HStack {
+                        Text(worker.endpointName).font(.caption)
+                        Spacer()
+                        Button("Pair") { fleet.beginPairing(with: worker) }.controlSize(.small)
+                    }
+                }
+            }
+        }
+        .padding(.trailing, 10)
     }
 }
 

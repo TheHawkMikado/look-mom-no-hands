@@ -31,6 +31,20 @@ final class KnowledgeStore: ObservableObject {
         persist()
     }
 
+    /// Fleet sync: id-union, newer createdAt wins. Deletes stay local — a
+    /// missing remote id means "they don't have it yet", not "they deleted it".
+    func mergeSnapshot(_ remote: [KnowledgeFact]) {
+        var changed = false
+        for r in remote {
+            if let i = facts.firstIndex(where: { $0.id == r.id }) {
+                if r.createdAt > facts[i].createdAt { facts[i] = r; changed = true }
+            } else if !facts.contains(where: { $0.text.lowercased() == r.text.lowercased() }) {
+                facts.append(r); changed = true
+            }
+        }
+        if changed { persist() }
+    }
+
     func remove(_ id: String) {
         facts.removeAll { $0.id == id }
         persist()

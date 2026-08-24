@@ -86,6 +86,19 @@ final class VocabularyStore: ObservableObject {
         entries = decoded
     }
 
+    /// Fleet sync: id-union, newer date wins; deletes stay local.
+    func mergeSnapshot(_ remote: [VocabEntry]) {
+        var changed = false
+        for r in remote {
+            if let i = entries.firstIndex(where: { $0.id == r.id }) {
+                if r.date > entries[i].date { entries[i] = r; changed = true }
+            } else if !entries.contains(where: { $0.kind == r.kind && $0.spoken.lowercased() == r.spoken.lowercased() }) {
+                entries.append(r); changed = true
+            }
+        }
+        if changed { persist() }
+    }
+
     private func persist() {
         let snapshot = entries
         let url = self.url
