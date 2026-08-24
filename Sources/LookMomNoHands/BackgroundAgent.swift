@@ -348,7 +348,12 @@ final class BackgroundAgentManager: ObservableObject {
         agents.first { $0.id == id }?.cancel()
     }
 
+    /// Fired however an approval gets answered — panel button, dashboard, or a
+    /// remote verdict — so the reporter can stop polling for it.
+    var onApprovalResolved: ((String) -> Void)?
+
     func resolveApproval(_ id: String, allow: Bool) {
         agents.first { $0.id == id }?.resolveApproval(allow: allow)
+        onApprovalResolved?(id)
     }
 }

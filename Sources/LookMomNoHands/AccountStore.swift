@@ -36,7 +36,7 @@ final class AccountStore: ObservableObject {
     static var signInURL: URL { host.appendingPathComponent("app/login") }
     static var accountURL: URL { host.appendingPathComponent("account") }
 
-    private let appTokenAccount = "app-token"
+    static let appTokenAccount = "app-token"
     private let entTokenAccount = "license-token"   // reused format — LicenseStore verifies it
     private let infoDefaultsKey = "account-info"
 
@@ -44,7 +44,7 @@ final class AccountStore: ObservableObject {
     private weak var coordinator: AppCoordinator?
     private var usageTimer: Timer?
 
-    var isSignedIn: Bool { KeychainStore.load(account: appTokenAccount) != nil }
+    var isSignedIn: Bool { KeychainStore.load(account: Self.appTokenAccount) != nil }
 
     init() { refresh() }
 
@@ -87,7 +87,7 @@ final class AccountStore: ObservableObject {
               !token.isEmpty
         else { return }
 
-        KeychainStore.save(token, account: appTokenAccount)
+        KeychainStore.save(token, account: Self.appTokenAccount)
         lastError = nil
         await sync()
     }
@@ -102,7 +102,7 @@ final class AccountStore: ObservableObject {
     }
 
     private func sync() async {
-        guard let bearer = KeychainStore.load(account: appTokenAccount) else {
+        guard let bearer = KeychainStore.load(account: Self.appTokenAccount) else {
             status = .signedOut; return
         }
         isWorking = true
@@ -121,7 +121,7 @@ final class AccountStore: ObservableObject {
     /// Tagged "byok" while everyone runs on their own keys; becomes mode-aware
     /// once Cloud lands.
     func reportUsage() async {
-        guard let bearer = KeychainStore.load(account: appTokenAccount) else { return }
+        guard let bearer = KeychainStore.load(account: Self.appTokenAccount) else { return }
         let c = CostMeter.shared.controller
         let d = CostMeter.shared.dictation
         let payload: [String: Any] = [
@@ -247,7 +247,7 @@ final class AccountStore: ObservableObject {
     // MARK: - Sign out
 
     func signOut() {
-        if let bearer = KeychainStore.load(account: appTokenAccount) {
+        if let bearer = KeychainStore.load(account: Self.appTokenAccount) {
             // Best-effort server-side revoke; local sign-out proceeds regardless.
             let req = request("api/app/logout", method: "POST", bearer: bearer)
             Task { _ = try? await URLSession.shared.data(for: req) }
@@ -261,7 +261,7 @@ final class AccountStore: ObservableObject {
     }
 
     private func clearSession() {
-        KeychainStore.delete(account: appTokenAccount)
+        KeychainStore.delete(account: Self.appTokenAccount)
         KeychainStore.delete(account: entTokenAccount)
         UserDefaults.standard.removeObject(forKey: infoDefaultsKey)
         info = nil

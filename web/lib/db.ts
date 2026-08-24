@@ -314,6 +314,33 @@ export async function ensureSchema() {
     )`;
   await db`ALTER TABLE resellers ADD COLUMN IF NOT EXISTS webhook_url text`;
   await db`ALTER TABLE resellers ADD COLUMN IF NOT EXISTS webhook_secret text`;
+
+  // Remote agent visibility: status events the Mac app reports while an agent
+  // runs, and the approve/deny verdicts the owner records from /status. Status
+  // text only — never screenshots or transcripts (detail is capped at 500 chars
+  // on write). Retention is the newest 200 events per account, pruned on insert,
+  // so the table can't grow past a small multiple of the account count.
+  await db`
+    CREATE TABLE IF NOT EXISTS agent_events (
+      email       text NOT NULL,
+      id          text NOT NULL,          -- the app's event id; the dedupe key on re-sends
+      kind        text NOT NULL,
+      title       text NOT NULL DEFAULT '',
+      detail      text NOT NULL DEFAULT '',
+      approval_id text,
+      created_at  timestamptz NOT NULL DEFAULT now(),
+      PRIMARY KEY (email, id)
+    )`;
+  await db`CREATE INDEX IF NOT EXISTS agent_events_email_created_idx
+             ON agent_events (email, created_at DESC)`;
+  await db`
+    CREATE TABLE IF NOT EXISTS agent_approvals (
+      email       text NOT NULL,
+      approval_id text NOT NULL,
+      verdict     text NOT NULL,          -- 'approve' | 'deny'
+      decided_at  timestamptz NOT NULL DEFAULT now(),
+      PRIMARY KEY (email, approval_id)
+    )`;
 }
 
 // MARK: - Resellers (Stripe Connect + provisioning)
@@ -568,6 +595,112 @@ export async function recordUsage(
       updated_at = now()`;
 
   return { dCtrlSeconds, dDictSeconds };
+}
+
+// MARK: - Agent events & approvals (remote visibility)
+
+export const AGENT_EVENT_KINDS = [
+  "goal_started",
+  "goal_progress",
+  "needs_approval",
+  "goal_done",
+  "goal_failed",
+] as const;
+export type AgentEventKind = (typeof AGENT_EVENT_KINDS)[number];
+
+export interface AgentEvent {
+  id: string;
+  kind: AgentEventKind;
+  title: string;
+  detail: string;
+  approval_id: string | null;
+  created_at: Date;
+}
+
+export interface ApprovalVerdict {
+  approval_id: string;
+  verdict: string;
+  decided_at: Date;
+}
+
+/** Newest events kept per account; older rows are pruned on insert. */
+const AGENT_EVENTS_KEPT = 200;
+
+/** Stores a batch of agent events for the account and prunes past the retention
+ *  cap. Re-sent events (the app retries on flaky networks) dedupe on (email, id)
+ *  rather than duplicating rows. */
+export async function recordAgentEvents(
+  email: string,
+  events: {
+    id: string;
+    kind: AgentEventKind;
+    title: string;
+    detail: string;
+    approvalId: string | null;
+    createdAt: Date;
+  }[],
+) {
+  const db = sql();
+  const account = email.trim().toLowerCase();
+  for (const e of events) {
+    await db`
+      INSERT INTO agent_events (email, id, kind, title, detail, approval_id, created_at)
+      VALUES (${account}, ${e.id}, ${e.kind}, ${e.title}, ${e.detail},
+              ${e.approvalId}, ${e.createdAt})
+      ON CONFLICT (email, id) DO NOTHING`;
+  }
+  await db`
+    DELETE FROM agent_events
+     WHERE email = ${account}
+       AND id NOT IN (SELECT id FROM agent_events WHERE email = ${account}
+                       ORDER BY created_at DESC, id DESC LIMIT ${AGENT_EVENTS_KEPT})`;
+}
+
+/** The account's recent agent events, newest first. */
+export async function agentEventsFor(email: string, limit = AGENT_EVENTS_KEPT): Promise<AgentEvent[]> {
+  const db = sql();
+  return db<AgentEvent[]>`
+    SELECT id, kind, title, detail, approval_id, created_at
+      FROM agent_events WHERE lower(email) = lower(${email})
+     ORDER BY created_at DESC, id DESC LIMIT ${limit}`;
+}
+
+/** Records a verdict. The first decision wins — a second click (or a second
+ *  device deciding the same approval) is a no-op, so the app can never see the
+ *  verdict flip. Returns false if it was already decided. */
+export async function decideApproval(
+  email: string,
+  approvalId: string,
+  verdict: "approve" | "deny",
+): Promise<boolean> {
+  const db = sql();
+  const account = email.trim().toLowerCase();
+  const rows = await db`
+    INSERT INTO agent_approvals (email, approval_id, verdict)
+    VALUES (${account}, ${approvalId}, ${verdict})
+    ON CONFLICT (email, approval_id) DO NOTHING
+    RETURNING approval_id`;
+  // Opportunistic cleanup, same reasoning as login_tokens — the poll only ever
+  // asks for recent verdicts, so month-old rows are dead weight.
+  await db`
+    DELETE FROM agent_approvals
+     WHERE email = ${account} AND decided_at < now() - interval '30 days'`;
+  return rows.length > 0;
+}
+
+/** Verdicts decided after `since` (all of them when null), oldest first so the
+ *  app can use the last row's decided_at as its next cursor. */
+export async function approvalVerdictsSince(
+  email: string,
+  since: Date | null,
+): Promise<ApprovalVerdict[]> {
+  const db = sql();
+  return db<ApprovalVerdict[]>`
+    SELECT approval_id, verdict, decided_at
+      FROM agent_approvals
+     WHERE lower(email) = lower(${email})
+       AND decided_at > ${since ?? new Date(0)}
+     ORDER BY decided_at ASC`;
 }
 
 // MARK: - Cloud metering (usage_meter + credit_wallet)

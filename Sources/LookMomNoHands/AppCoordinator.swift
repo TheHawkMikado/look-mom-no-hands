@@ -181,6 +181,7 @@ final class AppCoordinator: ObservableObject {
     let procedures: ProcedureStore
     let agentRoles: AgentRoleStore
     let mcp: MCPManager
+    let events = EventReporter()
     private var scheduler: ProcedureScheduler?
     private var scheduledTask: Task<Void, Never>?
     let knowledge: KnowledgeStore
@@ -320,6 +321,14 @@ final class AppCoordinator: ObservableObject {
         // Warm configured MCP servers off the command path — an npx cold-start
         // mid-task would eat the whole 20s parse budget.
         Task { await self.mcp.connectAll() }
+        // Remote approvals land exactly where the panel buttons do.
+        events.onVerdict = { [weak self] approvalId, approve in
+            BackgroundAgentManager.shared.resolveApproval(approvalId, allow: approve)
+            self?.store.log("agent", "remote verdict: \(approve ? "approved" : "denied")")
+        }
+        BackgroundAgentManager.shared.onApprovalResolved = { [weak self] id in
+            self?.events.approvalResolvedLocally(id)
+        }
         loadKey()
         refreshAuthFlags()
         store.log("app", "auth at launch: mic=\(micAuthorized) speech=\(speechAuthorized)")
@@ -1573,15 +1582,19 @@ final class AppCoordinator: ObservableObject {
         let gen = runGeneration
         let command = p.triggers.first ?? p.name
         store.log("schedule", "running \(p.name)")
+        events.report(kind: "goal_started", title: p.name, detail: "scheduled run")
         scheduledTask = Task {
             do {
                 try await self.runGoal(text: command, gen: gen, seedProgress: [], holder: .scheduled(p.id))
                 self.store.log("schedule", "finished \(p.name)")
+                self.events.report(kind: "goal_done", title: p.name, detail: "scheduled run finished")
                 await self.speak("Your scheduled task \(p.name) is done.", gen: self.runGeneration)
             } catch {
                 let preempted = Task.isCancelled || ScreenLease.shared.revoked(.scheduled(p.id))
                 self.store.log("schedule", preempted ? "\(p.name) stepped aside — you took the screen"
                                                      : "\(p.name) failed: \(error)")
+                self.events.report(kind: preempted ? "goal_done" : "goal_failed", title: p.name,
+                                   detail: preempted ? "stepped aside — you took the screen" : "\(error)")
             }
         }
     }
@@ -1603,9 +1616,12 @@ final class AppCoordinator: ObservableObject {
             switch event {
             case .needsApproval(let command):
                 self.store.log("agent", "\(agent.name) wants to run: \(command)")
+                self.events.report(kind: "needs_approval", title: agent.name,
+                                   detail: "wants to run: \(command)", approvalId: agent.id)
                 Task { await self.speak("\(agent.name) wants to run a command that \(BackgroundAgent.approvalReason(command) ?? "needs your OK"). Approve it from the panel.", gen: self.runGeneration) }
             case .finished(let summary, let success):
                 self.store.log("agent", "\(agent.name) \(success ? "finished" : "stopped"): \(summary.prefix(200))")
+                self.events.report(kind: success ? "goal_done" : "goal_failed", title: agent.name, detail: summary)
                 Task { await self.speak("\(agent.name) \(success ? "is done" : "stopped"). \(summary)", gen: self.runGeneration) }
             case .failed(let message):
                 guard message != "cancelled" else {
@@ -1613,12 +1629,14 @@ final class AppCoordinator: ObservableObject {
                     return
                 }
                 self.store.log("agent", "\(agent.name) failed: \(message.prefix(200))")
+                self.events.report(kind: "goal_failed", title: agent.name, detail: message)
                 Task { await self.speak("\(agent.name) hit an error and stopped.", gen: self.runGeneration) }
             }
         }
         switch result {
         case .success(let agent):
             store.log("agent", "spawned \(agent.name): \(goal.prefix(160))")
+            events.report(kind: "goal_started", title: agent.name, detail: goal)
             Task { await self.speak("Started \(agent.name) in the background. I'll tell you when it's done.", gen: gen) }
         case .failure(let error):
             store.log("agent", "spawn refused: \(error)")
