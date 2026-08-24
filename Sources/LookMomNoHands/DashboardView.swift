@@ -5,7 +5,7 @@ import AppKit
 /// bar is ALWAYS visible on every tab — no child view (NavigationSplitView,
 /// toolbars) can hide or replace it.
 enum DashTab: String, CaseIterable {
-    case memory, live, transcripts, vocabulary, profiles, procedures, paste, activity, settings
+    case memory, live, transcripts, vocabulary, profiles, procedures, agents, paste, activity, settings
 
     var title: String { rawValue.capitalized }
     var icon: String {
@@ -16,6 +16,7 @@ enum DashTab: String, CaseIterable {
         case .vocabulary: return "character.book.closed"
         case .profiles: return "slider.horizontal.3"
         case .procedures: return "list.number"
+        case .agents: return "person.2.gobackward"
         case .paste: return "doc.on.clipboard"
         case .activity: return "list.bullet.rectangle"
         case .settings: return "gearshape"
@@ -81,6 +82,8 @@ struct DashboardView: View {
             ProfilesTab(profiles: coordinator.profiles)
         case .procedures:
             ProceduresTab(procedures: coordinator.procedures)
+        case .agents:
+            AgentsTab(roles: coordinator.agentRoles)
         case .paste:
             PasteRulesTab(rules: coordinator.insertRules)
         case .activity:
@@ -424,6 +427,175 @@ private struct PasteRulesTab: View {
 /// Taught procedures: the growing library of "here's how I do X." You teach them
 /// by voice ("here's how to create a new Claude Code session: …") or edit here; a
 /// matching command follows the steps.
+/// Background agents: what's running now (with live transcript + approvals) and
+/// the named roles work can be routed to by saying their name.
+private struct AgentsTab: View {
+    @ObservedObject var roles: AgentRoleStore
+    @ObservedObject private var manager = BackgroundAgentManager.shared
+    @ObservedObject private var meter = CostMeter.shared
+    @State private var editingRole: AgentRole?
+
+    var body: some View {
+        HSplitView {
+            runsColumn.frame(minWidth: 340)
+            rolesColumn.frame(minWidth: 280)
+        }
+        .padding(12)
+    }
+
+    private var runsColumn: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("Agent runs").font(.headline)
+                Spacer()
+                if meter.agents.calls > 0 {
+                    Text(String(format: "$%.2f · %d calls", meter.agents.cost, meter.agents.calls))
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            }
+            if manager.agents.isEmpty {
+                Text("No agents yet. Say “Hey Mama, build…” or “have Scout research…” — anything long-running and off-screen becomes a background agent.")
+                    .font(.callout).foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+            } else {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 10) {
+                        ForEach(manager.agents) { agent in
+                            AgentRunCard(agent: agent)
+                        }
+                    }
+                }
+            }
+        }
+        .padding(.trailing, 10)
+    }
+
+    private var rolesColumn: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("Roles").font(.headline)
+                Spacer()
+                Button {
+                    let role = AgentRole(name: "New role", instructions: "")
+                    roles.upsert(role)
+                    editingRole = role
+                } label: { Image(systemName: "plus") }
+            }
+            Text("Say a role's name in a command to route the work to it. Its instructions ride along as standing orders.")
+                .font(.caption).foregroundStyle(.secondary)
+            List(roles.roles) { role in
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack {
+                        Text(role.name).font(.callout.bold())
+                        Spacer()
+                        Button { editingRole = role } label: { Image(systemName: "pencil") }
+                            .buttonStyle(.plain)
+                        Button { roles.remove(role.id) } label: { Image(systemName: "trash") }
+                            .buttonStyle(.plain).foregroundStyle(.secondary)
+                    }
+                    if !role.instructions.isEmpty {
+                        Text(role.instructions).font(.caption).foregroundStyle(.secondary).lineLimit(2)
+                    }
+                }
+                .padding(.vertical, 2)
+            }
+            .listStyle(.inset)
+        }
+        .padding(.leading, 10)
+        .sheet(item: $editingRole) { role in
+            RoleEditor(role: role, roles: roles)
+        }
+    }
+}
+
+private struct AgentRunCard: View {
+    @ObservedObject var agent: BackgroundAgent
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                Circle().fill(color).frame(width: 8, height: 8)
+                Text(agent.name).font(.callout.bold())
+                Text(agent.startedAt, style: .relative).font(.caption2).foregroundStyle(.secondary)
+                Spacer()
+                if agent.status.isActive {
+                    Button("Cancel") { BackgroundAgentManager.shared.cancel(agent.id) }
+                        .controlSize(.small)
+                }
+            }
+            Text(agent.goal).font(.caption).foregroundStyle(.secondary).lineLimit(2)
+            if case .waitingApproval(let command) = agent.status {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(command).font(.caption.monospaced()).textSelection(.enabled)
+                    HStack(spacing: 8) {
+                        Button("Approve") { BackgroundAgentManager.shared.resolveApproval(agent.id, allow: true) }
+                        Button("Don't run") { BackgroundAgentManager.shared.resolveApproval(agent.id, allow: false) }
+                    }
+                    .controlSize(.small)
+                }
+                .padding(6)
+                .background(RoundedRectangle(cornerRadius: 6).fill(Color.orange.opacity(0.12)))
+            } else {
+                Text(agent.status.label).font(.caption).foregroundStyle(.secondary)
+            }
+            if !agent.transcript.isEmpty {
+                // The tail is what tells you whether it's on track — the full log
+                // stays with the agent, this is a live window, newest last.
+                VStack(alignment: .leading, spacing: 1) {
+                    ForEach(Array(agent.transcript.suffix(6).enumerated()), id: \.offset) { _, line in
+                        Text(line).font(.caption2.monospaced()).foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+                }
+                .padding(6)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(RoundedRectangle(cornerRadius: 6).fill(Color.primary.opacity(0.04)))
+            }
+        }
+        .padding(10)
+        .background(RoundedRectangle(cornerRadius: 8).fill(Color.primary.opacity(0.03)))
+    }
+
+    private var color: Color {
+        switch agent.status {
+        case .running: return .purple
+        case .waitingApproval: return .orange
+        case .finished(_, let ok): return ok ? .green : .secondary
+        case .failed: return .red
+        }
+    }
+}
+
+private struct RoleEditor: View {
+    @State var role: AgentRole
+    let roles: AgentRoleStore
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Edit role").font(.headline)
+            TextField("Name (what you'll say — e.g. Scout)", text: $role.name)
+                .textFieldStyle(.roundedBorder)
+            Text("Standing orders").font(.caption).foregroundStyle(.secondary)
+            TextEditor(text: $role.instructions)
+                .font(.callout)
+                .frame(minHeight: 120)
+                .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.secondary.opacity(0.3)))
+            HStack {
+                Spacer()
+                Button("Cancel") { dismiss() }
+                Button("Save") {
+                    roles.upsert(role)
+                    dismiss()
+                }
+                .keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(16)
+        .frame(width: 420)
+    }
+}
+
 private struct ProceduresTab: View {
     @ObservedObject var procedures: ProcedureStore
     @State private var selection: String?

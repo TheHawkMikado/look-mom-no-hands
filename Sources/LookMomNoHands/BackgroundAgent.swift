@@ -59,10 +59,20 @@ final class BackgroundAgent: ObservableObject, Identifiable {
     /// Tool output cap per result — a `find /` must not blow up the conversation.
     private static let maxToolOutput = 8_000
 
-    init(goal: String, claude: ClaudeClient) {
+    /// A matched role renames the agent and appends its standing orders — the
+    /// runtime is identical; the role is entirely prompt and identity.
+    let role: AgentRole?
+
+    init(goal: String, claude: ClaudeClient, role: AgentRole? = nil) {
         self.goal = goal
         self.claude = claude
-        self.name = Self.deriveName(from: goal)
+        self.role = role
+        self.name = role?.name ?? Self.deriveName(from: goal)
+    }
+
+    private var systemPrompt: String {
+        guard let role, !role.instructions.isEmpty else { return Self.systemPrompt }
+        return Self.systemPrompt + "\n\nYou are \"\(role.name)\". Standing orders from the user:\n\(role.instructions)"
     }
 
     func start() {
@@ -93,7 +103,7 @@ final class BackgroundAgent: ObservableObject, Identifiable {
             guard !Task.isCancelled else { return }
             let turn: ClaudeClient.AgentTurn
             do {
-                turn = try await claude.agentTurn(system: Self.systemPrompt, messages: messages)
+                turn = try await claude.agentTurn(system: systemPrompt, messages: messages)
             } catch {
                 conclude(.failed("\(error)"))
                 return
@@ -301,7 +311,7 @@ final class BackgroundAgentManager: ObservableObject {
 
     /// Three is a dogfooding guess, not physics: each agent is an Opus
     /// conversation plus a shell — the cap bounds cost surprise, not capability.
-    static let maxConcurrent = 3
+    nonisolated static let maxConcurrent = 3
 
     var active: [BackgroundAgent] { agents.filter { $0.status.isActive } }
     var awaitingApproval: [BackgroundAgent] {
@@ -320,12 +330,12 @@ final class BackgroundAgentManager: ObservableObject {
         }
     }
 
-    func spawn(goal: String, claude: ClaudeClient,
+    func spawn(goal: String, claude: ClaudeClient, role: AgentRole? = nil,
                onEvent: @escaping (BackgroundAgent, BackgroundAgent.Event) -> Void) -> Result<BackgroundAgent, SpawnError> {
         let trimmed = goal.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return .failure(.emptyGoal) }
         guard active.count < Self.maxConcurrent else { return .failure(.atCapacity) }
-        let agent = BackgroundAgent(goal: trimmed, claude: claude)
+        let agent = BackgroundAgent(goal: trimmed, claude: claude, role: role)
         agent.onEvent = onEvent
         agents.insert(agent, at: 0)
         // Finished runs stay visible for review; only the tail is trimmed.

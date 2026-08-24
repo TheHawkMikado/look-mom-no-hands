@@ -179,6 +179,7 @@ final class AppCoordinator: ObservableObject {
     let vocabulary: VocabularyStore
     let profiles: ProfileStore
     let procedures: ProcedureStore
+    let agentRoles: AgentRoleStore
     let knowledge: KnowledgeStore
     let insertRules: InsertRulesStore
     let learnedControls: ElementMemoryStore
@@ -249,6 +250,7 @@ final class AppCoordinator: ObservableObject {
         vocabulary = VocabularyStore(directory: store.directory)
         profiles = ProfileStore(directory: store.directory)
         procedures = ProcedureStore(directory: store.directory)
+        agentRoles = AgentRoleStore(directory: store.directory)
         knowledge = KnowledgeStore(directory: store.directory)
         insertRules = InsertRulesStore(directory: store.directory)
         learnedControls = ElementMemoryStore(directory: store.directory)
@@ -1284,6 +1286,10 @@ final class AppCoordinator: ObservableObject {
     /// step-execution failures are reported here and end the loop.
     private func runGoal(text: String, gen: Int, seedProgress: [String]) async throws {
         guard let claude else { return }
+        // Voice always gets the screen — this either takes a free lease or revokes
+        // a scheduled run's (which then stops at its next cancellation check).
+        _ = ScreenLease.shared.acquire(.voice)
+        defer { ScreenLease.shared.release(.voice) }
         var performedAll = seedProgress   // carried across a mid-task clarification
         var complete = false
         var round = 0
@@ -1530,7 +1536,8 @@ final class AppCoordinator: ObservableObject {
             Task { await self.speak("I need an Anthropic key before I can run background agents.", gen: gen) }
             return
         }
-        let result = BackgroundAgentManager.shared.spawn(goal: goal, claude: claude) { [weak self] agent, event in
+        let result = BackgroundAgentManager.shared.spawn(goal: goal, claude: claude,
+                                                         role: agentRoles.match(goal: goal)) { [weak self] agent, event in
             guard let self else { return }
             switch event {
             case .needsApproval(let command):
