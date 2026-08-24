@@ -57,7 +57,7 @@ final class ClaudeClient: @unchecked Sendable {
 
     // MARK: Background-agent loop (free-form tool use, not forced)
 
-    struct AgentToolCall: Sendable {
+    struct AgentToolCall {
         let id: String
         let name: String
         let input: [String: Any]

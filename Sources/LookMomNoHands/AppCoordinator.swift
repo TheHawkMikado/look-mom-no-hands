@@ -180,6 +180,8 @@ final class AppCoordinator: ObservableObject {
     let profiles: ProfileStore
     let procedures: ProcedureStore
     let agentRoles: AgentRoleStore
+    private var scheduler: ProcedureScheduler?
+    private var scheduledTask: Task<Void, Never>?
     let knowledge: KnowledgeStore
     let insertRules: InsertRulesStore
     let learnedControls: ElementMemoryStore
@@ -311,6 +313,8 @@ final class AppCoordinator: ObservableObject {
         }
         store.log("app", "launched")
         environment.start()   // track open apps/windows/tabs continuously, even before listening
+        scheduler = ProcedureScheduler(procedures: procedures, coordinator: self)
+        scheduler?.start()
         loadKey()
         refreshAuthFlags()
         store.log("app", "auth at launch: mic=\(micAuthorized) speech=\(speechAuthorized)")
@@ -1221,6 +1225,9 @@ final class AppCoordinator: ObservableObject {
         // another turn in the dialogue.
         let answeringClarification = pendingClarification != nil
         pendingClarification = nil
+        // The user spoke — a scheduled run loses the screen immediately, not at
+        // its next lease check.
+        scheduledTask?.cancel()
         processing = true
         phase = .thinking
         let gen = runGeneration
@@ -1284,12 +1291,16 @@ final class AppCoordinator: ObservableObject {
     /// what makes it *finish* a task — continue into the panel it just opened rather
     /// than stopping there. Parse/network errors propagate to the caller's catch;
     /// step-execution failures are reported here and end the loop.
-    private func runGoal(text: String, gen: Int, seedProgress: [String]) async throws {
+    private func runGoal(text: String, gen: Int, seedProgress: [String],
+                         holder: ScreenLease.Holder = .voice) async throws {
         guard let claude else { return }
-        // Voice always gets the screen — this either takes a free lease or revokes
-        // a scheduled run's (which then stops at its next cancellation check).
-        _ = ScreenLease.shared.acquire(.voice)
-        defer { ScreenLease.shared.release(.voice) }
+        // Voice always gets the screen (acquiring revokes a scheduled holder);
+        // a scheduled run only starts on a free screen.
+        guard ScreenLease.shared.acquire(holder) else {
+            store.log("schedule", "screen busy — skipped")
+            return
+        }
+        defer { ScreenLease.shared.release(holder) }
         var performedAll = seedProgress   // carried across a mid-task clarification
         var complete = false
         var round = 0
@@ -1300,6 +1311,9 @@ final class AppCoordinator: ObservableObject {
         var brokeOut = false                    // stopped early (loop/spin/blocked) — already spoke
         while round < Self.maxTaskRounds, !complete {
             try Task.checkCancellation()
+            // A revoked lease is a cancellation, not an error: the user took the
+            // screen and the scheduled run must vanish quietly.
+            if ScreenLease.shared.revoked(holder) { throw CancellationError() }
             phase = .thinking
             // A fresh speculative snapshot (taken while the user was still talking)
             // saves the whole AX walk on round 0 — the parse starts immediately.
@@ -1523,6 +1537,44 @@ final class AppCoordinator: ObservableObject {
         let sensitive = narration.contains(DemonstrationRecorder.redactionMark)
         let tail = sensitive ? " I hid some text I couldn't confirm was safe to store — review the steps in the Procedures tab." : " You can review the steps in the Procedures tab."
         Task { await self.speak("Got it — I learned how to \(self.demoName).\(tail)", gen: self.runGeneration) }
+    }
+
+    // MARK: Scheduled procedures
+
+    /// Runs a due procedure through the SAME act-observe loop as a spoken
+    /// command — the schedule is just a different way of saying it. Only starts
+    /// on a genuinely free machine: any live activity wins the slot, and the slot
+    /// is already stamped fired, so a busy 9:00 skips to tomorrow rather than
+    /// stalking the user all morning.
+    func runScheduledProcedure(_ p: Procedure) {
+        guard !processing, !demonstrating, scheduledTask?.isCancelled != false else {
+            store.log("schedule", "skipped \(p.name) — a session is active")
+            return
+        }
+        switch phase {
+        case .idle, .listeningWake: break
+        default:
+            store.log("schedule", "skipped \(p.name) — app is \(phase.label)")
+            return
+        }
+        guard claude != nil else {
+            store.log("schedule", "skipped \(p.name) — no API key")
+            return
+        }
+        let gen = runGeneration
+        let command = p.triggers.first ?? p.name
+        store.log("schedule", "running \(p.name)")
+        scheduledTask = Task {
+            do {
+                try await self.runGoal(text: command, gen: gen, seedProgress: [], holder: .scheduled(p.id))
+                self.store.log("schedule", "finished \(p.name)")
+                await self.speak("Your scheduled task \(p.name) is done.", gen: self.runGeneration)
+            } catch {
+                let preempted = Task.isCancelled || ScreenLease.shared.revoked(.scheduled(p.id))
+                self.store.log("schedule", preempted ? "\(p.name) stepped aside — you took the screen"
+                                                     : "\(p.name) failed: \(error)")
+            }
+        }
     }
 
     // MARK: Background agents

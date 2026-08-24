@@ -602,6 +602,9 @@ private struct ProceduresTab: View {
     @State private var name = ""
     @State private var triggers = ""
     @State private var steps = ""
+    @State private var scheduleOn = false
+    @State private var scheduleTime = Calendar.current.date(bySettingHour: 9, minute: 0, second: 0, of: Date()) ?? Date()
+    @State private var scheduleDays: Set<Int> = [2, 3, 4, 5, 6]
 
     var body: some View {
         HStack(spacing: 0) {
@@ -616,6 +619,10 @@ private struct ProceduresTab: View {
                             Text(p.name.isEmpty ? "(unnamed)" : p.name)
                             if !p.triggers.isEmpty {
                                 Text(p.triggers.joined(separator: ", ")).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
+                            }
+                            if let s = p.schedule {
+                                Label(s.label, systemImage: "clock")
+                                    .font(.caption2).foregroundStyle(.purple)
                             }
                         }
                         .tag(p.id)
@@ -651,6 +658,7 @@ private struct ProceduresTab: View {
                 TextEditor(text: $steps)
                     .font(.body).frame(maxHeight: .infinity)
                     .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.secondary.opacity(0.3)))
+                scheduleEditor
                 HStack {
                     Spacer()
                     Button("Save") { save() }.disabled(name.trimmingCharacters(in: .whitespaces).isEmpty || steps.trimmingCharacters(in: .whitespaces).isEmpty)
@@ -666,12 +674,44 @@ private struct ProceduresTab: View {
         }
     }
 
+    private var scheduleEditor: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Toggle("Run on a schedule", isOn: $scheduleOn)
+                .toggleStyle(.checkbox)
+            if scheduleOn {
+                HStack(spacing: 10) {
+                    DatePicker("At", selection: $scheduleTime, displayedComponents: .hourAndMinute)
+                        .frame(width: 110)
+                    ForEach(1..<8) { day in
+                        let letters = ["S", "M", "T", "W", "T", "F", "S"]
+                        Button(letters[day - 1]) {
+                            if scheduleDays.contains(day) { scheduleDays.remove(day) }
+                            else { scheduleDays.insert(day) }
+                        }
+                        .buttonStyle(.plain)
+                        .font(.caption.bold())
+                        .frame(width: 22, height: 22)
+                        .background(Circle().fill(scheduleDays.contains(day) ? Color.accentColor.opacity(0.3) : Color.primary.opacity(0.06)))
+                    }
+                }
+                Text("Runs only while the Mac is awake and you're not mid-task — a busy slot is skipped, not queued. If you speak during a run, it stops and you win the screen.")
+                    .font(.caption2).foregroundStyle(.secondary)
+            }
+        }
+    }
+
     private func loadDraft() {
         guard let id = selection, let p = procedures.procedures.first(where: { $0.id == id }) else {
             name = ""; triggers = ""; steps = ""   // no selection / stale id → clear, never show a stale draft
+            scheduleOn = false
             return
         }
         name = p.name; triggers = p.triggers.joined(separator: ", "); steps = p.steps
+        scheduleOn = p.schedule != nil
+        if let s = p.schedule {
+            scheduleTime = Calendar.current.date(bySettingHour: s.hour, minute: s.minute, second: 0, of: Date()) ?? scheduleTime
+            scheduleDays = s.weekdays
+        }
     }
 
     private func newProcedure() {
@@ -682,9 +722,19 @@ private struct ProceduresTab: View {
     }
 
     private func save() {
-        guard let id = selection else { return }
-        let trig = triggers.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
-        procedures.upsert(Procedure(id: id, name: name, triggers: trig, steps: steps))
+        // Mutate the existing record: rebuilding from scratch here once silently
+        // wiped createdAt — and would now wipe lastFiredAt too.
+        guard let id = selection, var p = procedures.procedures.first(where: { $0.id == id }) else { return }
+        p.name = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        p.triggers = triggers.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+        p.steps = steps
+        if scheduleOn {
+            let parts = Calendar.current.dateComponents([.hour, .minute], from: scheduleTime)
+            p.schedule = ProcedureSchedule(hour: parts.hour ?? 9, minute: parts.minute ?? 0, weekdays: scheduleDays)
+        } else {
+            p.schedule = nil
+        }
+        procedures.upsert(p)
     }
 }
 

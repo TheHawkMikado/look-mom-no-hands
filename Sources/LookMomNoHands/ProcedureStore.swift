@@ -39,6 +39,15 @@ final class ProcedureStore: ObservableObject {
         persist()
     }
 
+    /// Stamped when the scheduler DISPATCHES, not when the run succeeds — a slot
+    /// that found the screen busy is skipped, not retried into the user's work
+    /// all morning.
+    func markFired(_ id: String, at date: Date = Date()) {
+        guard let i = procedures.firstIndex(where: { $0.id == id }) else { return }
+        procedures[i].lastFiredAt = date
+        persist()
+    }
+
     // Common words that must not, on their own, match a procedure to a command.
     private static let stopwords: Set<String> = [
         "new", "the", "and", "for", "open", "tab", "app", "file", "window", "this",

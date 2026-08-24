@@ -232,13 +232,54 @@ struct Procedure: Codable, Identifiable, Sendable, Equatable {
     var triggers: [String]   // phrases that should invoke it
     var steps: String        // the narrated process, in order
     let createdAt: Date
+    /// nil = manual only. Presence IS the on/off switch — no separate flag to
+    /// drift out of sync with it.
+    var schedule: ProcedureSchedule?
+    var lastFiredAt: Date?
 
-    init(id: String = UUID().uuidString, name: String, triggers: [String] = [], steps: String, createdAt: Date = Date()) {
+    init(id: String = UUID().uuidString, name: String, triggers: [String] = [], steps: String,
+         createdAt: Date = Date(), schedule: ProcedureSchedule? = nil, lastFiredAt: Date? = nil) {
         self.id = id
         self.name = name.trimmingCharacters(in: .whitespacesAndNewlines)
         self.triggers = triggers.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
         self.steps = steps.trimmingCharacters(in: .whitespacesAndNewlines)
         self.createdAt = createdAt
+        self.schedule = schedule
+        self.lastFiredAt = lastFiredAt
+    }
+}
+
+/// When a procedure runs itself: a time of day on chosen weekdays. Deliberately
+/// not cron — everything the voice UI can say ("every weekday at 9") fits this,
+/// and everything this can hold reads back as one sentence.
+struct ProcedureSchedule: Codable, Sendable, Equatable {
+    var hour: Int = 9
+    var minute: Int = 0
+    var weekdays: Set<Int> = [2, 3, 4, 5, 6]   // Calendar.weekday: 1 = Sunday
+
+    /// Fire late after a wake-from-sleep, but not absurdly late: a 9:00 routine
+    /// starting at 4pm because the lid just opened would be a surprise, not a
+    /// service.
+    static let graceInterval: TimeInterval = 30 * 60
+
+    /// Pure so tests can pin the clock and calendar.
+    func isDue(now: Date, lastFired: Date?, calendar: Calendar = .current) -> Bool {
+        guard weekdays.contains(calendar.component(.weekday, from: now)),
+              let slot = calendar.date(bySettingHour: hour, minute: minute, second: 0, of: now),
+              now >= slot, now.timeIntervalSince(slot) <= Self.graceInterval
+        else { return false }
+        // One fire per slot: anything fired at/after today's slot already covered it.
+        if let lastFired, lastFired >= slot { return false }
+        return true
+    }
+
+    var label: String {
+        let time = String(format: "%d:%02d", hour, minute)
+        let names = [1: "Sun", 2: "Mon", 3: "Tue", 4: "Wed", 5: "Thu", 6: "Fri", 7: "Sat"]
+        let days = weekdays.count == 7 ? "every day"
+            : weekdays == [2, 3, 4, 5, 6] ? "weekdays"
+            : weekdays.sorted().compactMap { names[$0] }.joined(separator: " ")
+        return "\(time) \(days)"
     }
 }
 
