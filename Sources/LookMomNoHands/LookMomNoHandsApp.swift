@@ -139,11 +139,56 @@ enum DockPresence {
     }
 }
 
+/// One background agent in the panel: status dot, live step, and — when it's
+/// asking — the approve/deny pair. Its own view so @ObservedObject tracks the
+/// agent's published status without redrawing the whole panel per log line.
+private struct AgentRow: View {
+    @ObservedObject var agent: BackgroundAgent
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 6) {
+                Circle().fill(statusColor).frame(width: 7, height: 7)
+                Text(agent.name).font(.caption).lineLimit(1)
+                Spacer()
+                if agent.status.isActive {
+                    Button("Cancel") { BackgroundAgentManager.shared.cancel(agent.id) }
+                        .buttonStyle(.plain).font(.caption2).foregroundStyle(.secondary)
+                }
+            }
+            if case .waitingApproval(let command) = agent.status {
+                Text(command)
+                    .font(.caption2.monospaced()).foregroundStyle(.secondary)
+                    .lineLimit(2).textSelection(.enabled)
+                HStack(spacing: 8) {
+                    Button("Approve") { BackgroundAgentManager.shared.resolveApproval(agent.id, allow: true) }
+                    Button("Don't run") { BackgroundAgentManager.shared.resolveApproval(agent.id, allow: false) }
+                }
+                .controlSize(.small)
+            } else {
+                Text(agent.status.label)
+                    .font(.caption2).foregroundStyle(.secondary).lineLimit(2)
+            }
+        }
+        .padding(.leading, 2)
+    }
+
+    private var statusColor: Color {
+        switch agent.status {
+        case .running: return .purple
+        case .waitingApproval: return .orange
+        case .finished(_, let ok): return ok ? .green : .secondary
+        case .failed: return .red
+        }
+    }
+}
+
 struct PanelView: View {
     @ObservedObject var coordinator: AppCoordinator
     @ObservedObject var store: AppStore
     @ObservedObject var account: AccountStore
     @ObservedObject var updates: UpdateChecker
+    @ObservedObject private var agentManager = BackgroundAgentManager.shared
     @Environment(\.openWindow) private var openWindow
     @State private var showAccount = false
     @State private var launchAtLogin = LoginItem.isEnabled
@@ -168,6 +213,11 @@ struct PanelView: View {
                 Divider()
             }
 
+            if !agentManager.agents.isEmpty {
+                agentsSection
+                Divider()
+            }
+
             controls
             dictateRow
 
@@ -187,6 +237,19 @@ struct PanelView: View {
         }
         .padding(14)
         .frame(width: 380)
+    }
+
+    private var agentsSection: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 6) {
+                Image(systemName: "person.2.gobackward").foregroundStyle(.secondary)
+                Text("Background agents").font(.caption).foregroundStyle(.secondary)
+                Spacer()
+            }
+            ForEach(agentManager.agents.prefix(4)) { agent in
+                AgentRow(agent: agent)
+            }
+        }
     }
 
     private var voiceReplyRow: some View {

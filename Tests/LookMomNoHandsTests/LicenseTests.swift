@@ -82,14 +82,14 @@ final class LicenseTests: XCTestCase {
 
     func testPerpetualLicenceNeverExpires() {
         let claims = LicenseClaims(email: "a@b.c", plan: "pro", exp: 0,
-                                   issuedAt: 0, device: device)
+                                   issuedAt: 0, device: device, devices: nil, subUsers: nil)
         XCTAssertNil(claims.expiryDate)
     }
 
     func testExpiredLicenceKeepsWorkingInsideTheGraceWindow() {
         let yesterday = Date().addingTimeInterval(-86_400).timeIntervalSince1970
         let claims = LicenseClaims(email: "a@b.c", plan: "solo", exp: yesterday,
-                                   issuedAt: 0, device: device)
+                                   issuedAt: 0, device: device, devices: nil, subUsers: nil)
         XCTAssertNotNil(claims.expiryDate)
         XCTAssertTrue(claims.expiryDate! < Date())
     }
@@ -121,7 +121,8 @@ final class LicenseTests: XCTestCase {
     func testWeeklySubscriptionTokenIsNotPerpetual() {
         let weekOut = Date().addingTimeInterval(7 * 86_400).timeIntervalSince1970
         let claims = LicenseClaims(email: "a@b.c", plan: "solo", exp: weekOut,
-                                   issuedAt: Date().timeIntervalSince1970, device: device)
+                                   issuedAt: Date().timeIntervalSince1970, device: device,
+                                   devices: nil, subUsers: nil)
         XCTAssertNotNil(claims.expiryDate, "a weekly licence must carry an expiry")
         XCTAssertGreaterThan(claims.expiryDate!, Date())
     }

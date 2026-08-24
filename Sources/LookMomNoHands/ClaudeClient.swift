@@ -55,6 +55,80 @@ final class ClaudeClient: @unchecked Sendable {
         return try Self.decodeBlock(json, blockType: "tool_use", payloadKey: "input")
     }
 
+    // MARK: Background-agent loop (free-form tool use, not forced)
+
+    struct AgentToolCall: Sendable {
+        let id: String
+        let name: String
+        let input: [String: Any]
+    }
+
+    /// One turn of a background agent's conversation. `rawContent` is the
+    /// assistant's content array verbatim — it must be echoed back into the next
+    /// request untouched or the API rejects the tool_result pairing.
+    struct AgentTurn {
+        let text: String
+        let calls: [AgentToolCall]
+        let rawContent: [[String: Any]]
+    }
+
+    /// Opus, not Haiku: agents write code and reason over shell output, where
+    /// Haiku's speed advantage doesn't pay for its mistakes. Tool choice is left
+    /// free (unlike `emit_plan`) because "no tool call" is the agent's natural
+    /// done-talking signal.
+    func agentTurn(system: String, messages: [[String: Any]]) async throws -> AgentTurn {
+        let body: [String: Any] = [
+            "model": ClaudeModel.opus48.rawValue,
+            "max_tokens": 8192,
+            "system": system,
+            "messages": messages,
+            "tools": Self.agentTools
+        ]
+        let json = try await post(body, timeout: 180, kind: .agent)
+        try Self.checkRefusal(json)
+        guard let content = json["content"] as? [[String: Any]] else {
+            throw ClaudeError.decoding("agent turn returned no content")
+        }
+        var text = ""
+        var calls: [AgentToolCall] = []
+        for block in content {
+            switch block["type"] as? String {
+            case "text": text += (block["text"] as? String) ?? ""
+            case "tool_use":
+                calls.append(AgentToolCall(id: block["id"] as? String ?? "",
+                                           name: block["name"] as? String ?? "",
+                                           input: block["input"] as? [String: Any] ?? [:]))
+            default: break
+            }
+        }
+        return AgentTurn(text: text.trimmingCharacters(in: .whitespacesAndNewlines), calls: calls, rawContent: content)
+    }
+
+    static let agentTools: [[String: Any]] = [
+        ["name": "run_command",
+         "description": "Run one zsh command in the user's login environment (their PATH applies). Working directory starts at their home folder; use cd within the command if needed — state does not persist between calls. Output is truncated to 8000 characters.",
+         "input_schema": ["type": "object",
+                          "properties": ["command": ["type": "string"]],
+                          "required": ["command"]]],
+        ["name": "read_file",
+         "description": "Read a text file. ~ expands to the user's home.",
+         "input_schema": ["type": "object",
+                          "properties": ["path": ["type": "string"]],
+                          "required": ["path"]]],
+        ["name": "write_file",
+         "description": "Write a text file (parent folders are created). ~ expands to the user's home. Overwrites without asking — read first if unsure.",
+         "input_schema": ["type": "object",
+                          "properties": ["path": ["type": "string"], "content": ["type": "string"]],
+                          "required": ["path", "content"]]],
+        ["name": "finish",
+         "description": "The goal is met (or genuinely can't be). Ends the run.",
+         "input_schema": ["type": "object",
+                          "properties": ["summary": ["type": "string",
+                                                     "description": "1-2 spoken-friendly sentences on what was done or why it's blocked"],
+                                         "success": ["type": "boolean"]],
+                          "required": ["summary", "success"]]]
+    ]
+
     static func planRequestBody(transcript: String,
                                 dialogue: [(role: String, content: String)] = [],
                                 vocabulary: String = "",

@@ -18,6 +18,7 @@ final class CostMeter: ObservableObject {
 
     @Published private(set) var controller = Bucket()
     @Published private(set) var dictation = Bucket()
+    @Published private(set) var agents = Bucket()
 
     /// A gap between two events in the same bucket longer than this doesn't count
     /// as active time — it's a break, not usage.
@@ -41,10 +42,18 @@ final class CostMeter: ObservableObject {
     enum Kind {
         case command, vision, appDocs     // controller
         case cleanup, report, answer      // dictation
-        var isController: Bool {
-            switch self { case .command, .vision, .appDocs: return true; default: return false }
+        case agent                        // background agents
+
+        var bucket: BucketID {
+            switch self {
+            case .command, .vision, .appDocs: return .controller
+            case .cleanup, .report, .answer: return .dictation
+            case .agent: return .agents
+            }
         }
     }
+
+    enum BucketID { case controller, dictation, agents }
 
     struct Bucket: Codable {
         var cost: Double = 0
@@ -70,7 +79,7 @@ final class CostMeter: ObservableObject {
         let cost = Double(inp) * rate.input + Double(out) * rate.output
                  + Double(cr) * rate.cacheRead + Double(cw) * rate.cacheWrite
         let tin = inp + cr + cw
-        Task { @MainActor in self.add(controller: kind.isController, cost: cost, tin: tin, tout: out) }
+        Task { @MainActor in self.add(to: kind.bucket, cost: cost, tin: tin, tout: out) }
     }
 
     /// Scribe transcription — bill by the audio duration, which doubles as the
@@ -78,18 +87,23 @@ final class CostMeter: ObservableObject {
     nonisolated func recordAudio(seconds: Double) {
         guard seconds > 0 else { return }
         let cost = seconds * Self.sttPerSecond
-        Task { @MainActor in self.add(controller: false, cost: cost, seconds: seconds) }
+        Task { @MainActor in self.add(to: .dictation, cost: cost, seconds: seconds) }
     }
 
     /// ElevenLabs spoken reply (controller side).
     nonisolated func recordTTS(chars: Int) {
         guard chars > 0 else { return }
         let cost = Double(chars) * Self.ttsPerChar
-        Task { @MainActor in self.add(controller: true, cost: cost) }
+        Task { @MainActor in self.add(to: .controller, cost: cost) }
     }
 
-    private func add(controller isCtrl: Bool, cost: Double, tin: Int = 0, tout: Int = 0, seconds: Double? = nil) {
-        var b = isCtrl ? controller : dictation
+    private func add(to id: BucketID, cost: Double, tin: Int = 0, tout: Int = 0, seconds: Double? = nil) {
+        var b: Bucket
+        switch id {
+        case .controller: b = controller
+        case .dictation: b = dictation
+        case .agents: b = agents
+        }
         let now = Date().timeIntervalSince1970
         b.cost += cost
         b.calls += 1
@@ -101,20 +115,25 @@ final class CostMeter: ObservableObject {
             b.activeSeconds += now - b.lastEventEpoch
         }
         b.lastEventEpoch = now
-        if isCtrl { controller = b } else { dictation = b }
+        switch id {
+        case .controller: controller = b
+        case .dictation: dictation = b
+        case .agents: agents = b
+        }
         save()
     }
 
     func reset() {
         controller = Bucket()
         dictation = Bucket()
+        agents = Bucket()
         save()
     }
 
     // MARK: - Persistence
 
     private func save() {
-        let snapshot = ["controller": controller, "dictation": dictation]
+        let snapshot = ["controller": controller, "dictation": dictation, "agents": agents]
         if let data = try? JSONEncoder().encode(snapshot) {
             UserDefaults.standard.set(data, forKey: defaultsKey)
         }
@@ -126,5 +145,6 @@ final class CostMeter: ObservableObject {
         else { return }
         controller = snapshot["controller"] ?? Bucket()
         dictation = snapshot["dictation"] ?? Bucket()
+        agents = snapshot["agents"] ?? Bucket()
     }
 }

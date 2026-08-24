@@ -1519,6 +1519,45 @@ final class AppCoordinator: ObservableObject {
         Task { await self.speak("Got it — I learned how to \(self.demoName).\(tail)", gen: self.runGeneration) }
     }
 
+    // MARK: Background agents
+
+    /// Hands a non-UI goal to a headless agent and narrates its lifecycle. The
+    /// agent runs past the end of this command session, so events speak with the
+    /// generation current AT EVENT TIME — the spawn-time gen is long stale by
+    /// the time a build finishes.
+    private func spawnBackgroundAgent(goal: String, gen: Int) {
+        guard let claude else {
+            Task { await self.speak("I need an Anthropic key before I can run background agents.", gen: gen) }
+            return
+        }
+        let result = BackgroundAgentManager.shared.spawn(goal: goal, claude: claude) { [weak self] agent, event in
+            guard let self else { return }
+            switch event {
+            case .needsApproval(let command):
+                self.store.log("agent", "\(agent.name) wants to run: \(command)")
+                Task { await self.speak("\(agent.name) wants to run a command that \(BackgroundAgent.approvalReason(command) ?? "needs your OK"). Approve it from the panel.", gen: self.runGeneration) }
+            case .finished(let summary, let success):
+                self.store.log("agent", "\(agent.name) \(success ? "finished" : "stopped"): \(summary.prefix(200))")
+                Task { await self.speak("\(agent.name) \(success ? "is done" : "stopped"). \(summary)", gen: self.runGeneration) }
+            case .failed(let message):
+                guard message != "cancelled" else {
+                    self.store.log("agent", "\(agent.name) cancelled")
+                    return
+                }
+                self.store.log("agent", "\(agent.name) failed: \(message.prefix(200))")
+                Task { await self.speak("\(agent.name) hit an error and stopped.", gen: self.runGeneration) }
+            }
+        }
+        switch result {
+        case .success(let agent):
+            store.log("agent", "spawned \(agent.name): \(goal.prefix(160))")
+            Task { await self.speak("Started \(agent.name) in the background. I'll tell you when it's done.", gen: gen) }
+        case .failure(let error):
+            store.log("agent", "spawn refused: \(error)")
+            Task { await self.speak(error.spoken, gen: gen) }
+        }
+    }
+
     /// A fingerprint of a round's actions INCLUDING the typed text/url, so that
     /// re-entering different values into the same form (a productive repeat) does NOT
     /// collide — only a byte-identical action does. Paired with the screen hash, this
@@ -1548,6 +1587,9 @@ final class AppCoordinator: ObservableObject {
                 return (performed, true, false)   // the demo owns the session until "Mama done"
             case .describeScreen:
                 try await self.describeScreen(question: step.target, gen: gen)
+            case .spawnBackgroundAgent:
+                self.spawnBackgroundAgent(goal: step.prompt, gen: gen)
+                performed.append("started a background agent")
             case .none:
                 continue
             case .openApp where Self.namesOurDashboard(step.target),

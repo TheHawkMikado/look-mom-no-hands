@@ -68,10 +68,8 @@ enum ScreenController {
         case .moveWindow: try moveWindow(matching: action.target, to: action.text)
         case .switchTab: try switchTab(to: action.target)
         case .keystroke: try keystroke(action.keys)
-        case .dictateStart, .describeScreen, .watchStart, .none: break // handled by the coordinator, not here
-        // Schema'd ahead of its executor; failing beats reporting a spawn that
-        // never happened.
-        case .spawnBackgroundAgent: throw ControlError.notImplemented("background agents")
+        case .dictateStart, .describeScreen, .watchStart, .spawnBackgroundAgent, .none:
+            break // handled by the coordinator, not here
         }
     }
 
