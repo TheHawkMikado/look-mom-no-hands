@@ -142,6 +142,10 @@ final class BackgroundAgent: ObservableObject, Identifiable {
     }
 
     private func conclude(_ event: Event) {
+        // One terminal outcome per agent: cancel() concludes synchronously, and
+        // the cancelled loop's catch then arrives here with a CancellationError
+        // it must not re-report as "hit an error and stopped".
+        guard status.isActive else { return }
         switch event {
         case .finished(let summary, let success):
             status = .finished(summary: summary, success: success)
