@@ -65,8 +65,19 @@ export function StatusFeed() {
 
   useEffect(() => {
     load();
-    const timer = setInterval(load, 5000);
-    return () => clearInterval(timer);
+    // A backgrounded tab (the phone back in the pocket) must not keep hitting
+    // the server every 5s; refresh immediately when it comes back instead.
+    const timer = setInterval(() => {
+      if (!document.hidden) load();
+    }, 5000);
+    const onVisible = () => {
+      if (!document.hidden) load();
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      clearInterval(timer);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
   }, [load]);
 
   async function decide(approvalId: string, verdict: "approve" | "deny") {

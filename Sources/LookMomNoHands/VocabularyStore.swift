@@ -86,16 +86,13 @@ final class VocabularyStore: ObservableObject {
         entries = decoded
     }
 
-    /// Fleet sync: id-union, newer date wins; deletes stay local.
+    /// Fleet sync; semantics live in mergeSyncRecords, shared by all stores.
+    /// Vocab entries are append-mostly (their `date` is creation), so edits to
+    /// an existing entry stay machine-local — documented in FLEET.md.
     func mergeSnapshot(_ remote: [VocabEntry]) {
-        var changed = false
-        for r in remote {
-            if let i = entries.firstIndex(where: { $0.id == r.id }) {
-                if r.date > entries[i].date { entries[i] = r; changed = true }
-            } else if !entries.contains(where: { $0.kind == r.kind && $0.spoken.lowercased() == r.spoken.lowercased() }) {
-                entries.append(r); changed = true
-            }
-        }
+        let changed = mergeSyncRecords(&entries, remote: remote,
+                                       date: { $0.date },
+                                       isDuplicate: { $0.kind == $1.kind && $0.spoken.lowercased() == $1.spoken.lowercased() })
         if changed { persist() }
     }
 

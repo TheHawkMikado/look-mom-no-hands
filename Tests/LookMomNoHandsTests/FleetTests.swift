@@ -71,6 +71,14 @@ final class FleetTests: XCTestCase {
         XCTAssertNil(FleetService.parseTarget(command: "on the mac mini", peerNames: ["Mac mini"]))
     }
 
+    func testPeerNameThatPrefixesAWordDoesNotHijack() {
+        // A peer named "Mac" must never swallow "on the machine settings…" —
+        // hasPrefix alone dispatched the garbled goal "hine settings…".
+        XCTAssertNil(FleetService.parseTarget(command: "on the machine settings screen, turn off bluetooth",
+                                              peerNames: ["Mac"]))
+        XCTAssertNotNil(FleetService.parseTarget(command: "on the mac, open notes", peerNames: ["Mac"]))
+    }
+
     // MARK: store merge
 
     @MainActor
@@ -81,10 +89,11 @@ final class FleetTests: XCTestCase {
         var local = Procedure(id: "p1", name: "report", steps: "old steps",
                               createdAt: Date(timeIntervalSince1970: 100))
         local.schedule = ProcedureSchedule(hour: 9, minute: 0, weekdays: [2])
-        store.upsert(local)
+        store.upsert(local)   // stamps updatedAt = now
 
         var remote = Procedure(id: "p1", name: "report", steps: "new steps",
-                               createdAt: Date(timeIntervalSince1970: 200))
+                               createdAt: Date(timeIntervalSince1970: 200),
+                               updatedAt: Date().addingTimeInterval(60))
         remote.schedule = ProcedureSchedule(hour: 6, minute: 0, weekdays: [1, 2, 3, 4, 5, 6, 7])
         store.mergeSnapshot([remote])
 
@@ -92,5 +101,33 @@ final class FleetTests: XCTestCase {
         XCTAssertEqual(merged?.steps, "new steps", "newer content wins")
         XCTAssertEqual(merged?.schedule?.hour, 9,
                        "schedules never travel — a synced schedule would fire on every machine at once")
+    }
+
+    @MainActor
+    func testEditedProcedurePropagatesOverItsOwnOriginal() async {
+        // The whole point of updatedAt: an EDIT to an already-synced item must
+        // out-compete the original timestamps, or peers keep stale steps forever.
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let store = ProcedureStore(directory: dir)
+        let created = Date(timeIntervalSince1970: 100)
+        // Peer's copy: synced earlier, never edited there.
+        store.mergeSnapshot([Procedure(id: "p1", name: "report", steps: "v1", createdAt: created)])
+        XCTAssertEqual(store.procedures.first?.steps, "v1")
+        // The originating Mac edits it and re-broadcasts.
+        store.mergeSnapshot([Procedure(id: "p1", name: "report", steps: "v2",
+                                       createdAt: created, updatedAt: Date())])
+        XCTAssertEqual(store.procedures.first?.steps, "v2")
+    }
+
+    @MainActor
+    func testMergeStillDedupesByContentAcrossDifferentIDs() async {
+        var facts: [KnowledgeFact] = [KnowledgeFact(id: "a", text: "I use Brave")]
+        let changed = mergeSyncRecords(&facts,
+                                       remote: [KnowledgeFact(id: "b", text: "i use brave")],
+                                       date: { $0.updatedAt ?? $0.createdAt },
+                                       isDuplicate: { $0.text.lowercased() == $1.text.lowercased() })
+        XCTAssertFalse(changed, "two machines teaching the same fact must not double it")
+        XCTAssertEqual(facts.count, 1)
     }
 }

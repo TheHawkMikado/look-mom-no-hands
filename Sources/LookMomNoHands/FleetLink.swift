@@ -28,12 +28,12 @@ enum FleetIdentity {
             return key
         }
         let key = Curve25519.Signing.PrivateKey()
-        KeychainStore.save(key.rawRepresentation.map { String(format: "%02x", $0) }.joined(), account: account)
+        KeychainStore.save(key.rawRepresentation.hexString, account: account)
         return key
     }
 
     static var publicKeyHex: String {
-        signingKey().publicKey.rawRepresentation.map { String(format: "%02x", $0) }.joined()
+        signingKey().publicKey.rawRepresentation.hexString
     }
 
     static var machineName: String {
@@ -59,7 +59,7 @@ struct FleetEnvelope: Codable {
 
     static func make(type: String, payload: String, key: Curve25519.Signing.PrivateKey,
                      name: String, ts: TimeInterval = Date().timeIntervalSince1970) -> FleetEnvelope? {
-        let from = key.publicKey.rawRepresentation.map { String(format: "%02x", $0) }.joined()
+        let from = key.publicKey.rawRepresentation.hexString
         guard let sig = try? key.signature(for: signedMaterial(type: type, from: from, ts: ts, payload: payload)) else { return nil }
         return FleetEnvelope(type: type, from: from, name: name, ts: ts, payload: payload, sig: sig.base64EncodedString())
     }
@@ -274,6 +274,9 @@ final class FleetService: ObservableObject {
             let n = name.lowercased()
             for prefix in ["on the \(n)", "on \(n)"] {
                 guard lowered.hasPrefix(prefix) else { continue }
+                // A real word boundary, not just a prefix: a peer named "Mac"
+                // must never swallow "on the machine settings screen…".
+                if let next = lowered.dropFirst(prefix.count).first, next.isLetter || next.isNumber { continue }
                 var rest = String(command.dropFirst(prefix.count))
                 rest = rest.trimmingCharacters(in: CharacterSet(charactersIn: " ,:—-"))
                 guard !rest.isEmpty else { return nil }
@@ -291,6 +294,7 @@ final class FleetService: ObservableObject {
             .map { String(decoding: $0, as: UTF8.self) } ?? ""
         if let live = connections[peer.keyHex], live.state == .ready {
             send(type: "goal", payload: payload, over: live)
+            status[peer.keyHex, default: WorkerStatus()].runningGoal = goal
             return true
         }
         // No live link — reconnect through discovery if the worker is visible.
@@ -300,7 +304,13 @@ final class FleetService: ObservableObject {
         connection.start(queue: .main)
         receiveLoop(connection)
         send(type: "goal", payload: payload, over: connection)
+        status[peer.keyHex, default: WorkerStatus()].runningGoal = goal
         return true
+    }
+
+    /// Cheap gate for the sync broadcaster: no ready link, no encoding work.
+    var hasLiveConnections: Bool {
+        connections.values.contains { $0.state == .ready }
     }
 
     /// Phase 7: push a store snapshot to every paired machine (debounced by the

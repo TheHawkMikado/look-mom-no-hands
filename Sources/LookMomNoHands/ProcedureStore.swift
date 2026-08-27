@@ -28,9 +28,11 @@ final class ProcedureStore: ObservableObject {
     /// name is not. Deduped on name so a re-teach updates in place.
     func upsert(_ p: Procedure) {
         guard !p.name.isEmpty else { return }
+        var stamped = p
+        stamped.updatedAt = Date()   // fleet sync compares this; edits must out-date the original
         procedures.removeAll { $0.name.lowercased() == p.name.lowercased() && $0.id != p.id }
-        if let i = procedures.firstIndex(where: { $0.id == p.id }) { procedures[i] = p }
-        else { procedures.insert(p, at: 0) }
+        if let i = procedures.firstIndex(where: { $0.id == p.id }) { procedures[i] = stamped }
+        else { procedures.insert(stamped, at: 0) }
         persist()
     }
 
@@ -39,25 +41,19 @@ final class ProcedureStore: ObservableObject {
         persist()
     }
 
-    /// Fleet sync: id-union, newer createdAt wins — teach a procedure on one
-    /// Mac, run it on any of them. Deletes and schedules stay local: a schedule
-    /// that synced would fire on EVERY machine at once.
+    /// Fleet sync — teach or edit a procedure on one Mac, run it on any of
+    /// them. Schedules never travel (synced, they'd fire on EVERY machine at
+    /// once), and a remote update keeps the local schedule.
     func mergeSnapshot(_ remote: [Procedure]) {
-        var changed = false
-        for var r in remote {
-            r.schedule = nil        // schedules never travel
-            r.lastFiredAt = nil
-            if let i = procedures.firstIndex(where: { $0.id == r.id }) {
-                if r.createdAt > procedures[i].createdAt {
-                    r.schedule = procedures[i].schedule   // keep the local schedule on update
-                    r.lastFiredAt = procedures[i].lastFiredAt
-                    procedures[i] = r
-                    changed = true
-                }
-            } else if !procedures.contains(where: { $0.name.lowercased() == r.name.lowercased() }) {
-                procedures.append(r); changed = true
-            }
+        let localSchedules = Dictionary(uniqueKeysWithValues: procedures.map { ($0.id, ($0.schedule, $0.lastFiredAt)) })
+        let stripped = remote.map { r -> Procedure in
+            var r = r
+            (r.schedule, r.lastFiredAt) = localSchedules[r.id] ?? (nil, nil)
+            return r
         }
+        let changed = mergeSyncRecords(&procedures, remote: stripped,
+                                       date: { $0.updatedAt ?? $0.createdAt },
+                                       isDuplicate: { $0.name.lowercased() == $1.name.lowercased() })
         if changed { persist() }
     }
 

@@ -29,11 +29,6 @@ final class ProcedureScheduler {
         timer = t
     }
 
-    func stop() {
-        timer?.invalidate()
-        timer = nil
-    }
-
     private func tick() {
         guard let coordinator else { return }
         let now = Date()

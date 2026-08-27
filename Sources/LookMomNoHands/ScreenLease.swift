@@ -9,6 +9,14 @@ import Foundation
 final class ScreenLease: ObservableObject {
     static let shared = ScreenLease()
 
+    /// The screen was already held by someone with priority — the run never
+    /// started. Thrown (not returned) so a skipped run can't read as finished
+    /// to any caller.
+    struct Busy: Error {}
+    /// The user took the screen mid-run. Distinct from a real failure so the
+    /// outcome reads "stepped aside" — never "done", never "error".
+    struct Revoked: Error {}
+
     enum Holder: Equatable, Sendable {
         case voice              // the user's live command session
         case scheduled(String)  // a scheduled procedure run, by goal id

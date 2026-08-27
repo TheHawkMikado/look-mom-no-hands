@@ -23,6 +23,7 @@ struct LookMomNoHandsApp: App {
                     AccountBridge.handler = { url in
                         Task { await account.handleAuthCallback(url) }
                     }
+                    AppDelegate.onTerminate = { [weak coordinator] in coordinator?.mcp.shutdown() }
                     Task { await account.syncOnLaunch() }
                 }
                 .onOpenURL { url in AccountBridge.handle(url) }
@@ -101,8 +102,16 @@ enum AccountBridge {
 /// A menu-bar (`LSUIElement`) app still wants a delegate to catch URL opens while
 /// it's already running — the common case, since sign-in happens with the app up.
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    /// Cleanup that must not outlive the app — today: terminating MCP server
+    /// child processes, which otherwise linger as orphans after quit.
+    @MainActor static var onTerminate: (() -> Void)?
+
     func application(_ application: NSApplication, open urls: [URL]) {
         urls.forEach(AccountBridge.handle)
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        MainActor.assumeIsolated { AppDelegate.onTerminate?() }
     }
 }
 
@@ -139,6 +148,19 @@ enum DockPresence {
     }
 }
 
+extension BackgroundAgent.Status {
+    /// The one status→color mapping, next to nothing: the panel and the
+    /// dashboard both read it, so a new case can't diverge between them.
+    var tint: Color {
+        switch self {
+        case .running: return .purple
+        case .waitingApproval: return .orange
+        case .finished(_, let ok): return ok ? .green : .secondary
+        case .failed: return .red
+        }
+    }
+}
+
 /// One background agent in the panel: status dot, live step, and — when it's
 /// asking — the approve/deny pair. Its own view so @ObservedObject tracks the
 /// agent's published status without redrawing the whole panel per log line.
@@ -148,7 +170,7 @@ private struct AgentRow: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 6) {
-                Circle().fill(statusColor).frame(width: 7, height: 7)
+                Circle().fill(agent.status.tint).frame(width: 7, height: 7)
                 Text(agent.name).font(.caption).lineLimit(1)
                 Spacer()
                 if agent.status.isActive {
@@ -171,15 +193,6 @@ private struct AgentRow: View {
             }
         }
         .padding(.leading, 2)
-    }
-
-    private var statusColor: Color {
-        switch agent.status {
-        case .running: return .purple
-        case .waitingApproval: return .orange
-        case .finished(_, let ok): return ok ? .green : .secondary
-        case .failed: return .red
-        }
     }
 }
 

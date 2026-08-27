@@ -72,8 +72,20 @@ export interface Licence {
   mode: string;
 }
 
-/** Idempotent — safe to call from any route, and it means no migration step. */
-export async function ensureSchema() {
+/** Idempotent — safe to call from any route, and it means no migration step.
+ *  Memoized per process: the DDL is ~40 statements, and the polling routes
+ *  (/status feed every 5s, approvals every 6s) would otherwise re-run all of
+ *  it against the catalog on every request forever. */
+let schemaReady: Promise<void> | null = null;
+export function ensureSchema(): Promise<void> {
+  schemaReady ??= ensureSchemaOnce().catch((e) => {
+    schemaReady = null; // a failed attempt must not poison every later request
+    throw e;
+  });
+  return schemaReady;
+}
+
+async function ensureSchemaOnce() {
   const db = sql();
   await db`
     CREATE TABLE IF NOT EXISTS licences (
@@ -642,26 +654,44 @@ export async function recordAgentEvents(
 ) {
   const db = sql();
   const account = email.trim().toLowerCase();
-  for (const e of events) {
-    await db`
-      INSERT INTO agent_events (email, id, kind, title, detail, approval_id, created_at)
-      VALUES (${account}, ${e.id}, ${e.kind}, ${e.title}, ${e.detail},
-              ${e.approvalId}, ${e.createdAt})
-      ON CONFLICT (email, id) DO NOTHING`;
-  }
+  if (events.length === 0) return;
+  // One round trip for the whole batch, not one per event — this runs on every
+  // 8-second flush from every running Mac.
+  const rows = events.map((e) => ({
+    email: account,
+    id: e.id,
+    kind: e.kind,
+    title: e.title,
+    detail: e.detail,
+    approval_id: e.approvalId,
+    created_at: e.createdAt,
+  }));
   await db`
-    DELETE FROM agent_events
-     WHERE email = ${account}
-       AND id NOT IN (SELECT id FROM agent_events WHERE email = ${account}
-                       ORDER BY created_at DESC, id DESC LIMIT ${AGENT_EVENTS_KEPT})`;
+    INSERT INTO agent_events ${db(rows, "email", "id", "kind", "title", "detail", "approval_id", "created_at")}
+    ON CONFLICT (email, id) DO NOTHING`;
+  // Prune only when this batch could actually push the account past the cap —
+  // the count query is cheap (index-only) and skips the sort-heavy DELETE on
+  // the overwhelmingly common under-cap call.
+  const [{ count }] = await db<{ count: string }[]>`
+    SELECT count(*) FROM agent_events WHERE email = ${account}`;
+  if (Number(count) > AGENT_EVENTS_KEPT) {
+    await db`
+      DELETE FROM agent_events
+       WHERE email = ${account}
+         AND id NOT IN (SELECT id FROM agent_events WHERE email = ${account}
+                         ORDER BY created_at DESC, id DESC LIMIT ${AGENT_EVENTS_KEPT})`;
+  }
 }
 
 /** The account's recent agent events, newest first. */
 export async function agentEventsFor(email: string, limit = AGENT_EVENTS_KEPT): Promise<AgentEvent[]> {
   const db = sql();
+  // Writes store email pre-lowercased; comparing the normalized PARAM (not
+  // lower(column)) keeps the (email, created_at) index usable — lower(email)
+  // was a sequential scan on every 5-second poll.
   return db<AgentEvent[]>`
     SELECT id, kind, title, detail, approval_id, created_at
-      FROM agent_events WHERE lower(email) = lower(${email})
+      FROM agent_events WHERE email = ${email.trim().toLowerCase()}
      ORDER BY created_at DESC, id DESC LIMIT ${limit}`;
 }
 
@@ -695,10 +725,11 @@ export async function approvalVerdictsSince(
   since: Date | null,
 ): Promise<ApprovalVerdict[]> {
   const db = sql();
+  // Normalized param, not lower(column) — see agentEventsFor.
   return db<ApprovalVerdict[]>`
     SELECT approval_id, verdict, decided_at
       FROM agent_approvals
-     WHERE lower(email) = lower(${email})
+     WHERE email = ${email.trim().toLowerCase()}
        AND decided_at > ${since ?? new Date(0)}
      ORDER BY decided_at ASC`;
 }

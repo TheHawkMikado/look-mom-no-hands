@@ -16,8 +16,11 @@ export async function GET() {
   if (!session) return NextResponse.json({ error: "Sign in first." }, { status: 401 });
 
   await ensureSchema();
-  const events = await agentEventsFor(session.email);
-  const decided = await approvalVerdictsSince(session.email, null);
+  // Independent reads — don't serialize them on a 5-second poll path.
+  const [events, decided] = await Promise.all([
+    agentEventsFor(session.email),
+    approvalVerdictsSince(session.email, null),
+  ]);
   return NextResponse.json(
     {
       events: events.map((e) => ({

@@ -124,11 +124,16 @@ final class AccountStore: ObservableObject {
         guard let bearer = KeychainStore.load(account: Self.appTokenAccount) else { return }
         let c = CostMeter.shared.controller
         let d = CostMeter.shared.dictation
+        let a = CostMeter.shared.agents
+        // Every CostMeter bucket must appear here, or that spend silently
+        // vanishes from server-side accounting — agents is plausibly the
+        // largest bucket (Opus, long turns).
         let payload: [String: Any] = [
             "device": LicenseStore.deviceID,
             "mode": info?.mode ?? "byok",
             "controller": ["cost": c.cost, "calls": c.calls, "seconds": c.activeSeconds],
             "dictation": ["cost": d.cost, "calls": d.calls, "seconds": d.activeSeconds],
+            "agents": ["cost": a.cost, "calls": a.calls, "seconds": a.activeSeconds],
         ]
         var req = request("api/app/usage", method: "POST", bearer: bearer)
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")

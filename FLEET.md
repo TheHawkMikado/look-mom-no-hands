@@ -36,7 +36,10 @@ locked or headless machine cannot be driven. Per worker, once:
 ## What syncs, what doesn't (the shared brain)
 
 Procedures, vocabulary, knowledge, and agent roles sync to every paired
-machine (id-union, newest wins, debounced ~3s). Deliberately NOT synced:
+machine (id-union, newest wins, debounced ~3s). Edits propagate for
+procedures, roles, and knowledge (each edit is re-stamped); vocabulary
+entries sync as created — edit them on the machine that owns them.
+Deliberately NOT synced:
 
 - **Schedules** — a synced schedule would fire on every machine at once. The
   scheduler DOES fail over: if the local Mac is busy at a slot, the goal is

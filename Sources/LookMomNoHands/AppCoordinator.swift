@@ -327,7 +327,7 @@ final class AppCoordinator: ObservableObject {
         Task { await self.mcp.connectAll() }
         // Remote approvals land exactly where the panel buttons do.
         events.onVerdict = { [weak self] approvalId, approve in
-            BackgroundAgentManager.shared.resolveApproval(approvalId, allow: approve)
+            BackgroundAgentManager.shared.resolveApproval(approvalID: approvalId, allow: approve)
             self?.store.log("agent", "remote verdict: \(approve ? "approved" : "denied")")
         }
         BackgroundAgentManager.shared.onApprovalResolved = { [weak self] id in
@@ -1284,7 +1284,7 @@ final class AppCoordinator: ObservableObject {
                    let (peerName, remoteGoal) = FleetService.parseTarget(command: text, peerNames: self.fleet.peers.peers.map(\.name)) {
                     if self.fleet.dispatch(goal: remoteGoal, toPeerNamed: peerName) {
                         self.store.log("fleet", "dispatched to \(peerName): \(remoteGoal.prefix(120))")
-                        self.events.report(kind: "goal_started", title: peerName, detail: remoteGoal)
+                        self.events.report(kind: .goalStarted, title: peerName, detail: remoteGoal)
                         await self.speak("Sent to \(peerName).", gen: gen)
                     } else {
                         await self.speak("\(peerName) isn't reachable right now.", gen: gen)
@@ -1327,12 +1327,10 @@ final class AppCoordinator: ObservableObject {
     private func runGoal(text: String, gen: Int, seedProgress: [String],
                          holder: ScreenLease.Holder = .voice) async throws {
         guard let claude else { return }
-        // Voice always gets the screen (acquiring revokes a scheduled holder);
-        // a scheduled run only starts on a free screen.
-        guard ScreenLease.shared.acquire(holder) else {
-            store.log("schedule", "screen busy — skipped")
-            return
-        }
+        // Voice always gets the screen (acquiring revokes an automated holder);
+        // an automated run only starts on a free screen — and a refusal THROWS,
+        // because a plain return here once made skipped runs report "done".
+        guard ScreenLease.shared.acquire(holder) else { throw ScreenLease.Busy() }
         defer { ScreenLease.shared.release(holder) }
         var performedAll = seedProgress   // carried across a mid-task clarification
         var complete = false
@@ -1344,9 +1342,10 @@ final class AppCoordinator: ObservableObject {
         var brokeOut = false                    // stopped early (loop/spin/blocked) — already spoke
         while round < Self.maxTaskRounds, !complete {
             try Task.checkCancellation()
-            // A revoked lease is a cancellation, not an error: the user took the
-            // screen and the scheduled run must vanish quietly.
-            if ScreenLease.shared.revoked(holder) { throw CancellationError() }
+            // Typed, not CancellationError, and decided HERE — after runGoal's
+            // defer releases the lease, `revoked()` is true for every exit, so
+            // callers must never consult the lease to classify an outcome.
+            if ScreenLease.shared.revoked(holder) { throw ScreenLease.Revoked() }
             phase = .thinking
             // A fresh speculative snapshot (taken while the user was still talking)
             // saves the whole AX walk on round 0 — the parse starts immediately.
@@ -1583,17 +1582,25 @@ final class AppCoordinator: ObservableObject {
         // scheduled run: same loop, revocable lease, local user always wins.
         fleet.onRemoteGoal = { [weak self] text, goalID, reply in
             guard let self else { return }
-            guard !self.processing, !self.demonstrating else { reply("goal_failed", "this Mac is mid-task"); return }
+            // scheduledTask is the single automated-run slot; overwriting a live
+            // one would orphan its only cancellation handle.
+            guard !self.processing, !self.demonstrating, self.scheduledTask == nil else {
+                reply("goal_failed", "this Mac is mid-task"); return
+            }
             guard self.claude != nil else { reply("goal_failed", "no API key on this machine"); return }
             self.store.log("fleet", "remote goal: \(text.prefix(120))")
             reply("goal_progress", "started")
             self.scheduledTask = Task {
+                defer { self.scheduledTask = nil }
                 do {
                     try await self.runGoal(text: text, gen: self.runGeneration, seedProgress: [], holder: .remote(goalID))
                     self.store.log("fleet", "remote goal done")
                     reply("goal_done", "finished")
+                } catch is ScreenLease.Busy {
+                    self.store.log("fleet", "remote goal refused — screen was busy")
+                    reply("goal_failed", "the screen was busy — nothing ran")
                 } catch {
-                    let preempted = ScreenLease.shared.revoked(.remote(goalID))
+                    let preempted = error is ScreenLease.Revoked || error is CancellationError
                     self.store.log("fleet", "remote goal stopped: \(preempted ? "local user took the screen" : "\(error)")")
                     reply("goal_failed", preempted ? "the local user took the screen" : "\(error)")
                 }
@@ -1604,7 +1611,9 @@ final class AppCoordinator: ObservableObject {
         fleet.onWorkerEvent = { [weak self] peerName, kind, detail in
             guard let self else { return }
             self.store.log("fleet", "\(peerName): \(kind) \(detail.prefix(120))")
-            self.events.report(kind: kind == "goal_progress" ? "goal_progress" : kind,
+            // Wire kinds map through the shared enum; an unknown kind from a
+            // newer peer degrades to progress instead of vanishing server-side.
+            self.events.report(kind: AgentEventKind(rawValue: kind) ?? .goalProgress,
                                title: peerName, detail: detail)
             if kind == "goal_done" {
                 Task { await self.speak("\(peerName) finished its task.", gen: self.runGeneration) }
@@ -1641,6 +1650,9 @@ final class AppCoordinator: ObservableObject {
     }
 
     private func broadcastStores() {
+        // Encoding four stores on the main actor is pure waste on the (typical)
+        // machine that has never paired — bail before any work, not after.
+        guard fleet.hasLiveConnections else { return }
         let encoder = JSONEncoder()
         func json<T: Encodable>(_ value: T) -> String? {
             (try? encoder.encode(value)).map { String(decoding: $0, as: UTF8.self) }
@@ -1659,13 +1671,16 @@ final class AppCoordinator: ObservableObject {
     /// is already stamped fired, so a busy 9:00 skips to tomorrow rather than
     /// stalking the user all morning.
     func runScheduledProcedure(_ p: Procedure) {
-        guard !processing, !demonstrating, scheduledTask?.isCancelled != false else {
+        // scheduledTask == nil, not isCancelled: a COMPLETED task isn't busy.
+        // (The old isCancelled check locked out every slot after the first
+        // successful run — the task object outlives its work.)
+        guard !processing, !demonstrating, scheduledTask == nil else {
             // Busy here doesn't have to mean skipped: an idle paired worker can
             // take the slot — the fleet version of "runs while you sleep".
             if let idle = fleet.peers.peers.first(where: { fleet.status[$0.keyHex]?.online == true && fleet.status[$0.keyHex]?.runningGoal == nil }),
                fleet.dispatch(goal: p.triggers.first ?? p.name, toPeerNamed: idle.name) {
                 store.log("schedule", "\(p.name): this Mac is busy — sent to \(idle.name)")
-                events.report(kind: "goal_started", title: idle.name, detail: "scheduled: \(p.name)")
+                events.report(kind: .goalStarted, title: idle.name, detail: "scheduled: \(p.name)")
                 return
             }
             store.log("schedule", "skipped \(p.name) — a session is active")
@@ -1684,18 +1699,22 @@ final class AppCoordinator: ObservableObject {
         let gen = runGeneration
         let command = p.triggers.first ?? p.name
         store.log("schedule", "running \(p.name)")
-        events.report(kind: "goal_started", title: p.name, detail: "scheduled run")
+        events.report(kind: .goalStarted, title: p.name, detail: "scheduled run")
         scheduledTask = Task {
+            defer { self.scheduledTask = nil }
             do {
                 try await self.runGoal(text: command, gen: gen, seedProgress: [], holder: .scheduled(p.id))
                 self.store.log("schedule", "finished \(p.name)")
-                self.events.report(kind: "goal_done", title: p.name, detail: "scheduled run finished")
+                self.events.report(kind: .goalDone, title: p.name, detail: "scheduled run finished")
                 await self.speak("Your scheduled task \(p.name) is done.", gen: self.runGeneration)
+            } catch is ScreenLease.Busy {
+                self.store.log("schedule", "\(p.name) skipped — the screen was busy")
+                self.events.report(kind: .goalFailed, title: p.name, detail: "skipped — the screen was busy")
             } catch {
-                let preempted = Task.isCancelled || ScreenLease.shared.revoked(.scheduled(p.id))
+                let preempted = error is ScreenLease.Revoked || error is CancellationError || Task.isCancelled
                 self.store.log("schedule", preempted ? "\(p.name) stepped aside — you took the screen"
                                                      : "\(p.name) failed: \(error)")
-                self.events.report(kind: preempted ? "goal_done" : "goal_failed", title: p.name,
+                self.events.report(kind: preempted ? .goalDone : .goalFailed, title: p.name,
                                    detail: preempted ? "stepped aside — you took the screen" : "\(error)")
             }
         }
@@ -1716,29 +1735,32 @@ final class AppCoordinator: ObservableObject {
                                                          role: agentRoles.match(goal: goal)) { [weak self] agent, event in
             guard let self else { return }
             switch event {
-            case .needsApproval(let command):
+            case .needsApproval(let command, let approvalID):
                 self.store.log("agent", "\(agent.name) wants to run: \(command)")
-                self.events.report(kind: "needs_approval", title: agent.name,
-                                   detail: "wants to run: \(command)", approvalId: agent.id)
+                self.events.report(kind: .needsApproval, title: agent.name,
+                                   detail: "wants to run: \(command)", approvalId: approvalID)
                 Task { await self.speak("\(agent.name) wants to run a command that \(BackgroundAgent.approvalReason(command) ?? "needs your OK"). Approve it from the panel.", gen: self.runGeneration) }
             case .finished(let summary, let success):
                 self.store.log("agent", "\(agent.name) \(success ? "finished" : "stopped"): \(summary.prefix(200))")
-                self.events.report(kind: success ? "goal_done" : "goal_failed", title: agent.name, detail: summary)
+                self.events.report(kind: success ? .goalDone : .goalFailed, title: agent.name, detail: summary)
                 Task { await self.speak("\(agent.name) \(success ? "is done" : "stopped"). \(summary)", gen: self.runGeneration) }
             case .failed(let message):
                 guard message != "cancelled" else {
+                    // Quiet locally (the user did the cancelling) but still a
+                    // terminal event remotely — /status must not show a ghost.
                     self.store.log("agent", "\(agent.name) cancelled")
+                    self.events.report(kind: .goalFailed, title: agent.name, detail: "cancelled by you")
                     return
                 }
                 self.store.log("agent", "\(agent.name) failed: \(message.prefix(200))")
-                self.events.report(kind: "goal_failed", title: agent.name, detail: message)
+                self.events.report(kind: .goalFailed, title: agent.name, detail: message)
                 Task { await self.speak("\(agent.name) hit an error and stopped.", gen: self.runGeneration) }
             }
         }
         switch result {
         case .success(let agent):
             store.log("agent", "spawned \(agent.name): \(goal.prefix(160))")
-            events.report(kind: "goal_started", title: agent.name, detail: goal)
+            events.report(kind: .goalStarted, title: agent.name, detail: goal)
             Task { await self.speak("Started \(agent.name) in the background. I'll tell you when it's done.", gen: gen) }
         case .failure(let error):
             store.log("agent", "spawn refused: \(error)")

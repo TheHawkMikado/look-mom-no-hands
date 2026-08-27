@@ -11,12 +11,16 @@ struct AgentRole: Codable, Identifiable, Sendable, Equatable {
     var name: String
     var instructions: String
     let createdAt: Date
+    /// Stamped on every upsert; fleet sync compares this so edits propagate.
+    var updatedAt: Date?
 
-    init(id: String = UUID().uuidString, name: String, instructions: String, createdAt: Date = Date()) {
+    init(id: String = UUID().uuidString, name: String, instructions: String,
+         createdAt: Date = Date(), updatedAt: Date? = nil) {
         self.id = id
         self.name = name.trimmingCharacters(in: .whitespacesAndNewlines)
         self.instructions = instructions
         self.createdAt = createdAt
+        self.updatedAt = updatedAt
     }
 }
 
@@ -34,9 +38,11 @@ final class AgentRoleStore: ObservableObject {
 
     func upsert(_ role: AgentRole) {
         guard !role.name.isEmpty else { return }
+        var stamped = role
+        stamped.updatedAt = Date()   // fleet sync compares this; edits must out-date the original
         roles.removeAll { $0.name.lowercased() == role.name.lowercased() && $0.id != role.id }
-        if let i = roles.firstIndex(where: { $0.id == role.id }) { roles[i] = role }
-        else { roles.insert(role, at: 0) }
+        if let i = roles.firstIndex(where: { $0.id == role.id }) { roles[i] = stamped }
+        else { roles.insert(stamped, at: 0) }
         persist()
     }
 
@@ -45,16 +51,11 @@ final class AgentRoleStore: ObservableObject {
         persist()
     }
 
-    /// Fleet sync: id-union, newer createdAt wins; deletes stay local.
+    /// Fleet sync; semantics live in mergeSyncRecords, shared by all stores.
     func mergeSnapshot(_ remote: [AgentRole]) {
-        var changed = false
-        for r in remote {
-            if let i = roles.firstIndex(where: { $0.id == r.id }) {
-                if r.createdAt > roles[i].createdAt { roles[i] = r; changed = true }
-            } else if !roles.contains(where: { $0.name.lowercased() == r.name.lowercased() }) {
-                roles.append(r); changed = true
-            }
-        }
+        let changed = mergeSyncRecords(&roles, remote: remote,
+                                       date: { $0.updatedAt ?? $0.createdAt },
+                                       isDuplicate: { $0.name.lowercased() == $1.name.lowercased() })
         if changed { persist() }
     }
 

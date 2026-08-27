@@ -691,7 +691,7 @@ private struct AgentRunCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 8) {
-                Circle().fill(color).frame(width: 8, height: 8)
+                Circle().fill(agent.status.tint).frame(width: 8, height: 8)
                 Text(agent.name).font(.callout.bold())
                 Text(agent.startedAt, style: .relative).font(.caption2).foregroundStyle(.secondary)
                 Spacer()
@@ -731,15 +731,6 @@ private struct AgentRunCard: View {
         }
         .padding(10)
         .background(RoundedRectangle(cornerRadius: 8).fill(Color.primary.opacity(0.03)))
-    }
-
-    private var color: Color {
-        switch agent.status {
-        case .running: return .purple
-        case .waitingApproval: return .orange
-        case .finished(_, let ok): return ok ? .green : .secondary
-        case .failed: return .red
-        }
     }
 }
 
@@ -905,7 +896,9 @@ private struct ProceduresTab: View {
         p.name = name.trimmingCharacters(in: .whitespacesAndNewlines)
         p.triggers = triggers.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
         p.steps = steps
-        if scheduleOn {
+        // Toggle on with zero weekdays = a schedule that can never fire but
+        // still shows a clock badge — treat it as "off", not as a lie.
+        if scheduleOn, !scheduleDays.isEmpty {
             let parts = Calendar.current.dateComponents([.hour, .minute], from: scheduleTime)
             p.schedule = ProcedureSchedule(hour: parts.hour ?? 9, minute: parts.minute ?? 0, weekdays: scheduleDays)
         } else {

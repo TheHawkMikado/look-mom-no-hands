@@ -215,12 +215,37 @@ struct KnowledgeFact: Codable, Identifiable, Sendable, Equatable {
     let id: String
     var text: String
     let createdAt: Date
+    /// Stamped on every edit — fleet sync compares this (falling back to
+    /// createdAt), so an edited fact propagates instead of losing to its own
+    /// original timestamp.
+    var updatedAt: Date?
 
-    init(id: String = UUID().uuidString, text: String, createdAt: Date = Date()) {
+    init(id: String = UUID().uuidString, text: String, createdAt: Date = Date(), updatedAt: Date? = nil) {
         self.id = id
         self.text = text.trimmingCharacters(in: .whitespacesAndNewlines)
         self.createdAt = createdAt
+        self.updatedAt = updatedAt
     }
+}
+
+/// Fleet-sync merge, the ONE implementation of "id-union, newest wins, deletes
+/// stay local": four stores share this so the semantics can't drift per copy.
+/// `date` should prefer updatedAt over createdAt where the record has one, or
+/// edits will never out-compete their own original. `isDuplicate` blocks a
+/// remote record whose *content* already exists locally under a different id
+/// (two machines teaching the same fact independently).
+func mergeSyncRecords<T: Identifiable>(_ local: inout [T], remote: [T],
+                                       date: (T) -> Date,
+                                       isDuplicate: (T, T) -> Bool) -> Bool {
+    var changed = false
+    for r in remote {
+        if let i = local.firstIndex(where: { $0.id == r.id }) {
+            if date(r) > date(local[i]) { local[i] = r; changed = true }
+        } else if !local.contains(where: { isDuplicate($0, r) }) {
+            local.append(r); changed = true
+        }
+    }
+    return changed
 }
 
 /// A task the user has taught the assistant how to do ("here's how I create a new
@@ -237,9 +262,12 @@ struct Procedure: Codable, Identifiable, Sendable, Equatable {
     /// drift out of sync with it.
     var schedule: ProcedureSchedule?
     var lastFiredAt: Date?
+    /// Stamped on every upsert; fleet sync compares this so edits propagate.
+    var updatedAt: Date?
 
     init(id: String = UUID().uuidString, name: String, triggers: [String] = [], steps: String,
-         createdAt: Date = Date(), schedule: ProcedureSchedule? = nil, lastFiredAt: Date? = nil) {
+         createdAt: Date = Date(), schedule: ProcedureSchedule? = nil, lastFiredAt: Date? = nil,
+         updatedAt: Date? = nil) {
         self.id = id
         self.name = name.trimmingCharacters(in: .whitespacesAndNewlines)
         self.triggers = triggers.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
@@ -247,6 +275,7 @@ struct Procedure: Codable, Identifiable, Sendable, Equatable {
         self.createdAt = createdAt
         self.schedule = schedule
         self.lastFiredAt = lastFiredAt
+        self.updatedAt = updatedAt
     }
 }
 

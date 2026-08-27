@@ -203,4 +203,10 @@ extension Data {
         }
         self = out
     }
+
+    /// Lowercase hex, the inverse of `init?(hex:)`. Fleet identity strings must
+    /// byte-match across encode sites, so there is exactly one encoder.
+    var hexString: String {
+        map { String(format: "%02x", $0) }.joined()
+    }
 }

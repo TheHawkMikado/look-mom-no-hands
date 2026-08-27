@@ -190,11 +190,10 @@ actor MCPConnection {
         guard alive else { throw MCPError.closed }
         let id = nextID
         nextID += 1
-        try send(["jsonrpc": "2.0", "id": id, "method": method, "params": params])
         return try await withThrowingTaskGroup(of: [String: Any].self) { group in
             group.addTask {
                 try await withCheckedThrowingContinuation { cont in
-                    Task { await self.registerPending(id: id, cont) }
+                    Task { await self.beginRequest(id: id, method: method, params: params, cont) }
                 }
             }
             group.addTask {
@@ -208,9 +207,16 @@ actor MCPConnection {
         }
     }
 
-    private func registerPending(id: Int, _ cont: CheckedContinuation<[String: Any], Error>) {
+    /// Register THEN write, in one actor-isolated step: a stdio server can
+    /// answer in microseconds, and a reply that races an unregistered
+    /// continuation would be dropped — leaving the caller to "time out" on a
+    /// tool whose side effect actually ran.
+    private func beginRequest(id: Int, method: String, params: [String: Any],
+                              _ cont: CheckedContinuation<[String: Any], Error>) {
         guard alive else { cont.resume(throwing: MCPError.closed); return }
         pending[id] = cont
+        do { try send(["jsonrpc": "2.0", "id": id, "method": method, "params": params]) }
+        catch { failPending(id: id, with: error) }
     }
 
     private func failPending(id: Int, with error: Error) {
@@ -220,7 +226,10 @@ actor MCPConnection {
     private func send(_ object: [String: Any]) throws {
         var data = try JSONSerialization.data(withJSONObject: object)
         data.append(0x0A)
-        stdinPipe.fileHandleForWriting.write(data)
+        // write(contentsOf:) throws on a broken pipe; the legacy write(_:)
+        // raises an ObjC exception Swift can't catch — a dead npx child would
+        // crash the whole app instead of surfacing "server exited".
+        try stdinPipe.fileHandleForWriting.write(contentsOf: data)
     }
 
     private func receive(_ data: Data) {

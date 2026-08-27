@@ -28,20 +28,15 @@ final class KnowledgeStore: ObservableObject {
     func update(_ id: String, text: String) {
         guard let i = facts.firstIndex(where: { $0.id == id }) else { return }
         facts[i].text = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        facts[i].updatedAt = Date()   // fleet sync compares this; edits must out-date the original
         persist()
     }
 
-    /// Fleet sync: id-union, newer createdAt wins. Deletes stay local — a
-    /// missing remote id means "they don't have it yet", not "they deleted it".
+    /// Fleet sync; semantics live in mergeSyncRecords, shared by all stores.
     func mergeSnapshot(_ remote: [KnowledgeFact]) {
-        var changed = false
-        for r in remote {
-            if let i = facts.firstIndex(where: { $0.id == r.id }) {
-                if r.createdAt > facts[i].createdAt { facts[i] = r; changed = true }
-            } else if !facts.contains(where: { $0.text.lowercased() == r.text.lowercased() }) {
-                facts.append(r); changed = true
-            }
-        }
+        let changed = mergeSyncRecords(&facts, remote: remote,
+                                       date: { $0.updatedAt ?? $0.createdAt },
+                                       isDuplicate: { $0.text.lowercased() == $1.text.lowercased() })
         if changed { persist() }
     }
 

@@ -35,7 +35,7 @@ final class BackgroundAgent: ObservableObject, Identifiable {
 
     /// Agent events the coordinator narrates. Everything else stays in the log.
     enum Event {
-        case needsApproval(command: String)
+        case needsApproval(command: String, approvalID: String)
         case finished(summary: String, success: Bool)
         case failed(String)
     }
@@ -52,6 +52,11 @@ final class BackgroundAgent: ObservableObject, Identifiable {
     private let claude: ClaudeClient
     private var loop: Task<Void, Never>?
     private var approvalContinuation: CheckedContinuation<Bool, Never>?
+    /// Unique per ASK, not per agent: the web's agent_approvals PK is
+    /// (account, approvalId) with first-decision-wins, so reusing one id across
+    /// two different commands would make the second undecidable remotely — and
+    /// worse, let the first command's stale verdict silently answer the second.
+    private(set) var currentApprovalID: String?
 
     /// Turn cap: a stuck agent burning Opus tokens in a loop is worse than a
     /// task that stops early and says so.
@@ -85,6 +90,10 @@ final class BackgroundAgent: ObservableObject, Identifiable {
         loop?.cancel()
         guard status.isActive else { return }
         status = .failed("cancelled")
+        // Cancelled is still a terminal outcome the outside world must hear:
+        // without it the phone's pending-approval card and the reporter's
+        // verdict polling would both wait forever for an agent that's gone.
+        onEvent?(self, .failed("cancelled"))
     }
 
     /// The user's verdict on a pending destructive command.
@@ -156,9 +165,12 @@ final class BackgroundAgent: ObservableObject, Identifiable {
             }
             if let reason = Self.approvalReason(command) {
                 log("needs approval (\(reason)): \(command)")
+                let approvalID = UUID().uuidString
+                currentApprovalID = approvalID
                 status = .waitingApproval(command: command)
-                onEvent?(self, .needsApproval(command: command))
+                onEvent?(self, .needsApproval(command: command, approvalID: approvalID))
                 let allowed = await withCheckedContinuation { approvalContinuation = $0 }
+                currentApprovalID = nil
                 guard allowed else {
                     log("denied by user: \(command)")
                     return "The user declined this command. Continue without it or finish and explain what's blocked."
@@ -345,15 +357,31 @@ final class BackgroundAgentManager: ObservableObject {
     }
 
     func cancel(_ id: String) {
-        agents.first { $0.id == id }?.cancel()
+        guard let agent = agents.first(where: { $0.id == id }) else { return }
+        // Capture BEFORE cancel clears it: the reporter must stop polling for
+        // an approval whose agent no longer exists.
+        let pendingApproval = agent.currentApprovalID
+        agent.cancel()
+        if let pendingApproval { onApprovalResolved?(pendingApproval) }
     }
 
-    /// Fired however an approval gets answered — panel button, dashboard, or a
-    /// remote verdict — so the reporter can stop polling for it.
+    /// Fired however an approval gets answered — panel button, dashboard,
+    /// remote verdict, or the agent being cancelled mid-ask — so the reporter
+    /// can stop polling for it. Carries the APPROVAL id, not the agent id.
     var onApprovalResolved: ((String) -> Void)?
 
-    func resolveApproval(_ id: String, allow: Bool) {
-        agents.first { $0.id == id }?.resolveApproval(allow: allow)
-        onApprovalResolved?(id)
+    /// UI entry point (panel/dashboard buttons address the agent).
+    func resolveApproval(_ agentID: String, allow: Bool) {
+        guard let agent = agents.first(where: { $0.id == agentID }) else { return }
+        let approvalID = agent.currentApprovalID
+        agent.resolveApproval(allow: allow)
+        if let approvalID { onApprovalResolved?(approvalID) }
+    }
+
+    /// Remote entry point (verdicts from the phone address the ask itself).
+    func resolveApproval(approvalID: String, allow: Bool) {
+        guard let agent = agents.first(where: { $0.currentApprovalID == approvalID }) else { return }
+        agent.resolveApproval(allow: allow)
+        onApprovalResolved?(approvalID)
     }
 }
