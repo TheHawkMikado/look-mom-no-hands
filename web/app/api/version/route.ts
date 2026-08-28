@@ -30,6 +30,16 @@ export async function GET() {
     download_url:
       process.env.NEXT_PUBLIC_DOWNLOAD_URL ??
       "https://github.com/TheHawkMikado/look-mom-no-hands/releases/latest",
+    // Direct DMG asset for the in-app one-click updater. Computed from the
+    // version because the release script's asset naming is frozen
+    // (LookMaNoHands-<version>.dmg under tag v<version>); override with
+    // LATEST_APP_DMG_URL if hosting ever moves. Absent (null) on old manifests
+    // → the app falls back to the download page.
+    dmg_url:
+      process.env.LATEST_APP_DMG_URL ??
+      (process.env.LATEST_APP_VERSION
+        ? `https://github.com/TheHawkMikado/look-mom-no-hands/releases/download/v${process.env.LATEST_APP_VERSION}/LookMaNoHands-${process.env.LATEST_APP_VERSION}.dmg`
+        : null),
     // Optional human-readable "what's new", shown under the nudge. Blank is fine.
     notes: process.env.LATEST_APP_NOTES ?? "",
     // The oldest version still allowed to run. Lets you force an upgrade if a

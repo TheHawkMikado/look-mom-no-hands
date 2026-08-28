@@ -58,10 +58,13 @@ die() { echo "✗ $*" >&2; exit 1; }
 
 [ -n "${MARKETING}" ] || die "no version given (e.g. ./Scripts/release.sh 0.02)"
 
-# Accept a bare marketing version ("0.02") or a full one ("0.02.260730") so a
-# re-run of a printed command does the same thing rather than double-stamping.
-if [[ "${MARKETING}" =~ ^([0-9]+\.[0-9]+)\.([0-9]{6})$ ]]; then
+# Accept a bare marketing version ("0.02"), a full one ("0.02.260730"), or a
+# same-day respin ("0.03.260828.1") so a re-run of a printed command does the
+# same thing rather than double-stamping.
+EXPLICIT_REV=""
+if [[ "${MARKETING}" =~ ^([0-9]+\.[0-9]+)\.([0-9]{6})(\.[0-9]+)?$ ]]; then
     DATESTAMP="${BASH_REMATCH[2]}"
+    EXPLICIT_REV="${BASH_REMATCH[3]}"
     MARKETING="${BASH_REMATCH[1]}"
 fi
 
@@ -69,7 +72,7 @@ fi
     || die "marketing version must look like 0.02 — the app compares components numerically, so anything non-numeric silently reads as 0"
 [[ "${DATESTAMP}" =~ ^[0-9]{6}$ ]] || die "--date must be YYMMDD, got '${DATESTAMP}'"
 
-VERSION="${MARKETING}.${DATESTAMP}"
+VERSION="${MARKETING}.${DATESTAMP}${EXPLICIT_REV}"
 
 # --- preflight -------------------------------------------------------------
 # A release is a public artefact; refuse to cut one from a state you can't
@@ -86,7 +89,17 @@ git fetch origin --quiet
 [ "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)" ] \
     || die "local main and origin/main differ — pull/push first (this is exactly the drift that leaves a release un-cut)"
 
-git rev-parse "v${VERSION}" >/dev/null 2>&1 && die "tag v${VERSION} already exists"
+# Same-day respins: a colliding version gains a .1/.2/… ordinal instead of
+# burning a marketing number (0.03.260828 → 0.03.260828.1). The comparators on
+# both sides pad the missing component with zero, so the respin reads newer.
+RESPIN_BASE="${VERSION}"
+RESPIN=0
+while git rev-parse "v${VERSION}" >/dev/null 2>&1; do
+    RESPIN=$(( RESPIN + 1 ))
+    [ ${RESPIN} -le 9 ] || die "nine respins of ${RESPIN_BASE} in one day — stop and look at why"
+    VERSION="${RESPIN_BASE}.${RESPIN}"
+    echo "  v${RESPIN_BASE} already exists — this respin becomes v${VERSION}"
+done
 
 CURRENT="$(/usr/libexec/PlistBuddy -c 'Print CFBundleShortVersionString' App/Info.plist)"
 

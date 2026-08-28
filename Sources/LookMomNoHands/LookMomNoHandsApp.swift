@@ -202,6 +202,7 @@ struct PanelView: View {
     @ObservedObject var account: AccountStore
     @ObservedObject var updates: UpdateChecker
     @ObservedObject private var agentManager = BackgroundAgentManager.shared
+    @ObservedObject private var updater = AppUpdater.shared
     @Environment(\.openWindow) private var openWindow
     @State private var showAccount = false
     @State private var launchAtLogin = LoginItem.isEnabled
@@ -362,8 +363,28 @@ struct PanelView: View {
                                    : "Update available — v\(version)")
                         .font(.callout.weight(.medium))
                     Spacer()
-                    Button("Get it") { NSWorkspace.shared.open(url) }
-                        .font(.caption)
+                    if updater.phase.busy {
+                        ProgressView().controlSize(.small)
+                    } else if let dmg = updates.dmgURL {
+                        // One deliberate click; the app does the rest (download,
+                        // verify it's ours, swap, relaunch). Never silent.
+                        Button("Update now") { updater.install(fromDMG: dmg) }
+                            .font(.caption)
+                    } else {
+                        Button("Get it") { NSWorkspace.shared.open(url) }
+                            .font(.caption)
+                    }
+                }
+                if updater.phase.busy || updater.phase != .idle {
+                    Text(updater.phase.label).font(.caption2).foregroundStyle(.secondary)
+                }
+                if case .failed = updater.phase {
+                    // Self-update failed — the old manual path is the fallback.
+                    HStack(spacing: 8) {
+                        Button("Download in browser") { NSWorkspace.shared.open(url) }
+                        Button("Dismiss") { updater.dismissFailure() }
+                    }
+                    .font(.caption2)
                 }
                 if !notes.isEmpty {
                     Text(notes).font(.caption2).foregroundStyle(.secondary)

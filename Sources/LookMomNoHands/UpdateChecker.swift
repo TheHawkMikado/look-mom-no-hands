@@ -50,6 +50,9 @@ final class UpdateChecker: ObservableObject {
     /// Set only by a forced check, so the confirmation appears when a human asked
     /// and never as a side effect of the launch poll.
     @Published private(set) var manualResult: ManualResult?
+    /// Direct DMG asset of the latest release, when the manifest carries one —
+    /// what the in-app one-click updater downloads. nil = fall back to the page.
+    @Published private(set) var dmgURL: URL?
 
     /// The running build, for display next to the check button.
     var currentVersion: String { current }
@@ -99,6 +102,9 @@ final class UpdateChecker: ObservableObject {
         UserDefaults.standard.set(Date(), forKey: lastCheckKey)
 
         let url = URL(string: manifest.downloadURL) ?? AppLinks.download
+        // Direct DMG asset for the one-click in-app update; the page URL stays
+        // the fallback for older manifests and for a failed self-update.
+        dmgURL = manifest.dmgURL.flatMap(URL.init(string:))
         if Self.compare(current, isLessThan: manifest.minimumVersion) {
             status = .required(version: manifest.version, url: url, notes: manifest.notes)
         } else if Self.compare(current, isLessThan: manifest.version) {
@@ -133,12 +139,16 @@ final class UpdateChecker: ObservableObject {
         let downloadURL: String
         let notes: String
         let minimumVersion: String
+        /// Optional so a pre-dmg_url manifest still decodes (fails open to the
+        /// download page, exactly the old behavior).
+        let dmgURL: String?
 
         enum CodingKeys: String, CodingKey {
             case version
             case downloadURL = "download_url"
             case notes
             case minimumVersion = "minimum_version"
+            case dmgURL = "dmg_url"
         }
     }
 }
