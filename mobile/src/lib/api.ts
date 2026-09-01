@@ -76,14 +76,38 @@ export function submitGoal(text: string): Promise<{ ok: true; id: string }> {
   });
 }
 
-export function getFeed(): Promise<FeedResponse> {
-  return request("/api/app/feed");
+let feedEtag: string | null = null;
+
+/**
+ * The feed, or null when the server says nothing changed (ETag 304) — which is
+ * most polls on an idle Mac, and turns ~100KB of repeated JSON into a header
+ * exchange twelve times a minute.
+ */
+export async function getFeed(): Promise<FeedResponse | null> {
+  const res = await fetch(`${SERVER_URL}/api/app/feed`, {
+    headers: {
+      ...(bearerToken ? { Authorization: `Bearer ${bearerToken}` } : {}),
+      ...(feedEtag ? { "If-None-Match": feedEtag } : {}),
+    },
+  });
+  if (res.status === 304) return null;
+  if (res.status === 401) {
+    unauthorizedHandler?.();
+    throw new ApiError("Signed out", 401);
+  }
+  if (!res.ok) throw new ApiError(`GET /api/app/feed failed`, res.status);
+  feedEtag = res.headers.get("etag");
+  return (await res.json()) as FeedResponse;
 }
 
+/**
+ * `recorded: false` means someone else decided first (first decision wins
+ * server-side) — the caller must NOT show this verdict as the outcome.
+ */
 export function decideApproval(
   approvalId: string,
   verdict: Verdict,
-): Promise<{ ok: true }> {
+): Promise<{ ok: true; recorded: boolean }> {
   return request("/api/app/approvals/decide", {
     method: "POST",
     body: JSON.stringify({ approvalId, verdict }),

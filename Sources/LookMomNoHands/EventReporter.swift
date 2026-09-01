@@ -72,12 +72,23 @@ final class EventReporter {
     private var lastBearerMiss: Date?
     private func bearer() -> String? {
         if let cachedBearer { return cachedBearer }
-        // A signed-out Mac must not pay a securityd IPC on every 10s tick;
-        // 60s keeps the post-sign-in pickup delay barely noticeable.
-        if let miss = lastBearerMiss, Date().timeIntervalSince(miss) < 60 { return nil }
+        // A signed-out Mac must not pay a securityd IPC on every 10s tick. The
+        // long negative cache is safe ONLY because authDidChange() clears it —
+        // an uninvalidated version of this cache silently dropped every event
+        // (including approval asks) for a minute after each sign-in.
+        if let miss = lastBearerMiss, Date().timeIntervalSince(miss) < 600 { return nil }
         cachedBearer = KeychainStore.load(account: AccountStore.appTokenAccount)
         lastBearerMiss = cachedBearer == nil ? Date() : nil
         return cachedBearer
+    }
+
+    /// Sign-in/sign-out happened: forget everything we think we know about the
+    /// token. Sign-out must also drop the in-memory copy — a Mac holding a
+    /// stale cached bearer would keep taking and RUNNING phone goals for an
+    /// account the user just disconnected.
+    func authDidChange() {
+        cachedBearer = nil
+        lastBearerMiss = nil
     }
 
     func report(kind: AgentEventKind, title: String, detail: String = "", approvalId: String? = nil) {

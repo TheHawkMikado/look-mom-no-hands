@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Voice, {
   SpeechErrorEvent,
   SpeechResultsEvent,
@@ -10,23 +10,11 @@ interface SpeechCallbacks {
 }
 
 /**
- * Thin lifecycle wrapper around @react-native-voice/voice.
- *
- * Both platforms end recognition sessions on their own (iOS caps at about a
- * minute, Android stops after a silence timeout), so in continuous mode we
- * restart the engine whenever it reports end/error. Callbacks are kept in a
- * ref so the native listeners are registered exactly once.
- *
- * NOTE: @react-native-voice/voice needs a dev build (expo prebuild / EAS) —
- * it is not available in Expo Go.
- *
- * TODO(dev-build): background listening for locked mode.
- * - iOS: UIBackgroundModes ["audio"] is declared, but SFSpeechRecognizer is
- *   still suspended in the background unless an AVAudioSession is kept active
- *   (native module or config-plugin work).
- * - Android: start a microphone foreground service (persistent notification)
- *   when locked mode begins; the FOREGROUND_SERVICE(_MICROPHONE) permissions
- *   are declared in app.json but no service exists yet.
+ * Lifecycle wrapper around @react-native-voice/voice: both platforms end
+ * recognition sessions on their own (iOS ~1min cap, Android silence timeout),
+ * so continuous mode restarts the engine on end/error. Needs a dev build, not
+ * Expo Go; locked-mode BACKGROUND survival needs native work on both
+ * platforms — the per-platform specifics live in mobile/README.md.
  */
 export function useSpeechRecognition(callbacks: SpeechCallbacks) {
   const callbacksRef = useRef(callbacks);
@@ -92,16 +80,13 @@ export function useSpeechRecognition(callbacks: SpeechCallbacks) {
     [startEngine],
   );
 
-  /** Flip an already-running session into continuous (locked) mode. */
-  const setContinuous = useCallback((value: boolean) => {
-    continuousRef.current = value;
-  }, []);
-
   const stop = useCallback(async () => {
     continuousRef.current = false;
     if (restartTimerRef.current) clearTimeout(restartTimerRef.current);
     await Voice.stop().catch(() => undefined);
   }, []);
 
-  return { start, stop, setContinuous, error };
+  // Stable identity: consumers put this in dep arrays, and a fresh object per
+  // render would silently defeat every useCallback built on top of it.
+  return useMemo(() => ({ start, stop, error }), [start, stop, error]);
 }

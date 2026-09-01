@@ -66,7 +66,10 @@ final class UpdateChecker: ObservableObject {
     /// where an old build keeps spending platform money must stay small.
     /// Manual "Check now" always bypasses this.
     nonisolated static func interval(forMode mode: String?) -> TimeInterval {
-        mode == "cloud" ? 3600 : 24 * 3600
+        // Prefix match, not equality: a future "cloud_pro" tier must get the
+        // short leash automatically — falling to the slow cadence for exactly
+        // the accounts that spend platform money is the failure mode here.
+        (mode?.lowercased().hasPrefix("cloud") ?? false) ? 3600 : 24 * 3600
     }
 
     /// Injected at wiring (the app struct holds both this and AccountStore) so
@@ -115,6 +118,13 @@ final class UpdateChecker: ObservableObject {
         }
         defer { if force { isChecking = false } }
 
+        // Stamped BEFORE the network call: stamping after it made every check
+        // land a fraction later than its tick, so the equal-period throttle
+        // rejected every other hourly tick and Cloud silently checked 2-hourly.
+        // Restored on failure below, or an offline moment would burn the slot.
+        let previousStamp = UserDefaults.standard.object(forKey: lastCheckKey)
+        UserDefaults.standard.set(Date(), forKey: lastCheckKey)
+
         var req = URLRequest(url: manifestURL)
         req.timeoutInterval = 10
         req.cachePolicy = .reloadIgnoringLocalCacheData
@@ -125,17 +135,20 @@ final class UpdateChecker: ObservableObject {
         else {
             // Fail open — keep whatever status we had. But if a human clicked,
             // say so rather than leaving them staring at an unchanged panel.
+            UserDefaults.standard.set(previousStamp, forKey: lastCheckKey)
             if force { manualResult = .unreachable }
             return
         }
-
-        UserDefaults.standard.set(Date(), forKey: lastCheckKey)
 
         let url = URL(string: manifest.downloadURL) ?? AppLinks.download
         // Direct DMG asset for the one-click in-app update; the page URL stays
         // the fallback for older manifests and for a failed self-update.
         dmgURL = manifest.dmgURL.flatMap(URL.init(string:))
-        if Self.compare(current, isLessThan: manifest.minimumVersion) {
+        // Minimum-version is a FLOOR, so it compares on the ordered base only —
+        // running the numeric comparator over a hex commit component would hand
+        // out (or withhold) the hard update-required prompt based on whether a
+        // hash happens to start with a digit.
+        if Self.compare(Self.baseThree(current), isLessThan: Self.baseThree(manifest.minimumVersion)) {
             status = .required(version: manifest.version, url: url, notes: manifest.notes)
         } else if Self.isUpdate(current: current, latest: manifest.version) {
             status = .available(version: manifest.version, url: url, notes: manifest.notes)
@@ -151,6 +164,11 @@ final class UpdateChecker: ObservableObject {
     /// word is authoritative: a different (or newly present) commit component
     /// means a respin this build doesn't have. Same-identity never updates, so
     /// a stale manifest can't downgrade anyone.
+    /// The ordered half of a version: milestone.update.date, commit stripped.
+    nonisolated static func baseThree(_ v: String) -> String {
+        v.split(separator: ".").prefix(3).joined(separator: ".")
+    }
+
     nonisolated static func isUpdate(current: String, latest: String) -> Bool {
         let c = parts(current), l = parts(latest)
         for i in 0..<3 {

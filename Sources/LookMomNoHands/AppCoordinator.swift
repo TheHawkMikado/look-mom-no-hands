@@ -1577,6 +1577,14 @@ final class AppCoordinator: ObservableObject {
 
     // MARK: Automated goals — the one contract every remote channel adapts
 
+    /// THE availability predicate for automated work. Every gate (drain, run,
+    /// accept-from-server, scheduler) consults this one property; a new
+    /// blocking state added here blocks them all at once — delivery is
+    /// destructive, so a gate that lags the run guard loses spoken goals.
+    private var automatedSlotFree: Bool {
+        !processing && !demonstrating && scheduledTask == nil
+    }
+
     private var phoneGoalQueue: [String] = []
 
     /// Runs the next queued phone goal when the automated slot is free. Called
@@ -1584,7 +1592,7 @@ final class AppCoordinator: ObservableObject {
     /// stranded by a race (voice started between poll and drain) waits at most
     /// ten seconds, never forever, and is never silently lost.
     private func drainPhoneGoals() {
-        guard !phoneGoalQueue.isEmpty, !processing, !demonstrating, scheduledTask == nil, claude != nil else { return }
+        guard !phoneGoalQueue.isEmpty, automatedSlotFree, claude != nil else { return }
         let text = phoneGoalQueue.removeFirst()
         let title = String(text.prefix(60))
         events.report(kind: .goalStarted, title: title, detail: "your Mac picked it up")
@@ -1603,7 +1611,7 @@ final class AppCoordinator: ObservableObject {
                                   report: @escaping (AgentEventKind, String) -> Void) {
         // scheduledTask is the single automated-run slot; overwriting a live
         // one would orphan its only cancellation handle.
-        guard !processing, !demonstrating, scheduledTask == nil else {
+        guard automatedSlotFree else {
             report(.goalFailed, "this Mac is mid-task"); return
         }
         guard claude != nil else { report(.goalFailed, "no API key on this machine"); return }
@@ -1645,8 +1653,7 @@ final class AppCoordinator: ObservableObject {
         // where they survive restarts and expire honestly.
         events.canAcceptGoal = { [weak self] in
             guard let self else { return false }
-            return self.claude != nil && self.phoneGoalQueue.isEmpty
-                && !self.processing && !self.demonstrating && self.scheduledTask == nil
+            return self.claude != nil && self.phoneGoalQueue.isEmpty && self.automatedSlotFree
         }
         events.onPhoneGoal = { [weak self] text in
             self?.phoneGoalQueue.append(text)
@@ -1725,10 +1732,7 @@ final class AppCoordinator: ObservableObject {
     /// is already stamped fired, so a busy 9:00 skips to tomorrow rather than
     /// stalking the user all morning.
     func runScheduledProcedure(_ p: Procedure) {
-        // scheduledTask == nil, not isCancelled: a COMPLETED task isn't busy.
-        // (The old isCancelled check locked out every slot after the first
-        // successful run — the task object outlives its work.)
-        guard !processing, !demonstrating, scheduledTask == nil else {
+        guard automatedSlotFree else {
             // Busy here doesn't have to mean skipped: an idle paired worker can
             // take the slot — the fleet version of "runs while you sleep".
             if let idle = fleet.peers.peers.first(where: { fleet.status[$0.keyHex]?.online == true && fleet.status[$0.keyHex]?.runningGoal == nil }),
@@ -1746,30 +1750,21 @@ final class AppCoordinator: ObservableObject {
             store.log("schedule", "skipped \(p.name) — app is \(phase.label)")
             return
         }
-        guard claude != nil else {
-            store.log("schedule", "skipped \(p.name) — no API key")
-            return
-        }
-        let gen = runGeneration
-        let command = p.triggers.first ?? p.name
-        store.log("schedule", "running \(p.name)")
         events.report(kind: .goalStarted, title: p.name, detail: "scheduled run")
-        scheduledTask = Task {
-            defer { self.scheduledTask = nil }
-            do {
-                try await self.runGoal(text: command, gen: gen, seedProgress: [], holder: .scheduled(p.id))
-                self.store.log("schedule", "finished \(p.name)")
+        // Same rail as fleet/phone goals — the adapter adds the schedule's own
+        // voice: preemption reads as "stepped aside", success is spoken aloud.
+        runAutomatedGoal(text: p.triggers.first ?? p.name, holder: .scheduled(p.id), tag: "schedule") { [weak self] kind, detail in
+            guard let self else { return }
+            switch kind {
+            case .goalProgress:
+                break   // pickup already announced above
+            case .goalDone:
                 self.events.report(kind: .goalDone, title: p.name, detail: "scheduled run finished")
-                await self.speak("Your scheduled task \(p.name) is done.", gen: self.runGeneration)
-            } catch is ScreenLease.Busy {
-                self.store.log("schedule", "\(p.name) skipped — the screen was busy")
-                self.events.report(kind: .goalFailed, title: p.name, detail: "skipped — the screen was busy")
-            } catch {
-                let preempted = error is ScreenLease.Revoked || error is CancellationError || Task.isCancelled
-                self.store.log("schedule", preempted ? "\(p.name) stepped aside — you took the screen"
-                                                     : "\(p.name) failed: \(error)")
-                self.events.report(kind: preempted ? .goalDone : .goalFailed, title: p.name,
-                                   detail: preempted ? "stepped aside — you took the screen" : "\(error)")
+                Task { await self.speak("Your scheduled task \(p.name) is done.", gen: self.runGeneration) }
+            default:
+                let preempted = detail.contains("took the screen")
+                self.events.report(kind: preempted ? .goalDone : kind, title: p.name,
+                                   detail: preempted ? "stepped aside — you took the screen" : detail)
             }
         }
     }

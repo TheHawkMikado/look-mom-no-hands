@@ -81,6 +81,15 @@ final class UpdaterTests: XCTestCase {
         XCTAssertFalse(UpdateChecker.isUpdate(current: "0.04.260901.a1b2c3d", latest: "0.04.260901.a1b2c3d"))
     }
 
+    func testMinimumVersionIgnoresCommitComponent() {
+        // The hard "update required" floor must never hinge on hex luck: a Mac
+        // running the exact minimum build (different commit spelling) is fine.
+        XCTAssertFalse(UpdateChecker.compare(UpdateChecker.baseThree("0.04.260901.a1b2c3d"),
+                                             isLessThan: UpdateChecker.baseThree("0.04.260901.9f8e7d6")))
+        XCTAssertTrue(UpdateChecker.compare(UpdateChecker.baseThree("0.03.260828.9f8e7d6"),
+                                            isLessThan: UpdateChecker.baseThree("0.04.260901.a1b2c3d")))
+    }
+
     func testStaleManifestCannotDowngrade() {
         XCTAssertFalse(UpdateChecker.isUpdate(current: "0.04.260902.a1b2c3d", latest: "0.04.260901.9f8e7d6"),
                        "older base never reads as an update, whatever the commit says")

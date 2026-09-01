@@ -31,7 +31,10 @@ export async function GET(req: NextRequest) {
   const site = process.env.SITE_URL ?? req.nextUrl.origin;
   const session = await getSession();
   const client = req.nextUrl.searchParams.get("client") ?? "mac";
-  const { scheme: appScheme } = CLIENTS[client] ?? CLIENTS.mac;
+  // Object.hasOwn, not plain indexing: ?client=constructor would resolve a
+  // prototype member, dodge the fallback, and render a live token into an
+  // "undefined://" URL no app can receive.
+  const { scheme: appScheme } = Object.hasOwn(CLIENTS, client) ? CLIENTS[client] : CLIENTS.mac;
 
   if (!session) {
     // Preserve WHO is signing in through the login round trip — storing the

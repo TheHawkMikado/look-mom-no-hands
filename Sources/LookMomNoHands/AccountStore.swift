@@ -88,6 +88,7 @@ final class AccountStore: ObservableObject {
         else { return }
 
         KeychainStore.save(token, account: Self.appTokenAccount)
+        coordinator?.events.authDidChange()   // new token must be seen NOW, not when a cache expires
         lastError = nil
         await sync()
     }
@@ -261,6 +262,9 @@ final class AccountStore: ObservableObject {
         // The keys belonged to the account, not this Mac — don't leave them behind.
         coordinator?.clearAPIKey()
         coordinator?.clearElevenLabsKey()
+        // And neither does the reporter's cached bearer: with it, a "signed
+        // out" Mac would keep taking and running phone goals indefinitely.
+        coordinator?.events.authDidChange()
         status = .signedOut
         lastError = nil
     }

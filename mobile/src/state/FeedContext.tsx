@@ -21,8 +21,7 @@ const SPOKEN_DETAIL_CAP = 200;
 
 interface FeedContextValue {
   events: FeedEvent[];
-  verdicts: Record<string, Verdict>;
-  /** needs_approval events with no verdict yet, newest first. */
+  /** needs_approval events with no verdict yet, newest first, deduped. */
   pendingApprovals: FeedEvent[];
   loaded: boolean;
   refresh: () => Promise<void>;
@@ -53,24 +52,29 @@ export function FeedProvider({ children }: { children: React.ReactNode }) {
   const [keepPolling, setKeepPolling] = useState(false);
   const [appActive, setAppActive] = useState(AppState.currentState === "active");
   const lastSpokenIdRef = useRef<string | null>(null);
-  const lastPayloadRef = useRef<string>("");
 
   const speakNewResults = useCallback((fresh: FeedEvent[]) => {
-    if (fresh.length === 0) return;
-    // First fetch of the session: mark everything as seen so an old backlog
-    // doesn't get read aloud on launch.
-    if (lastSpokenIdRef.current === null) {
-      lastSpokenIdRef.current = fresh[0].id;
+    const anchor = lastSpokenIdRef.current;
+    // First SUCCESSFUL fetch sets the anchor even when the feed is empty ("" =
+    // no history, everything later is new). Anchoring only on the first
+    // non-empty fetch muted the very first result a fresh account ever gets.
+    if (anchor === null) {
+      lastSpokenIdRef.current = fresh[0]?.id ?? "";
       return;
     }
+    if (fresh.length === 0) return;
     const newer: FeedEvent[] = [];
-    let anchorFound = false;
-    for (const event of fresh) {
-      if (event.id === lastSpokenIdRef.current) {
-        anchorFound = true;
-        break;
+    let anchorFound = anchor === "";
+    if (anchor === "") {
+      newer.push(...fresh);
+    } else {
+      for (const event of fresh) {
+        if (event.id === anchor) {
+          anchorFound = true;
+          break;
+        }
+        newer.push(event);
       }
-      newer.push(event);
     }
     lastSpokenIdRef.current = fresh[0].id;
     // Anchor pruned past retention (backgrounded through a busy stretch):
@@ -87,21 +91,17 @@ export function FeedProvider({ children }: { children: React.ReactNode }) {
   const refresh = useCallback(async () => {
     try {
       const feed = await getFeed();
-      // An idle Mac means an identical payload 12 times a minute — skip the
-      // state churn (and the re-render of every consumer) when nothing moved.
-      const fingerprint = JSON.stringify(feed);
-      if (fingerprint !== lastPayloadRef.current) {
-        lastPayloadRef.current = fingerprint;
-        setEvents(feed.events);
-        setServerVerdicts(feed.verdicts);
-        // Server confirmations retire their optimistic overlays.
-        setOptimisticVerdicts((prev) => {
-          const next = { ...prev };
-          for (const id of Object.keys(next)) if (feed.verdicts[id]) delete next[id];
-          return next;
-        });
-      }
       setLoaded(true);
+      // null = server said 304: nothing changed, no state churn, no re-render.
+      if (feed === null) return;
+      setEvents(feed.events);
+      setServerVerdicts(feed.verdicts);
+      // Server confirmations retire their optimistic overlays.
+      setOptimisticVerdicts((prev) => {
+        const next = { ...prev };
+        for (const id of Object.keys(next)) if (feed.verdicts[id]) delete next[id];
+        return next;
+      });
       speakNewResults(feed.events);
     } catch {
       // Polling is best-effort; the next tick retries. A 401 already flipped
@@ -128,7 +128,16 @@ export function FeedProvider({ children }: { children: React.ReactNode }) {
       // Optimistic: hide the card immediately, reconcile when a poll confirms.
       setOptimisticVerdicts((prev) => ({ ...prev, [approvalId]: verdict }));
       try {
-        await decideApproval(approvalId, verdict);
+        const { recorded } = await decideApproval(approvalId, verdict);
+        // recorded:false = someone decided first and OUR verdict lost — keeping
+        // the overlay would show the user the opposite of what actually ran.
+        if (!recorded) {
+          setOptimisticVerdicts((prev) => {
+            const next = { ...prev };
+            delete next[approvalId];
+            return next;
+          });
+        }
       } catch {
         setOptimisticVerdicts((prev) => {
           const next = { ...prev };
@@ -145,20 +154,21 @@ export function FeedProvider({ children }: { children: React.ReactNode }) {
     [serverVerdicts, optimisticVerdicts],
   );
 
-  const pendingApprovals = useMemo(
-    () =>
-      events.filter(
-        (e) =>
-          e.kind === "needs_approval" &&
-          e.approvalId != null &&
-          verdicts[e.approvalId] === undefined,
-      ),
-    [events, verdicts],
-  );
+  const pendingApprovals = useMemo(() => {
+    // Dedupe by approvalId: the Mac may re-report a needs_approval for the
+    // same decision, and two cards for one question invites two verdicts.
+    const seen = new Set<string>();
+    return events.filter((e) => {
+      if (e.kind !== "needs_approval" || e.approvalId == null) return false;
+      if (verdicts[e.approvalId] !== undefined || seen.has(e.approvalId)) return false;
+      seen.add(e.approvalId);
+      return true;
+    });
+  }, [events, verdicts]);
 
   const value = useMemo(
-    () => ({ events, verdicts, pendingApprovals, loaded, refresh, decide, setKeepPolling }),
-    [events, verdicts, pendingApprovals, loaded, refresh, decide],
+    () => ({ events, pendingApprovals, loaded, refresh, decide, setKeepPolling }),
+    [events, pendingApprovals, loaded, refresh, decide],
   );
 
   return <FeedContext.Provider value={value}>{children}</FeedContext.Provider>;

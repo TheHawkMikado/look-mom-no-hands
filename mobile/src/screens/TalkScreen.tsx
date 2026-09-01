@@ -109,9 +109,10 @@ export function TalkScreen() {
           setPartial("");
           break;
         case "enterLockedListening":
-          // Recognition is already running from the hold; just flip it to
-          // cycle forever and keep the feed poller alive.
-          speech.setContinuous(true);
+          // Restart, don't just flip a flag: the engine may have already
+          // ended during the hold (Android silence timeout, iOS final result),
+          // and a flag-only lock would show "Listening" over a dead mic.
+          void speech.start(true);
           setKeepPolling(true);
           setStatus(null);
           break;

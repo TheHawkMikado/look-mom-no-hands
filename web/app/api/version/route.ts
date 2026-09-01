@@ -19,11 +19,12 @@ export async function GET() {
   const site = process.env.SITE_URL ?? "https://nohandsapp.com";
 
   const body = {
-    // Latest version, as #.##.YYMMDD — marketing version then release date
-    // ("0.02.260730"). The app compares components numerically, so every part
-    // must stay numeric; the date is what usually moves between releases.
-    // The fallback is the last release predating the scheme, so a missing env
-    // var can only ever under-report and nag nobody.
+    // Latest version, as V#.##.YYMMDD.COMMIT ("0.04.260901.a1b2c3d") — set it
+    // to the FULL version release.sh prints, commit included: the app orders
+    // on the first three components and treats the commit as an identity, so a
+    // value pasted without the commit makes a same-day respin invisible to
+    // every installed copy. The fallback predates the scheme and can only
+    // under-report (nags nobody).
     version: process.env.LATEST_APP_VERSION ?? "0.1.0",
     // Where the app sends the user to get it. The GitHub "latest release" page
     // is a good default — it always points at the newest DMG.

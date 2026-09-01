@@ -1,3 +1,5 @@
+import { createHash } from "crypto";
+import { NextRequest, NextResponse } from "next/server";
 import { agentEventsFor, approvalVerdictsFor, decideApproval, ensureSchema } from "@/lib/db";
 
 /**
@@ -27,6 +29,24 @@ export async function feedPayload(email: string) {
     })),
     verdicts: Object.fromEntries(decided.map((v) => [v.approval_id, v.verdict])),
   };
+}
+
+/**
+ * The feed as a full HTTP response with ETag/304 handling. Polled every 5s per
+ * client and byte-identical almost every tick on an idle Mac — a 304 turns
+ * ~100KB of repeated JSON into a header exchange. Both feed routes route
+ * through here so phone and web get the same payload AND the same caching.
+ */
+export async function feedResponse(email: string, req: NextRequest): Promise<NextResponse> {
+  const payload = await feedPayload(email);
+  const body = JSON.stringify(payload);
+  const etag = `"${createHash("sha1").update(body).digest("hex")}"`;
+  if (req.headers.get("if-none-match") === etag) {
+    return new NextResponse(null, { status: 304, headers: { etag } });
+  }
+  return new NextResponse(body, {
+    headers: { "content-type": "application/json", "cache-control": "no-store", etag },
+  });
 }
 
 export async function decidePayload(

@@ -54,8 +54,8 @@ the screen off needs native work that config alone cannot provide:
 
 - **iOS** — `UIBackgroundModes: ["audio"]` is declared in `app.json`, but
   `SFSpeechRecognizer` sessions still get suspended in the background unless an
-  active audio session is maintained. See the TODO in
-  `src/hooks/useSpeechRecognition.ts`.
+  active `AVAudioSession` is maintained (native module or config-plugin work in
+  the dev-build phase).
 - **Android** — `FOREGROUND_SERVICE` + `FOREGROUND_SERVICE_MICROPHONE`
   permissions are declared, but an actual foreground service (persistent
   notification) must be added in the dev-build phase; Expo config plugins do

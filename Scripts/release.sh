@@ -14,14 +14,15 @@
 # 1–3 and prints the exact command for 4 (a Vercel env change is deliberately
 # left as a deliberate act — it flips the update prompt on for everyone at once).
 #
-# Versions are #.##.YYMMDD — marketing version, then the release date. You pass
-# the marketing part and today's date is appended:
+# Versions are V<milestone>.<update>.<YYMMDD>.<commit> — you pass the first
+# two; today's date and HEAD's short hash are appended:
 #
-#   ./Scripts/release.sh 0.02        →  0.02.260730   (tag v0.02.260730)
+#   ./Scripts/release.sh 0.04        →  0.04.260901.a1b2c3d   (tag v0.04.260901.a1b2c3d)
 #
-# The date is just a third numeric component to the app's comparison, so it only
-# ever climbs; ship twice in one day and the marketing version is what separates
-# the two (0.02 → 0.03).
+# Ordering lives in the first three components; the commit id is an IDENTITY —
+# "which code are you running" in one string. Ship twice in one day and the
+# hash is what separates the two (the app treats a differing commit under an
+# equal base as "the server has a respin").
 #
 # Usage:
 #   SIGN_ID="Developer ID Application: … (TEAMID)" NOTARY_PROFILE=LookMaNotary \
@@ -95,9 +96,11 @@ git fetch origin --quiet
     || die "local main and origin/main differ — pull/push first (this is exactly the drift that leaves a release un-cut)"
 
 # The commit id makes collisions meaningful: the same version can only exist
-# if this exact code was already released.
+# if this exact code was already released (or a dry run left its local tag —
+# the undo it prints includes the tag -d for a reason).
 git rev-parse "v${VERSION}" >/dev/null 2>&1 \
-    && die "v${VERSION} already exists — this exact commit has already been released"
+    && die "v${VERSION} already exists — this exact commit was already released.
+    (After a dry run, undo BOTH halves: git tag -d v${VERSION} && git reset --hard HEAD~1)"
 
 CURRENT="$(/usr/libexec/PlistBuddy -c 'Print CFBundleShortVersionString' App/Info.plist)"
 
@@ -129,6 +132,8 @@ is_older() {
 # when the commit differs (a same-day respin) — which the tag check above
 # already guarantees.
 base3() { echo "$1" | cut -d. -f1-3; }
+[ "${CURRENT}" != "${VERSION}" ] \
+    || die "version is identical to the running ${CURRENT} — every installed app would read it as 'up to date'"
 if [ "$(base3 "${CURRENT}")" = "$(base3 "${VERSION}")" ]; then
     echo "  same-day respin: ${CURRENT} → ${VERSION} (commit id is the tiebreaker)"
 else

@@ -359,12 +359,15 @@ async function ensureSchemaOnce() {
       id           text NOT NULL,
       text         text NOT NULL,
       created_at   timestamptz NOT NULL DEFAULT now(),
-      delivered_at timestamptz,           -- set when a Mac takes it; NULL = pending
       PRIMARY KEY (email, id)
     )`;
+  // Take-once is DELETE-on-take — a delivered_at lifecycle column briefly
+  // existed, was never read, and its schema comment was already a lie.
+  await db`ALTER TABLE phone_goals DROP COLUMN IF EXISTS delivered_at`;
+  await db`DROP INDEX IF EXISTS phone_goals_pending`;
   await db`
-    CREATE INDEX IF NOT EXISTS phone_goals_pending
-      ON phone_goals (email, created_at) WHERE delivered_at IS NULL`;
+    CREATE INDEX IF NOT EXISTS phone_goals_by_age
+      ON phone_goals (email, created_at)`;
 }
 
 // MARK: - Phone goals (the mobile app's spoken tasks, queued for a Mac)
@@ -377,11 +380,14 @@ export async function submitPhoneGoal(email: string, text: string): Promise<stri
   await db`
     INSERT INTO phone_goals (email, id, text)
     VALUES (${account}, ${id}, ${text})`;
-  // Pure garbage collection — the staleness RULE is enforced in the take query,
-  // which runs on every delivery; this only stops never-polled rows piling up.
-  await db`
-    DELETE FROM phone_goals
-     WHERE email = ${account} AND created_at < now() - interval '1 day'`;
+  // Pure garbage collection (the staleness RULE lives in the take query), so
+  // it doesn't belong on the latency-visible submit path every time —
+  // probabilistic keeps never-polled rows from piling up at ~1% of the cost.
+  if (Math.random() < 0.02) {
+    await db`
+      DELETE FROM phone_goals
+       WHERE email = ${account} AND created_at < now() - interval '1 day'`;
+  }
   return id;
 }
 
@@ -396,14 +402,21 @@ export async function takePendingGoals(
   email: string,
 ): Promise<{ id: string; text: string; created_at: Date }[]> {
   const db = sql();
+  // ONE goal per take, not the batch: taken goals exist only in the taker's
+  // RAM, so handing over three at once meant a Mac crash destroyed two goals
+  // the user watched get "Sent". One-at-a-time keeps the blast radius to the
+  // goal actually running; the rest stay durable here for the next 10s poll.
   const rows = await db`
-    WITH taken AS (
-      DELETE FROM phone_goals
-       WHERE email = ${email.toLowerCase()}
-         AND created_at > now() - interval '1 hour'
-      RETURNING id, text, created_at
-    )
-    SELECT id, text, created_at FROM taken ORDER BY created_at ASC`;
+    DELETE FROM phone_goals p
+     USING (
+       SELECT email, id FROM phone_goals
+        WHERE email = ${email.toLowerCase()}
+          AND created_at > now() - interval '1 hour'
+        ORDER BY created_at ASC
+        LIMIT 1
+     ) next
+     WHERE p.email = next.email AND p.id = next.id
+    RETURNING p.id, p.text, p.created_at`;
   return rows as unknown as { id: string; text: string; created_at: Date }[];
 }
 
@@ -763,10 +776,14 @@ export async function decideApproval(
     ON CONFLICT (email, approval_id) DO NOTHING
     RETURNING approval_id`;
   // Opportunistic cleanup, same reasoning as login_tokens — the poll only ever
-  // asks for recent verdicts, so month-old rows are dead weight.
-  await db`
-    DELETE FROM agent_approvals
-     WHERE email = ${account} AND decided_at < now() - interval '30 days'`;
+  // asks for recent verdicts, so month-old rows are dead weight. Probabilistic:
+  // this rides the one action approvals exist for, and the cleanup is
+  // housekeeping, not correctness.
+  if (Math.random() < 0.02) {
+    await db`
+      DELETE FROM agent_approvals
+       WHERE email = ${account} AND decided_at < now() - interval '30 days'`;
+  }
   return rows.length > 0;
 }
 
@@ -946,11 +963,20 @@ export async function createAppToken(email: string, device: string | null): Prom
 /** The email a live (non-revoked) app token belongs to, or null. Touches last_used. */
 export async function appTokenEmail(raw: string): Promise<string | null> {
   const db = sql();
+  // last_used_at is analytics-grade, and this runs on every 10s device poll —
+  // the throttled write turns ~8k dead-tuple UPDATEs/day/Mac into a handful,
+  // and the read stays a plain SELECT the rest of the time.
   const rows = await db<{ email: string }[]>`
-    UPDATE app_tokens SET last_used_at = now()
+    UPDATE app_tokens
+       SET last_used_at = now()
      WHERE token_hash = ${hashToken(raw)} AND NOT revoked
+       AND last_used_at < now() - interval '5 minutes'
     RETURNING email`;
-  return rows[0]?.email ?? null;
+  if (rows[0]) return rows[0].email;
+  const read = await db<{ email: string }[]>`
+    SELECT email FROM app_tokens
+     WHERE token_hash = ${hashToken(raw)} AND NOT revoked`;
+  return read[0]?.email ?? null;
 }
 
 export async function revokeAppToken(raw: string) {

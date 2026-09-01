@@ -20,7 +20,10 @@ const KIND_META: Record<FeedEventKind, { glyph: string; color: string }> = {
   goal_failed: { glyph: "✕", color: colors.danger },
 };
 
-function EventRow({ event }: { event: FeedEvent }) {
+// Memoized: rows are keyed by immutable event id, and the poll replaces the
+// whole events array on every change — while an agent is running (exactly when
+// the user watches this screen), identity comparison prunes the re-renders.
+const EventRow = React.memo(function EventRow({ event }: { event: FeedEvent }) {
   const meta = KIND_META[event.kind] ?? KIND_META.goal_progress;
   return (
     <View style={styles.row}>
@@ -40,7 +43,7 @@ function EventRow({ event }: { event: FeedEvent }) {
       <Text style={styles.time}>{formatRelative(event.createdAt)}</Text>
     </View>
   );
-}
+});
 
 export function ActivityScreen() {
   const insets = useSafeAreaInsets();
@@ -53,13 +56,18 @@ export function ActivityScreen() {
     setRefreshing(false);
   }, [refresh]);
 
+  const renderItem = useCallback(
+    ({ item }: { item: FeedEvent }) => <EventRow event={item} />,
+    [],
+  );
+
   return (
     <View style={[styles.container, { paddingTop: insets.top + spacing.md }]}>
       <Text style={styles.heading}>Activity</Text>
       <FlatList
         data={events}
         keyExtractor={(item) => item.id}
-        renderItem={({ item }) => <EventRow event={item} />}
+        renderItem={renderItem}
         refreshControl={
           <RefreshControl
             refreshing={refreshing}
