@@ -1,0 +1,50 @@
+{
+  "expo": {
+    "name": "Look Ma, No Hands",
+    "slug": "nohands-mobile",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "dark",
+    "backgroundColor": "#0B0A12",
+    "scheme": "nohands",
+    "ios": {
+      "supportsTablet": false,
+      "bundleIdentifier": "com.nohands.mobile",
+      "infoPlist": {
+        "NSMicrophoneUsageDescription": "The microphone captures your voice so you can send tasks to your Mac.",
+        "NSSpeechRecognitionUsageDescription": "Speech recognition turns what you say into a task for your Mac.",
+        "UIBackgroundModes": ["audio"]
+      }
+    },
+    "android": {
+      "package": "com.nohands.mobile",
+      "permissions": [
+        "RECORD_AUDIO",
+        "FOREGROUND_SERVICE",
+        "FOREGROUND_SERVICE_MICROPHONE"
+      ],
+      "adaptiveIcon": {
+        "backgroundColor": "#0B0A12",
+        "foregroundImage": "./assets/android-icon-foreground.png",
+        "backgroundImage": "./assets/android-icon-background.png",
+        "monochromeImage": "./assets/android-icon-monochrome.png"
+      },
+      "predictiveBackGestureEnabled": false
+    },
+    "web": {
+      "favicon": "./assets/favicon.png"
+    },
+    "plugins": [
+      "expo-secure-store",
+      "expo-web-browser",
+      [
+        "@react-native-voice/voice",
+        {
+          "microphonePermission": "The microphone captures your voice so you can send tasks to your Mac.",
+          "speechRecognitionPermission": "Speech recognition turns what you say into a task for your Mac."
+        }
+      ]
+    ]
+  }
+}

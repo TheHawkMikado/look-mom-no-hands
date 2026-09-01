@@ -353,6 +353,56 @@ async function ensureSchemaOnce() {
       decided_at  timestamptz NOT NULL DEFAULT now(),
       PRIMARY KEY (email, approval_id)
     )`;
+  await db`
+    CREATE TABLE IF NOT EXISTS phone_goals (
+      email        text NOT NULL,
+      id           text NOT NULL,
+      text         text NOT NULL,
+      created_at   timestamptz NOT NULL DEFAULT now(),
+      delivered_at timestamptz,           -- set when a Mac takes it; NULL = pending
+      PRIMARY KEY (email, id)
+    )`;
+  await db`
+    CREATE INDEX IF NOT EXISTS phone_goals_pending
+      ON phone_goals (email, created_at) WHERE delivered_at IS NULL`;
+}
+
+// MARK: - Phone goals (the mobile app's spoken tasks, queued for a Mac)
+
+/** Queue a spoken goal from the phone. Returns the goal id. */
+export async function submitPhoneGoal(email: string, text: string): Promise<string> {
+  const db = sql();
+  const account = email.toLowerCase();
+  const id = crypto.randomUUID();
+  await db`
+    INSERT INTO phone_goals (email, id, text)
+    VALUES (${account}, ${id}, ${text})`;
+  // Undelivered goals older than an hour are stale intent, not a backlog — a
+  // Mac that was asleep must not wake up and run this morning's half-thoughts.
+  await db`
+    DELETE FROM phone_goals
+     WHERE email = ${account}
+       AND (delivered_at < now() - interval '7 days'
+            OR (delivered_at IS NULL AND created_at < now() - interval '1 hour'))`;
+  return id;
+}
+
+/**
+ * Atomically hand every pending goal to the polling Mac (oldest first).
+ * UPDATE…RETURNING so two Macs polling the same account can't both run one.
+ */
+export async function takePendingGoals(
+  email: string,
+): Promise<{ id: string; text: string; created_at: Date }[]> {
+  const db = sql();
+  const rows = await db`
+    UPDATE phone_goals
+       SET delivered_at = now()
+     WHERE email = ${email.toLowerCase()} AND delivered_at IS NULL
+    RETURNING id, text, created_at`;
+  return (rows as unknown as { id: string; text: string; created_at: Date }[]).sort(
+    (a, b) => a.created_at.getTime() - b.created_at.getTime(),
+  );
 }
 
 // MARK: - Resellers (Stripe Connect + provisioning)

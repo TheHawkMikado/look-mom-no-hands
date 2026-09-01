@@ -1580,6 +1580,43 @@ final class AppCoordinator: ObservableObject {
     private func wireFleet() {
         // Worker side: a paired Mac sent a goal — run it exactly like a
         // scheduled run: same loop, revocable lease, local user always wins.
+        // Phone goals ride the exact same rail as fleet goals: one automated
+        // slot, revocable lease, the local user always wins. The reply channel
+        // is the events feed the phone is already polling (and speaking).
+        events.onPhoneGoal = { [weak self] text in
+            guard let self else { return }
+            let title = String(text.prefix(60))
+            guard !self.processing, !self.demonstrating, self.scheduledTask == nil else {
+                self.events.report(kind: .goalFailed, title: title,
+                                   detail: "your Mac was mid-task — say it again in a moment")
+                return
+            }
+            guard self.claude != nil else {
+                self.events.report(kind: .goalFailed, title: title, detail: "no API key on the Mac")
+                return
+            }
+            self.store.log("phone", "goal from phone: \(text.prefix(120))")
+            self.events.report(kind: .goalStarted, title: title, detail: "your Mac picked it up")
+            self.scheduledTask = Task {
+                defer { self.scheduledTask = nil }
+                do {
+                    try await self.runGoal(text: text, gen: self.runGeneration, seedProgress: [],
+                                           holder: .remote("phone-\(UUID().uuidString)"))
+                    self.store.log("phone", "phone goal done")
+                    self.events.report(kind: .goalDone, title: title, detail: "done")
+                } catch is ScreenLease.Busy {
+                    self.store.log("phone", "phone goal refused — screen was busy")
+                    self.events.report(kind: .goalFailed, title: title, detail: "the Mac's screen was busy — nothing ran")
+                } catch {
+                    let preempted = error is ScreenLease.Revoked || error is CancellationError
+                    self.store.log("phone", "phone goal stopped: \(preempted ? "user took the screen" : "\(error)")")
+                    self.events.report(kind: .goalFailed, title: title,
+                                       detail: preempted ? "someone took over at the Mac" : "\(error)")
+                }
+            }
+        }
+        events.startGoalPolling()
+
         fleet.onRemoteGoal = { [weak self] text, goalID, reply in
             guard let self else { return }
             // scheduledTask is the single automated-run slot; overwriting a live

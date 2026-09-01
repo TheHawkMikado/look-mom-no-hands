@@ -27,7 +27,11 @@ export async function GET(req: NextRequest) {
 
   await ensureSchema();
   const token = await createAppToken(session.email, null);
-  const scheme = `lookmomnohands://auth?token=${encodeURIComponent(token)}`;
+  // Allowlisted schemes only: a token in a redirect is a credential, and an
+  // attacker-chosen scheme would hand it to whatever app registered it.
+  const client = req.nextUrl.searchParams.get("client");
+  const appScheme = client === "mobile" ? "nohands" : "lookmomnohands";
+  const scheme = `${appScheme}://auth?token=${encodeURIComponent(token)}`;
 
   // An HTML page rather than a bare 3xx: browsers open custom-scheme URLs more
   // reliably from a real navigation, and this gives a visible fallback link if

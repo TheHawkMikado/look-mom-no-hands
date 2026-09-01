@@ -43,6 +43,10 @@ final class EventReporter {
 
     /// approvalId, approve? — wired to BackgroundAgentManager by the coordinator.
     var onVerdict: ((String, Bool) -> Void)?
+    /// A spoken goal submitted from the phone app; wired to the coordinator's
+    /// remote-goal path. Delivery is take-once server-side, so firing this is
+    /// already exclusive across the account's Macs.
+    var onPhoneGoal: ((String) -> Void)?
 
     private var queue: [Event] = []
     private var outstandingApprovals: Set<String> = []
@@ -140,6 +144,39 @@ final class EventReporter {
             // Offline is normal; the queue is capped below.
         }
         if queue.count > Contract.queueMax { queue.removeFirst(queue.count - Contract.queueMax) }
+    }
+
+    // MARK: - Phone goal inbox — the standing 10s poll that makes the phone work
+
+    private var goalTimer: Timer?
+
+    /// Unlike approval polling (armed only while something is pending), this
+    /// runs whenever we're signed in: the Mac can't know when the phone will
+    /// speak. One indexed SELECT per 10s per account is the price of "say it
+    /// and walk away".
+    func startGoalPolling() {
+        guard goalTimer == nil else { return }
+        let t = Timer(timeInterval: 10, repeats: true) { [weak self] _ in
+            Task { @MainActor in await self?.pollGoals() }
+        }
+        t.tolerance = 3
+        RunLoop.main.add(t, forMode: .common)
+        goalTimer = t
+    }
+
+    private func pollGoals() async {
+        guard let bearer = bearer(), onPhoneGoal != nil else { return }
+        let req = authedRequest("api/app/goals/poll", bearer: bearer)
+        guard let (data, response) = try? await URLSession.shared.data(for: req) else { return }
+        let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+        if status == 401 { cachedBearer = nil; return }
+        guard (200..<300).contains(status),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let goals = json["goals"] as? [[String: Any]] else { return }
+        for goal in goals {
+            guard let text = goal["text"] as? String, !text.isEmpty else { continue }
+            onPhoneGoal?(text)
+        }
     }
 
     // MARK: - Approval verdict polling — only while something is actually pending
