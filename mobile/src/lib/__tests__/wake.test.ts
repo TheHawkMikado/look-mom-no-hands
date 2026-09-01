@@ -24,10 +24,16 @@ describe("extractCommand", () => {
     );
   });
 
-  it("matches the 'a mama' mishearing", () => {
+  it("matches the 'a mama' mishearing at the start only", () => {
     expect(extractCommand("A mama send the weekly report")).toBe(
       "send the weekly report",
     );
+    // Mid-sentence "a mama" is CONTENT, not a wake phrase — matching it there
+    // truncated real commands ("…to a mama in my contacts" → "in my contacts").
+    expect(extractCommand("hey mama send a message to a mama in my contacts")).toBe(
+      "send a message to a mama in my contacts",
+    );
+    expect(extractCommand("tell a mama I said hi")).toBeNull();
   });
 
   it("ignores leading filler before the phrase", () => {

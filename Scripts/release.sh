@@ -58,21 +58,26 @@ die() { echo "✗ $*" >&2; exit 1; }
 
 [ -n "${MARKETING}" ] || die "no version given (e.g. ./Scripts/release.sh 0.02)"
 
-# Accept a bare marketing version ("0.02"), a full one ("0.02.260730"), or a
-# same-day respin ("0.03.260828.1") so a re-run of a printed command does the
-# same thing rather than double-stamping.
-EXPLICIT_REV=""
-if [[ "${MARKETING}" =~ ^([0-9]+\.[0-9]+)\.([0-9]{6})(\.[0-9]+)?$ ]]; then
+# Accept a bare marketing version ("0.04") or a full one with the commit
+# component ("0.04.260901.a1b2c3d") so a re-run of a printed command does the
+# same thing rather than double-stamping. The commit component is always
+# recomputed from HEAD — the version NAMES the code, it doesn't choose it.
+if [[ "${MARKETING}" =~ ^([0-9]+\.[0-9]+)\.([0-9]{6})(\.[0-9a-f]+)?$ ]]; then
     DATESTAMP="${BASH_REMATCH[2]}"
-    EXPLICIT_REV="${BASH_REMATCH[3]}"
     MARKETING="${BASH_REMATCH[1]}"
 fi
 
 [[ "${MARKETING}" =~ ^[0-9]+\.[0-9]+$ ]] \
-    || die "marketing version must look like 0.02 — the app compares components numerically, so anything non-numeric silently reads as 0"
+    || die "marketing version must look like 0.04 — milestone.update, both numeric"
 [[ "${DATESTAMP}" =~ ^[0-9]{6}$ ]] || die "--date must be YYMMDD, got '${DATESTAMP}'"
 
-VERSION="${MARKETING}.${DATESTAMP}${EXPLICIT_REV}"
+# V<milestone>.<update>.<date>.<commit> — the commit id of the code being
+# released (HEAD before the bump commit this script adds). "Which version are
+# you running?" now answers "which code are you running" in one string. The
+# commit component is an identity, not an ordinal: the app treats a differing
+# commit under an equal milestone.update.date as "the server has a respin".
+COMMIT="$(git rev-parse --short HEAD)"
+VERSION="${MARKETING}.${DATESTAMP}.${COMMIT}"
 
 # --- preflight -------------------------------------------------------------
 # A release is a public artefact; refuse to cut one from a state you can't
@@ -89,17 +94,10 @@ git fetch origin --quiet
 [ "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)" ] \
     || die "local main and origin/main differ — pull/push first (this is exactly the drift that leaves a release un-cut)"
 
-# Same-day respins: a colliding version gains a .1/.2/… ordinal instead of
-# burning a marketing number (0.03.260828 → 0.03.260828.1). The comparators on
-# both sides pad the missing component with zero, so the respin reads newer.
-RESPIN_BASE="${VERSION}"
-RESPIN=0
-while git rev-parse "v${VERSION}" >/dev/null 2>&1; do
-    RESPIN=$(( RESPIN + 1 ))
-    [ ${RESPIN} -le 9 ] || die "nine respins of ${RESPIN_BASE} in one day — stop and look at why"
-    VERSION="${RESPIN_BASE}.${RESPIN}"
-    echo "  v${RESPIN_BASE} already exists — this respin becomes v${VERSION}"
-done
+# The commit id makes collisions meaningful: the same version can only exist
+# if this exact code was already released.
+git rev-parse "v${VERSION}" >/dev/null 2>&1 \
+    && die "v${VERSION} already exists — this exact commit has already been released"
 
 CURRENT="$(/usr/libexec/PlistBuddy -c 'Print CFBundleShortVersionString' App/Info.plist)"
 
@@ -125,8 +123,18 @@ is_older() {
     return 1
 }
 
-is_older "${CURRENT}" "${VERSION}" \
-    || die "${VERSION} does not compare newer than the current ${CURRENT} — every installed app would keep reporting 'up to date'"
+# Ordering lives in the FIRST THREE components (milestone.update.date); the
+# commit id is an identity the app treats as "differs = the server has a respin
+# I don't". So: base must not go backwards, and an equal base is fine exactly
+# when the commit differs (a same-day respin) — which the tag check above
+# already guarantees.
+base3() { echo "$1" | cut -d. -f1-3; }
+if [ "$(base3 "${CURRENT}")" = "$(base3 "${VERSION}")" ]; then
+    echo "  same-day respin: ${CURRENT} → ${VERSION} (commit id is the tiebreaker)"
+else
+    is_older "$(base3 "${CURRENT}")" "$(base3 "${VERSION}")" \
+        || die "${VERSION} does not compare newer than the current ${CURRENT} — every installed app would keep reporting 'up to date'"
+fi
 
 if [ -z "${SIGN_ID:-}" ] && [ "${ALLOW_UNSIGNED}" = 0 ]; then
     die "SIGN_ID unset — an unsigned DMG makes every downloader clear a Gatekeeper block.

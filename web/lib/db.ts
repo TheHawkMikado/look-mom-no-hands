@@ -377,32 +377,34 @@ export async function submitPhoneGoal(email: string, text: string): Promise<stri
   await db`
     INSERT INTO phone_goals (email, id, text)
     VALUES (${account}, ${id}, ${text})`;
-  // Undelivered goals older than an hour are stale intent, not a backlog — a
-  // Mac that was asleep must not wake up and run this morning's half-thoughts.
+  // Pure garbage collection — the staleness RULE is enforced in the take query,
+  // which runs on every delivery; this only stops never-polled rows piling up.
   await db`
     DELETE FROM phone_goals
-     WHERE email = ${account}
-       AND (delivered_at < now() - interval '7 days'
-            OR (delivered_at IS NULL AND created_at < now() - interval '1 hour'))`;
+     WHERE email = ${account} AND created_at < now() - interval '1 day'`;
   return id;
 }
 
 /**
- * Atomically hand every pending goal to the polling Mac (oldest first).
- * UPDATE…RETURNING so two Macs polling the same account can't both run one.
+ * Atomically hand pending goals to the polling Mac, oldest first. DELETE with
+ * a CTE for ordering: take-once (two Macs can't both run one), no unread
+ * lifecycle column to misread later, and the one-hour cutoff lives HERE — on
+ * every delivery — so a Mac that slept through the morning can never wake up
+ * and run stale half-thoughts, whether or not anything was submitted since.
  */
 export async function takePendingGoals(
   email: string,
 ): Promise<{ id: string; text: string; created_at: Date }[]> {
   const db = sql();
   const rows = await db`
-    UPDATE phone_goals
-       SET delivered_at = now()
-     WHERE email = ${email.toLowerCase()} AND delivered_at IS NULL
-    RETURNING id, text, created_at`;
-  return (rows as unknown as { id: string; text: string; created_at: Date }[]).sort(
-    (a, b) => a.created_at.getTime() - b.created_at.getTime(),
-  );
+    WITH taken AS (
+      DELETE FROM phone_goals
+       WHERE email = ${email.toLowerCase()}
+         AND created_at > now() - interval '1 hour'
+      RETURNING id, text, created_at
+    )
+    SELECT id, text, created_at FROM taken ORDER BY created_at ASC`;
+  return rows as unknown as { id: string; text: string; created_at: Date }[];
 }
 
 // MARK: - Resellers (Stripe Connect + provisioning)
@@ -782,6 +784,21 @@ export async function approvalVerdictsSince(
      WHERE email = ${email.trim().toLowerCase()}
        AND decided_at > ${since ?? new Date(0)}
      ORDER BY decided_at ASC`;
+}
+
+/** Verdicts for a specific set of approvals — the feed's shape: bounded by the
+ *  event window it's shown with, never the whole 30-day history. */
+export async function approvalVerdictsFor(
+  email: string,
+  approvalIds: string[],
+): Promise<ApprovalVerdict[]> {
+  if (approvalIds.length === 0) return [];
+  const db = sql();
+  return db<ApprovalVerdict[]>`
+    SELECT approval_id, verdict, decided_at
+      FROM agent_approvals
+     WHERE email = ${email.trim().toLowerCase()}
+       AND approval_id = ANY(${approvalIds})`;
 }
 
 // MARK: - Cloud metering (usage_meter + credit_wallet)

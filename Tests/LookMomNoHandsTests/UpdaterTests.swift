@@ -60,16 +60,31 @@ final class UpdaterTests: XCTestCase {
                        "not signed in must get the conservative cadence, not the aggressive one")
     }
 
-    // MARK: same-day respin ordering
+    // MARK: V#.##.YYMMDD.COMMIT ordering
 
-    func testRespinComparesNewerThanItsBase() {
-        // 0.03.260828.1 must read newer than 0.03.260828 (shorter pads as 0)
-        // and newer than the previous day's release, or respins are invisible
-        // to every installed app.
-        XCTAssertTrue(UpdateChecker.compare("0.03.260828", isLessThan: "0.03.260828.1"))
-        XCTAssertTrue(UpdateChecker.compare("0.03.260826", isLessThan: "0.03.260828.1"))
-        XCTAssertTrue(UpdateChecker.compare("0.03.260828.1", isLessThan: "0.03.260828.2"))
-        XCTAssertFalse(UpdateChecker.compare("0.03.260829", isLessThan: "0.03.260828.9"),
-                       "the next DAY beats any respin count")
+    func testNewerBaseIsAnUpdate() {
+        XCTAssertTrue(UpdateChecker.isUpdate(current: "0.04.260901", latest: "0.04.260902.a1b2c3d"))
+        XCTAssertTrue(UpdateChecker.isUpdate(current: "0.04.260901.a1b2c3d", latest: "0.05.260901.9f8e7d6"))
+    }
+
+    func testSameBaseDifferentCommitIsARespin() {
+        // The commit id is an identity, not an ordinal: hex must never be
+        // numerically ordered ("9bc…" vs "7aa…" says nothing about age) —
+        // an equal base with a different commit means the server has code we
+        // don't, whichever way the hex happens to sort.
+        XCTAssertTrue(UpdateChecker.isUpdate(current: "0.04.260901.9bc1e2f", latest: "0.04.260901.7aa0d41"))
+        XCTAssertTrue(UpdateChecker.isUpdate(current: "0.04.260901", latest: "0.04.260901.7aa0d41"),
+                      "a pre-scheme build must still see the first commit-stamped respin")
+    }
+
+    func testSameIdentityIsNeverAnUpdate() {
+        XCTAssertFalse(UpdateChecker.isUpdate(current: "0.04.260901.a1b2c3d", latest: "0.04.260901.a1b2c3d"))
+    }
+
+    func testStaleManifestCannotDowngrade() {
+        XCTAssertFalse(UpdateChecker.isUpdate(current: "0.04.260902.a1b2c3d", latest: "0.04.260901.9f8e7d6"),
+                       "older base never reads as an update, whatever the commit says")
+        XCTAssertFalse(UpdateChecker.isUpdate(current: "0.04.260901.a1b2c3d", latest: "0.04.260901"),
+                       "a manifest that LOST its commit component must not re-prompt forever")
     }
 }

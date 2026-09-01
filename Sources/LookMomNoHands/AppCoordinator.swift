@@ -1575,6 +1575,60 @@ final class AppCoordinator: ObservableObject {
         Task { await self.speak("Got it — I learned how to \(self.demoName).\(tail)", gen: self.runGeneration) }
     }
 
+    // MARK: Automated goals — the one contract every remote channel adapts
+
+    private var phoneGoalQueue: [String] = []
+
+    /// Runs the next queued phone goal when the automated slot is free. Called
+    /// on enqueue, on slot release, and on the reporter's poll tick — so a goal
+    /// stranded by a race (voice started between poll and drain) waits at most
+    /// ten seconds, never forever, and is never silently lost.
+    private func drainPhoneGoals() {
+        guard !phoneGoalQueue.isEmpty, !processing, !demonstrating, scheduledTask == nil, claude != nil else { return }
+        let text = phoneGoalQueue.removeFirst()
+        let title = String(text.prefix(60))
+        events.report(kind: .goalStarted, title: title, detail: "your Mac picked it up")
+        runAutomatedGoal(text: text, holder: .remote("phone-\(UUID().uuidString)"), tag: "phone") { [weak self] kind, detail in
+            switch kind {
+            case .goalProgress: break   // pickup already announced above
+            default: self?.events.report(kind: kind, title: title, detail: detail)
+            }
+        }
+    }
+
+    /// Single slot, revocable lease, the local user always preempts — stated
+    /// once. Fleet goals, phone goals, and whatever channel comes next are
+    /// adapters supplying only their reply transport.
+    private func runAutomatedGoal(text: String, holder: ScreenLease.Holder, tag: String,
+                                  report: @escaping (AgentEventKind, String) -> Void) {
+        // scheduledTask is the single automated-run slot; overwriting a live
+        // one would orphan its only cancellation handle.
+        guard !processing, !demonstrating, scheduledTask == nil else {
+            report(.goalFailed, "this Mac is mid-task"); return
+        }
+        guard claude != nil else { report(.goalFailed, "no API key on this machine"); return }
+        store.log(tag, "goal: \(text.prefix(120))")
+        report(.goalProgress, "started")
+        scheduledTask = Task {
+            defer {
+                self.scheduledTask = nil
+                self.drainPhoneGoals()   // a freed slot serves the queue immediately
+            }
+            do {
+                try await self.runGoal(text: text, gen: self.runGeneration, seedProgress: [], holder: holder)
+                self.store.log(tag, "goal done")
+                report(.goalDone, "finished")
+            } catch is ScreenLease.Busy {
+                self.store.log(tag, "goal refused — screen was busy")
+                report(.goalFailed, "the screen was busy — nothing ran")
+            } catch {
+                let preempted = error is ScreenLease.Revoked || error is CancellationError
+                self.store.log(tag, "goal stopped: \(preempted ? "local user took the screen" : "\(error)")")
+                report(.goalFailed, preempted ? "the local user took the screen" : "\(error)")
+            }
+        }
+    }
+
     // MARK: Fleet
 
     private func wireFleet() {
@@ -1583,64 +1637,27 @@ final class AppCoordinator: ObservableObject {
         // Phone goals ride the exact same rail as fleet goals: one automated
         // slot, revocable lease, the local user always wins. The reply channel
         // is the events feed the phone is already polling (and speaking).
-        events.onPhoneGoal = { [weak self] text in
-            guard let self else { return }
-            let title = String(text.prefix(60))
-            guard !self.processing, !self.demonstrating, self.scheduledTask == nil else {
-                self.events.report(kind: .goalFailed, title: title,
-                                   detail: "your Mac was mid-task — say it again in a moment")
-                return
-            }
-            guard self.claude != nil else {
-                self.events.report(kind: .goalFailed, title: title, detail: "no API key on the Mac")
-                return
-            }
-            self.store.log("phone", "goal from phone: \(text.prefix(120))")
-            self.events.report(kind: .goalStarted, title: title, detail: "your Mac picked it up")
-            self.scheduledTask = Task {
-                defer { self.scheduledTask = nil }
-                do {
-                    try await self.runGoal(text: text, gen: self.runGeneration, seedProgress: [],
-                                           holder: .remote("phone-\(UUID().uuidString)"))
-                    self.store.log("phone", "phone goal done")
-                    self.events.report(kind: .goalDone, title: title, detail: "done")
-                } catch is ScreenLease.Busy {
-                    self.store.log("phone", "phone goal refused — screen was busy")
-                    self.events.report(kind: .goalFailed, title: title, detail: "the Mac's screen was busy — nothing ran")
-                } catch {
-                    let preempted = error is ScreenLease.Revoked || error is CancellationError
-                    self.store.log("phone", "phone goal stopped: \(preempted ? "user took the screen" : "\(error)")")
-                    self.events.report(kind: .goalFailed, title: title,
-                                       detail: preempted ? "someone took over at the Mac" : "\(error)")
-                }
-            }
+        //
+        // Phone goals are queued locally, never dropped: the server hands over
+        // a batch atomically, so the second goal of a batch must WAIT for the
+        // slot, not bounce off it. New polls are gated (canAcceptGoal) while
+        // anything is queued or running — undelivered goals stay server-side
+        // where they survive restarts and expire honestly.
+        events.canAcceptGoal = { [weak self] in
+            guard let self else { return false }
+            return self.claude != nil && self.phoneGoalQueue.isEmpty
+                && !self.processing && !self.demonstrating && self.scheduledTask == nil
         }
+        events.onPhoneGoal = { [weak self] text in
+            self?.phoneGoalQueue.append(text)
+            self?.drainPhoneGoals()
+        }
+        events.onGoalTick = { [weak self] in self?.drainPhoneGoals() }
         events.startGoalPolling()
 
         fleet.onRemoteGoal = { [weak self] text, goalID, reply in
-            guard let self else { return }
-            // scheduledTask is the single automated-run slot; overwriting a live
-            // one would orphan its only cancellation handle.
-            guard !self.processing, !self.demonstrating, self.scheduledTask == nil else {
-                reply("goal_failed", "this Mac is mid-task"); return
-            }
-            guard self.claude != nil else { reply("goal_failed", "no API key on this machine"); return }
-            self.store.log("fleet", "remote goal: \(text.prefix(120))")
-            reply("goal_progress", "started")
-            self.scheduledTask = Task {
-                defer { self.scheduledTask = nil }
-                do {
-                    try await self.runGoal(text: text, gen: self.runGeneration, seedProgress: [], holder: .remote(goalID))
-                    self.store.log("fleet", "remote goal done")
-                    reply("goal_done", "finished")
-                } catch is ScreenLease.Busy {
-                    self.store.log("fleet", "remote goal refused — screen was busy")
-                    reply("goal_failed", "the screen was busy — nothing ran")
-                } catch {
-                    let preempted = error is ScreenLease.Revoked || error is CancellationError
-                    self.store.log("fleet", "remote goal stopped: \(preempted ? "local user took the screen" : "\(error)")")
-                    reply("goal_failed", preempted ? "the local user took the screen" : "\(error)")
-                }
+            self?.runAutomatedGoal(text: text, holder: .remote(goalID), tag: "fleet") { kind, detail in
+                reply(kind.rawValue, detail)
             }
         }
         // Dispatcher side: narrate what workers report, and mirror it to the

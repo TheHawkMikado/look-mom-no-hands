@@ -69,15 +69,13 @@ final class UpdateChecker: ObservableObject {
         mode == "cloud" ? 3600 : 24 * 3600
     }
 
-    /// Mode comes from the account snapshot AccountStore persists; absent (not
-    /// signed in, fresh install) reads as BYOK — the conservative cadence.
-    private var minInterval: TimeInterval {
-        guard let data = UserDefaults.standard.data(forKey: "account-info"),
-              let info = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            return Self.interval(forMode: nil)
-        }
-        return Self.interval(forMode: info["mode"] as? String)
-    }
+    /// Injected at wiring (the app struct holds both this and AccountStore) so
+    /// AccountStore stays the sole reader of its own persistence — a shadow
+    /// parse of its storage here once risked silently falling back to the slow
+    /// cadence for exactly the Cloud accounts the fast one exists for.
+    var modeProvider: (() -> String?)?
+
+    private var minInterval: TimeInterval { Self.interval(forMode: modeProvider?()) }
 
     private var current: String {
         Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0"
@@ -139,12 +137,30 @@ final class UpdateChecker: ObservableObject {
         dmgURL = manifest.dmgURL.flatMap(URL.init(string:))
         if Self.compare(current, isLessThan: manifest.minimumVersion) {
             status = .required(version: manifest.version, url: url, notes: manifest.notes)
-        } else if Self.compare(current, isLessThan: manifest.version) {
+        } else if Self.isUpdate(current: current, latest: manifest.version) {
             status = .available(version: manifest.version, url: url, notes: manifest.notes)
         } else {
             status = .upToDate
             if force { manualResult = .current(current) }
         }
+    }
+
+    /// Ordering for the V#.##.YYMMDD.COMMIT scheme: milestone, update, and
+    /// date compare numerically; the commit component is an IDENTITY, not an
+    /// ordinal — hex doesn't order. When the first three match, the server's
+    /// word is authoritative: a different (or newly present) commit component
+    /// means a respin this build doesn't have. Same-identity never updates, so
+    /// a stale manifest can't downgrade anyone.
+    nonisolated static func isUpdate(current: String, latest: String) -> Bool {
+        let c = parts(current), l = parts(latest)
+        for i in 0..<3 {
+            let cv = i < c.count ? c[i] : 0
+            let lv = i < l.count ? l[i] : 0
+            if cv != lv { return cv < lv }
+        }
+        let cCommit = current.split(separator: ".").dropFirst(3).joined(separator: ".")
+        let lCommit = latest.split(separator: ".").dropFirst(3).joined(separator: ".")
+        return !lCommit.isEmpty && cCommit != lCommit
     }
 
     // MARK: - Semver compare

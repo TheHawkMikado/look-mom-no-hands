@@ -19,6 +19,7 @@ struct LookMomNoHandsApp: App {
                 // place to wire sign-in delivery and run the launch sync — unlike
                 // window content, which isn't materialised until it's shown.
                 .onAppear {
+                    updates.modeProvider = { account.info?.mode }
                     updates.startPeriodicChecks()
                     account.attach(coordinator: coordinator)
                     AccountBridge.handler = { url in

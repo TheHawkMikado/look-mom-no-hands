@@ -16,21 +16,33 @@ import { createAppToken, ensureSchema } from "@/lib/db";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
+/**
+ * Every app allowed to receive a credential-bearing redirect, as data. A token
+ * in a redirect is a credential: an unknown client falls back to the Mac's
+ * scheme rather than echoing anything attacker-chosen, and per-client
+ * differences (scopes, TTLs) now have a place to live.
+ */
+const CLIENTS: Record<string, { scheme: string }> = {
+  mac: { scheme: "lookmomnohands" },
+  mobile: { scheme: "nohands" },
+};
+
 export async function GET(req: NextRequest) {
   const site = process.env.SITE_URL ?? req.nextUrl.origin;
   const session = await getSession();
+  const client = req.nextUrl.searchParams.get("client") ?? "mac";
+  const { scheme: appScheme } = CLIENTS[client] ?? CLIENTS.mac;
 
   if (!session) {
-    await setPostLoginNext("/app/login");
+    // Preserve WHO is signing in through the login round trip — storing the
+    // bare path here once sent fresh mobile sign-ins to the Mac's scheme,
+    // which the phone can't receive, dead-ending every first-time user.
+    await setPostLoginNext(`/app/login?client=${encodeURIComponent(client)}`);
     return NextResponse.redirect(`${site}/login`);
   }
 
   await ensureSchema();
   const token = await createAppToken(session.email, null);
-  // Allowlisted schemes only: a token in a redirect is a credential, and an
-  // attacker-chosen scheme would hand it to whatever app registered it.
-  const client = req.nextUrl.searchParams.get("client");
-  const appScheme = client === "mobile" ? "nohands" : "lookmomnohands";
   const scheme = `${appScheme}://auth?token=${encodeURIComponent(token)}`;
 
   // An HTML page rather than a bare 3xx: browsers open custom-scheme URLs more

@@ -85,6 +85,14 @@ export function TalkScreen() {
     (effect: PttEffect) => {
       switch (effect) {
         case "startHoldRecognition":
+          // A quick re-press can land inside the previous release's grace
+          // window; without disarming it, the old timer would fire mid-hold
+          // and ship the NEW utterance's half-finished partial as a goal.
+          if (finalTimerRef.current) {
+            clearTimeout(finalTimerRef.current);
+            finalTimerRef.current = null;
+          }
+          awaitingFinalRef.current = false;
           setStatus(null);
           setPartial("");
           lastTranscriptRef.current = "";

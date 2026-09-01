@@ -7,7 +7,12 @@
  * the backend receives lowercase, punctuation-free goals from locked mode.
  */
 
-export const WAKE_VARIANTS = ["hey mama", "hey momma", "a mama"] as const;
+export const WAKE_VARIANTS = ["hey mama", "hey momma"] as const;
+/** Recognizer mishearings of the wake phrase itself. A real wake phrase opens
+ *  the utterance, so these only count at position 0 — matched mid-sentence,
+ *  "send a message to a mama in my contacts" would truncate to "in my
+ *  contacts" and ship a mangled goal. */
+export const WAKE_VARIANTS_AT_START = ["a mama"] as const;
 
 /** Lowercase, strip punctuation, collapse whitespace. */
 export function normalize(text: string): string {
@@ -40,6 +45,17 @@ export function extractCommand(utterance: string): string | null {
         commandStart = end;
       }
       from = idx + 1;
+    }
+  }
+
+  // The loose mishearing variants only count as an opener, and never override
+  // a real wake phrase found later in a stacked transcript.
+  if (commandStart === -1) {
+    for (const variant of WAKE_VARIANTS_AT_START) {
+      if (norm.startsWith(variant + " ")) {
+        commandStart = variant.length;
+        break;
+      }
     }
   }
 

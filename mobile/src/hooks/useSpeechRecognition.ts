@@ -34,9 +34,15 @@ export function useSpeechRecognition(callbacks: SpeechCallbacks) {
 
   const continuousRef = useRef(false);
   const restartTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // True while startEngine's own stop→start is in flight. The defensive
+  // Voice.stop() below fires onSpeechEnd/onSpeechError, and letting those
+  // schedule ANOTHER restart tears down each fresh session ~400ms in — locked
+  // mode turns deaf in a restart storm.
+  const restartingRef = useRef(false);
   const [error, setError] = useState<string | null>(null);
 
   const startEngine = useCallback(async () => {
+    restartingRef.current = true;
     try {
       // A stale session can leave the recognizer "busy"; stop before start
       // makes restarts idempotent.
@@ -45,6 +51,8 @@ export function useSpeechRecognition(callbacks: SpeechCallbacks) {
       setError(null);
     } catch {
       setError("Speech recognition unavailable");
+    } finally {
+      restartingRef.current = false;
     }
   }, []);
 
@@ -60,6 +68,7 @@ export function useSpeechRecognition(callbacks: SpeechCallbacks) {
 
     const cycleIfContinuous = () => {
       if (!continuousRef.current) return;
+      if (restartingRef.current) return;   // our own stop→start echo, not a real session end
       if (restartTimerRef.current) clearTimeout(restartTimerRef.current);
       // Small delay: restarting the instant the engine ends races the native
       // teardown on both platforms.

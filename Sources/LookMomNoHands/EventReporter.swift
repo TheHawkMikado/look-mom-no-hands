@@ -47,6 +47,13 @@ final class EventReporter {
     /// remote-goal path. Delivery is take-once server-side, so firing this is
     /// already exclusive across the account's Macs.
     var onPhoneGoal: ((String) -> Void)?
+    /// Gate asked BEFORE the take: delivery destroys the goal server-side, so a
+    /// Mac that can't run it right now (busy, no key, queue not empty) must not
+    /// take it — an idle fleet Mac, or this one in ten seconds, will.
+    var canAcceptGoal: (() -> Bool)?
+    /// Fires every poll tick regardless of the gate — the coordinator uses it
+    /// to drain a locally-queued goal stranded by a race.
+    var onGoalTick: (() -> Void)?
 
     private var queue: [Event] = []
     private var outstandingApprovals: Set<String> = []
@@ -62,9 +69,14 @@ final class EventReporter {
     /// is cached instead of a Security-framework IPC round trip on every report
     /// and timer tick. A 401 clears it (token revoked server-side).
     private var cachedBearer: String?
+    private var lastBearerMiss: Date?
     private func bearer() -> String? {
         if let cachedBearer { return cachedBearer }
+        // A signed-out Mac must not pay a securityd IPC on every 10s tick;
+        // 60s keeps the post-sign-in pickup delay barely noticeable.
+        if let miss = lastBearerMiss, Date().timeIntervalSince(miss) < 60 { return nil }
         cachedBearer = KeychainStore.load(account: AccountStore.appTokenAccount)
+        lastBearerMiss = cachedBearer == nil ? Date() : nil
         return cachedBearer
     }
 
@@ -164,18 +176,28 @@ final class EventReporter {
         goalTimer = t
     }
 
+    private struct GoalsResponse: Decodable {
+        struct Goal: Decodable {
+            let id: String
+            let text: String
+        }
+        let goals: [Goal]
+    }
+
     private func pollGoals() async {
+        onGoalTick?()
+        // Ask before taking: delivery is destructive, so a Mac that can't run
+        // the goal right now leaves it on the server for whoever can.
+        guard canAcceptGoal?() != false else { return }
         guard let bearer = bearer(), onPhoneGoal != nil else { return }
         let req = authedRequest("api/app/goals/poll", bearer: bearer)
         guard let (data, response) = try? await URLSession.shared.data(for: req) else { return }
         let status = (response as? HTTPURLResponse)?.statusCode ?? 0
         if status == 401 { cachedBearer = nil; return }
         guard (200..<300).contains(status),
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let goals = json["goals"] as? [[String: Any]] else { return }
-        for goal in goals {
-            guard let text = goal["text"] as? String, !text.isEmpty else { continue }
-            onPhoneGoal?(text)
+              let decoded = try? JSONDecoder().decode(GoalsResponse.self, from: data) else { return }
+        for goal in decoded.goals where !goal.text.isEmpty {
+            onPhoneGoal?(goal.text)
         }
     }
 
