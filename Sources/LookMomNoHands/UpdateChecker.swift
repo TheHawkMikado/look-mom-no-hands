@@ -58,10 +58,26 @@ final class UpdateChecker: ObservableObject {
     var currentVersion: String { current }
 
     private let manifestURL = URL(string: "https://nohandsapp.com/api/version")!
-    /// Don't poll more than this often, even across relaunches — the check is a
-    /// courtesy, not something to hammer the endpoint for.
-    private let minInterval: TimeInterval = 6 * 3600
     private let lastCheckKey = "lmnh.update.lastCheck"
+
+    /// Background-check cadence by account mode: BYOK accounts check daily (a
+    /// courtesy nudge); Cloud accounts hourly — they run on the platform's
+    /// keys, so when a release closes a costly or unsafe behavior, the window
+    /// where an old build keeps spending platform money must stay small.
+    /// Manual "Check now" always bypasses this.
+    nonisolated static func interval(forMode mode: String?) -> TimeInterval {
+        mode == "cloud" ? 3600 : 24 * 3600
+    }
+
+    /// Mode comes from the account snapshot AccountStore persists; absent (not
+    /// signed in, fresh install) reads as BYOK — the conservative cadence.
+    private var minInterval: TimeInterval {
+        guard let data = UserDefaults.standard.data(forKey: "account-info"),
+              let info = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return Self.interval(forMode: nil)
+        }
+        return Self.interval(forMode: info["mode"] as? String)
+    }
 
     private var current: String {
         Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0"
@@ -71,6 +87,22 @@ final class UpdateChecker: ObservableObject {
     /// (the panel's "Check now" button passes force).
     func checkInBackground(force: Bool = false) {
         Task { await check(force: force) }
+    }
+
+    private var ticker: Timer?
+
+    /// The cadence lives in the throttle, not the timer: this ticks hourly and
+    /// `check()` declines until the mode's interval has passed — so a Cloud
+    /// account effectively checks hourly and a BYOK one daily, without the
+    /// panel ever being opened.
+    func startPeriodicChecks() {
+        guard ticker == nil else { return }
+        let t = Timer(timeInterval: 3600, repeats: true) { [weak self] _ in
+            Task { @MainActor in await self?.check() }
+        }
+        t.tolerance = 300
+        RunLoop.main.add(t, forMode: .common)
+        ticker = t
     }
 
     func check(force: Bool = false) async {

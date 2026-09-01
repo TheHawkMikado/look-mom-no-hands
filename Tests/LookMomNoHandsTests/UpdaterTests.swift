@@ -51,6 +51,15 @@ final class UpdaterTests: XCTestCase {
         XCTAssertTrue(AppUpdater.requirement.contains("B59AM8227J"))
     }
 
+    // MARK: check cadence by account mode
+
+    func testCloudChecksHourlyByokDaily() {
+        XCTAssertEqual(UpdateChecker.interval(forMode: "cloud"), 3600)
+        XCTAssertEqual(UpdateChecker.interval(forMode: "byok"), 24 * 3600)
+        XCTAssertEqual(UpdateChecker.interval(forMode: nil), 24 * 3600,
+                       "not signed in must get the conservative cadence, not the aggressive one")
+    }
+
     // MARK: same-day respin ordering
 
     func testRespinComparesNewerThanItsBase() {
