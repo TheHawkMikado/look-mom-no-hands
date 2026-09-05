@@ -1612,6 +1612,32 @@ final class AppCoordinator: ObservableObject {
         }
     }
 
+    /// Dictation spoken into the phone: paste it wherever the Mac's cursor is.
+    /// Clipboard-first like local insert mode — the text is recoverable with a
+    /// manual ⌘V even when auto-paste can't happen.
+    private func pasteRemoteDictation(_ text: String) async {
+        ScreenController.setClipboard(text)
+        store.addTranscript(TranscriptRecord(kind: "dictation", transcript: text))
+        let title = String(text.prefix(60))
+        guard ScreenController.isTrusted else {
+            store.log("phone", "dictation (\(text.count) chars) on clipboard — press ⌘V (auto-paste needs Accessibility)")
+            events.report(kind: .goalDone, title: title, detail: "on your Mac's clipboard — press ⌘V")
+            return
+        }
+        guard let target = NSWorkspace.shared.frontmostApplication else {
+            store.log("phone", "dictation (\(text.count) chars) on clipboard — no frontmost app to paste into")
+            events.report(kind: .goalDone, title: title, detail: "on your Mac's clipboard — press ⌘V")
+            return
+        }
+        try? await Task.sleep(nanoseconds: 40_000_000)   // let the app register the clipboard
+        // Straight to the pid, same as local dictation — a global ⌘V can be
+        // eaten by another utility's event tap.
+        try? ScreenController.sendPaste(toPid: target.processIdentifier)
+        store.log("phone", "dictation sent ⌘V (\(text.count) chars) to \(target.localizedName ?? "frontmost app")")
+        events.report(kind: .goalDone, title: title,
+                      detail: "pasted into \(target.localizedName ?? "the frontmost app")")
+    }
+
     /// Single slot, revocable lease, the local user always preempts — stated
     /// once. Fleet goals, phone goals, and whatever channel comes next are
     /// adapters supplying only their reply transport.
@@ -1663,9 +1689,17 @@ final class AppCoordinator: ObservableObject {
             guard let self else { return false }
             return self.claude != nil && self.phoneGoalQueue.isEmpty && self.automatedSlotFree
         }
-        events.onPhoneGoal = { [weak self] text in
-            self?.phoneGoalQueue.append(text)
-            self?.drainPhoneGoals()
+        events.onPhoneGoal = { [weak self] text, kind in
+            guard let self else { return }
+            if kind == "dictation" {
+                // Dictation never touches the agent slot machinery — it's a
+                // paste, not a goal, and queuing it behind a running goal
+                // would land the text minutes after it was spoken.
+                Task { @MainActor in await self.pasteRemoteDictation(text) }
+            } else {
+                self.phoneGoalQueue.append(text)
+                self.drainPhoneGoals()
+            }
         }
         events.onGoalTick = { [weak self] in self?.drainPhoneGoals() }
         events.startGoalPolling()

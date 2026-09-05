@@ -1,4 +1,4 @@
-import { extractCommand, normalize } from "../wake";
+import { extractCommand, normalize, splitStopPhrase } from "../wake";
 
 describe("normalize", () => {
   it("lowercases, strips punctuation, collapses whitespace", () => {
@@ -64,5 +64,42 @@ describe("extractCommand", () => {
 
   it("is punctuation and case insensitive around the phrase", () => {
     expect(extractCommand("HEY, MAMA: lock my screen")).toBe("lock my screen");
+  });
+});
+
+describe("splitStopPhrase", () => {
+  it("recognises a bare stop phrase", () => {
+    expect(splitStopPhrase("Adios Mama")).toBe("");
+    expect(splitStopPhrase("adios momma!")).toBe("");
+  });
+
+  it("returns the text spoken before the phrase", () => {
+    expect(splitStopPhrase("send the report by five adios mama")).toBe(
+      "send the report by five",
+    );
+  });
+
+  it("tolerates a couple of trailing recognizer words", () => {
+    expect(splitStopPhrase("that's all adios mama thank you")).toBe(
+      "that s all",
+    );
+    // Too far from the end: the phrase is content, not a command to stop.
+    expect(
+      splitStopPhrase("adios mama is what I always say when I leave the room"),
+    ).toBeNull();
+  });
+
+  it("matches the split 'ma ma' and accented mishearings", () => {
+    expect(splitStopPhrase("adios ma ma")).toBe("");
+    expect(splitStopPhrase("adiós mama")).toBe("");
+  });
+
+  it("returns null without a stop phrase", () => {
+    expect(splitStopPhrase("open safari please")).toBeNull();
+    expect(splitStopPhrase("")).toBeNull();
+  });
+
+  it("requires whole words", () => {
+    expect(splitStopPhrase("radios mama")).toBeNull();
   });
 });

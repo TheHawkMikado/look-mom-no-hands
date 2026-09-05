@@ -8,6 +8,16 @@
  */
 
 export const WAKE_VARIANTS = ["hey mama", "hey momma"] as const;
+
+/** Mirror of the Mac app's session-ending phrases (AppCoordinator.stopPhrases)
+ *  so the phone speaks the same language as the Mac. */
+export const STOP_VARIANTS = [
+  "adios mama",
+  "adios mamma",
+  "adios momma",
+  "adios ma ma",
+  "adiós mama",
+] as const;
 /** Recognizer mishearings of the wake phrase itself. A real wake phrase opens
  *  the utterance, so these only count at position 0 — matched mid-sentence,
  *  "send a message to a mama in my contacts" would truncate to "in my
@@ -62,4 +72,32 @@ export function extractCommand(utterance: string): string | null {
   if (commandStart === -1) return null;
   const command = norm.slice(commandStart).trim();
   return command.length > 0 ? command : null;
+}
+
+/**
+ * If the utterance ends with a stop phrase — allowing up to `maxTrailing`
+ * recognizer words after it, mirroring the Mac's trailing-word tolerance —
+ * return the (possibly empty) text before the phrase: the session is over but
+ * what was said before "adios mama" still counts. Returns null when the
+ * utterance doesn't end the session.
+ */
+export function splitStopPhrase(
+  utterance: string,
+  maxTrailing = 2,
+): string | null {
+  const norm = normalize(utterance);
+  if (!norm) return null;
+  const words = norm.split(" ");
+  const byLength = [...STOP_VARIANTS].sort((a, b) => b.length - a.length);
+  for (const variant of byLength) {
+    const vw = variant.split(" ");
+    if (vw.length > words.length) continue;
+    const earliest = Math.max(0, words.length - vw.length - maxTrailing);
+    for (let i = words.length - vw.length; i >= earliest; i--) {
+      if (vw.every((w, j) => words[i + j] === w)) {
+        return words.slice(0, i).join(" ").trim();
+      }
+    }
+  }
+  return null;
 }

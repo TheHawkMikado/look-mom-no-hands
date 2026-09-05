@@ -69,10 +69,16 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   return (await res.json()) as T;
 }
 
-export function submitGoal(text: string): Promise<{ ok: true; id: string }> {
+/** "goal" runs the Mac's agent; "dictation" pastes at the Mac's cursor. */
+export type GoalKind = "goal" | "dictation";
+
+export function submitGoal(
+  text: string,
+  kind: GoalKind = "goal",
+): Promise<{ ok: true; id: string }> {
   return request("/api/app/goals", {
     method: "POST",
-    body: JSON.stringify({ text }),
+    body: JSON.stringify({ text, kind }),
   });
 }
 

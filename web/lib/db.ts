@@ -358,12 +358,15 @@ async function ensureSchemaOnce() {
       email        text NOT NULL,
       id           text NOT NULL,
       text         text NOT NULL,
+      kind         text NOT NULL DEFAULT 'goal',   -- 'goal' | 'dictation'
       created_at   timestamptz NOT NULL DEFAULT now(),
       PRIMARY KEY (email, id)
     )`;
   // Take-once is DELETE-on-take — a delivered_at lifecycle column briefly
   // existed, was never read, and its schema comment was already a lie.
   await db`ALTER TABLE phone_goals DROP COLUMN IF EXISTS delivered_at`;
+  // 'goal' runs the Mac's agent; 'dictation' pastes at the Mac's cursor.
+  await db`ALTER TABLE phone_goals ADD COLUMN IF NOT EXISTS kind text NOT NULL DEFAULT 'goal'`;
   await db`DROP INDEX IF EXISTS phone_goals_pending`;
   await db`
     CREATE INDEX IF NOT EXISTS phone_goals_by_age
@@ -372,14 +375,20 @@ async function ensureSchemaOnce() {
 
 // MARK: - Phone goals (the mobile app's spoken tasks, queued for a Mac)
 
+export type PhoneGoalKind = "goal" | "dictation";
+
 /** Queue a spoken goal from the phone. Returns the goal id. */
-export async function submitPhoneGoal(email: string, text: string): Promise<string> {
+export async function submitPhoneGoal(
+  email: string,
+  text: string,
+  kind: PhoneGoalKind = "goal",
+): Promise<string> {
   const db = sql();
   const account = email.toLowerCase();
   const id = crypto.randomUUID();
   await db`
-    INSERT INTO phone_goals (email, id, text)
-    VALUES (${account}, ${id}, ${text})`;
+    INSERT INTO phone_goals (email, id, text, kind)
+    VALUES (${account}, ${id}, ${text}, ${kind})`;
   // Pure garbage collection (the staleness RULE lives in the take query), so
   // it doesn't belong on the latency-visible submit path every time —
   // probabilistic keeps never-polled rows from piling up at ~1% of the cost.
@@ -400,7 +409,7 @@ export async function submitPhoneGoal(email: string, text: string): Promise<stri
  */
 export async function takePendingGoals(
   email: string,
-): Promise<{ id: string; text: string; created_at: Date }[]> {
+): Promise<{ id: string; text: string; kind: string; created_at: Date }[]> {
   const db = sql();
   // ONE goal per take, not the batch: taken goals exist only in the taker's
   // RAM, so handing over three at once meant a Mac crash destroyed two goals
@@ -416,8 +425,8 @@ export async function takePendingGoals(
         LIMIT 1
      ) next
      WHERE p.email = next.email AND p.id = next.id
-    RETURNING p.id, p.text, p.created_at`;
-  return rows as unknown as { id: string; text: string; created_at: Date }[];
+    RETURNING p.id, p.text, p.kind, p.created_at`;
+  return rows as unknown as { id: string; text: string; kind: string; created_at: Date }[];
 }
 
 // MARK: - Resellers (Stripe Connect + provisioning)

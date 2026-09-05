@@ -43,10 +43,11 @@ final class EventReporter {
 
     /// approvalId, approve? — wired to BackgroundAgentManager by the coordinator.
     var onVerdict: ((String, Bool) -> Void)?
-    /// A spoken goal submitted from the phone app; wired to the coordinator's
+    /// text, kind ("goal" runs the agent, "dictation" pastes at the cursor) —
+    /// a spoken goal submitted from the phone app; wired to the coordinator's
     /// remote-goal path. Delivery is take-once server-side, so firing this is
     /// already exclusive across the account's Macs.
-    var onPhoneGoal: ((String) -> Void)?
+    var onPhoneGoal: ((String, String) -> Void)?
     /// Gate asked BEFORE the take: delivery destroys the goal server-side, so a
     /// Mac that can't run it right now (busy, no key, queue not empty) must not
     /// take it — an idle fleet Mac, or this one in ten seconds, will.
@@ -191,6 +192,8 @@ final class EventReporter {
         struct Goal: Decodable {
             let id: String
             let text: String
+            /// nil from a server that predates dictation — treated as "goal".
+            let kind: String?
         }
         let goals: [Goal]
     }
@@ -208,7 +211,7 @@ final class EventReporter {
         guard (200..<300).contains(status),
               let decoded = try? JSONDecoder().decode(GoalsResponse.self, from: data) else { return }
         for goal in decoded.goals where !goal.text.isEmpty {
-            onPhoneGoal?(goal.text)
+            onPhoneGoal?(goal.text, goal.kind ?? "goal")
         }
     }
 

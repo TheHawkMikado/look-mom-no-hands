@@ -8,8 +8,9 @@ Talk screen.
 ## Stack
 
 Expo SDK 57 / React Native 0.86 / TypeScript strict. Bottom tabs via
-`@react-navigation/bottom-tabs`. Speech-to-text via `@react-native-voice/voice`
-(on-device engines), text-to-speech via `expo-speech`, token storage via
+`@react-navigation/bottom-tabs`. Speech-to-text via `expo-speech-recognition`
+(on-device engines; replaced `@react-native-voice/voice`, whose result events
+never arrived on RN 0.86), text-to-speech via `expo-speech`, token storage via
 `expo-secure-store`.
 
 ## Layout
@@ -43,7 +44,7 @@ Then `npx expo run:ios` / `npx expo run:android` (or an EAS dev build).
 
 ## Dev build required — not Expo Go
 
-`@react-native-voice/voice` ships native code, so speech recognition only
+`expo-speech-recognition` ships native code, so speech recognition only
 works in a development build (`npx expo prebuild` + `expo run:*`, or EAS).
 Everything else (sign-in, feed, approvals, TTS) works in Expo Go.
 

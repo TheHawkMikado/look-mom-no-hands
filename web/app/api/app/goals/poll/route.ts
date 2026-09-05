@@ -18,7 +18,12 @@ export async function POST(req: NextRequest) {
   const goals = await takePendingGoals(email);
   return NextResponse.json(
     {
-      goals: goals.map((g) => ({ id: g.id, text: g.text, createdAt: g.created_at.toISOString() })),
+      goals: goals.map((g) => ({
+        id: g.id,
+        text: g.text,
+        kind: g.kind,
+        createdAt: g.created_at.toISOString(),
+      })),
     },
     // no-store is load-bearing here: delivery is destructive, so a cache layer
     // replaying a taken batch would hand the Mac goals that no longer exist.

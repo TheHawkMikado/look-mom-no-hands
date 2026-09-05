@@ -20,8 +20,10 @@ export async function POST(req: NextRequest) {
   const body = await req.json().catch(() => ({}));
   const text = String(body.text ?? "").trim().slice(0, TEXT_MAX);
   if (!text) return NextResponse.json({ error: "empty goal" }, { status: 400 });
+  // Anything unrecognized runs as a plain goal — old clients never sent kind.
+  const kind = body.kind === "dictation" ? "dictation" : "goal";
 
   await ensureSchema();
-  const id = await submitPhoneGoal(email, text);
+  const id = await submitPhoneGoal(email, text, kind);
   return NextResponse.json({ ok: true, id });
 }
