@@ -11,6 +11,7 @@
     "ios": {
       "supportsTablet": false,
       "bundleIdentifier": "com.nohands.mobile",
+      "appleTeamId": "B59AM8227J",
       "infoPlist": {
         "NSMicrophoneUsageDescription": "The microphone captures your voice so you can send tasks to your Mac.",
         "NSSpeechRecognitionUsageDescription": "Speech recognition turns what you say into a task for your Mac.",
@@ -39,7 +40,7 @@
       "expo-secure-store",
       "expo-web-browser",
       [
-        "@react-native-voice/voice",
+        "expo-speech-recognition",
         {
           "microphonePermission": "The microphone captures your voice so you can send tasks to your Mac.",
           "speechRecognitionPermission": "Speech recognition turns what you say into a task for your Mac."

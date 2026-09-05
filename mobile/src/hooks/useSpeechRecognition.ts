@@ -1,8 +1,8 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import Voice, {
-  SpeechErrorEvent,
-  SpeechResultsEvent,
-} from "@react-native-voice/voice";
+import { useCallback, useMemo, useRef, useState } from "react";
+import {
+  ExpoSpeechRecognitionModule,
+  useSpeechRecognitionEvent,
+} from "expo-speech-recognition";
 
 interface SpeechCallbacks {
   onPartial: (text: string) => void;
@@ -10,11 +10,12 @@ interface SpeechCallbacks {
 }
 
 /**
- * Lifecycle wrapper around @react-native-voice/voice: both platforms end
- * recognition sessions on their own (iOS ~1min cap, Android silence timeout),
- * so continuous mode restarts the engine on end/error. Needs a dev build, not
- * Expo Go; locked-mode BACKGROUND survival needs native work on both
- * platforms — the per-platform specifics live in mobile/README.md.
+ * Lifecycle wrapper around expo-speech-recognition. (Its predecessor,
+ * @react-native-voice/voice, started without error on current React Native but
+ * its result events never arrived — the app looked deaf with nothing to show.)
+ * Continuous mode is native here; the restart-on-end path is only a backstop
+ * for platforms that still end sessions early. Locked-mode BACKGROUND survival
+ * still needs native work — see mobile/README.md.
  */
 export function useSpeechRecognition(callbacks: SpeechCallbacks) {
   const callbacksRef = useRef(callbacks);
@@ -22,55 +23,52 @@ export function useSpeechRecognition(callbacks: SpeechCallbacks) {
 
   const continuousRef = useRef(false);
   const restartTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  // True while startEngine's own stop→start is in flight. The defensive
-  // Voice.stop() below fires onSpeechEnd/onSpeechError, and letting those
-  // schedule ANOTHER restart tears down each fresh session ~400ms in — locked
-  // mode turns deaf in a restart storm.
+  // True while our own stop→start is in flight, so the end/error events that
+  // teardown fires don't schedule a second, session-killing restart.
   const restartingRef = useRef(false);
   const [error, setError] = useState<string | null>(null);
 
   const startEngine = useCallback(async () => {
     restartingRef.current = true;
     try {
-      // A stale session can leave the recognizer "busy"; stop before start
-      // makes restarts idempotent.
-      await Voice.stop().catch(() => undefined);
-      await Voice.start("en-US");
+      const permission = await ExpoSpeechRecognitionModule.requestPermissionsAsync();
+      if (!permission.granted) {
+        setError("Microphone or speech permission denied — enable both in Settings.");
+        return;
+      }
+      ExpoSpeechRecognitionModule.start({
+        lang: "en-US",
+        interimResults: true,
+        continuous: continuousRef.current,
+      });
       setError(null);
-    } catch {
-      setError("Speech recognition unavailable");
+    } catch (e) {
+      setError(`Speech recognition unavailable${e instanceof Error ? `: ${e.message}` : ""}`);
     } finally {
       restartingRef.current = false;
     }
   }, []);
 
-  useEffect(() => {
-    Voice.onSpeechPartialResults = (e: SpeechResultsEvent) => {
-      const text = e.value?.[0];
-      if (text) callbacksRef.current.onPartial(text);
-    };
-    Voice.onSpeechResults = (e: SpeechResultsEvent) => {
-      const text = e.value?.[0];
-      if (text) callbacksRef.current.onFinal(text);
-    };
+  useSpeechRecognitionEvent("result", (event) => {
+    const text = event.results?.[0]?.transcript;
+    if (!text) return;
+    if (event.isFinal) callbacksRef.current.onFinal(text);
+    else callbacksRef.current.onPartial(text);
+  });
 
-    const cycleIfContinuous = () => {
-      if (!continuousRef.current) return;
-      if (restartingRef.current) return;   // our own stop→start echo, not a real session end
-      if (restartTimerRef.current) clearTimeout(restartTimerRef.current);
-      // Small delay: restarting the instant the engine ends races the native
-      // teardown on both platforms.
-      restartTimerRef.current = setTimeout(() => void startEngine(), 400);
-    };
-    Voice.onSpeechEnd = cycleIfContinuous;
-    Voice.onSpeechError = (_e: SpeechErrorEvent) => cycleIfContinuous();
+  useSpeechRecognitionEvent("end", () => {
+    if (!continuousRef.current || restartingRef.current) return;
+    if (restartTimerRef.current) clearTimeout(restartTimerRef.current);
+    // Small delay: restarting the instant the engine ends races native teardown.
+    restartTimerRef.current = setTimeout(() => void startEngine(), 400);
+  });
 
-    return () => {
-      if (restartTimerRef.current) clearTimeout(restartTimerRef.current);
-      continuousRef.current = false;
-      void Voice.destroy().then(() => Voice.removeAllListeners());
-    };
-  }, [startEngine]);
+  useSpeechRecognitionEvent("error", (event) => {
+    // "no-speech" is the engine giving up on silence, not a failure — the
+    // continuous restart path handles it; surfacing it would cry wolf.
+    if (event.error === "no-speech" || event.error === "aborted") return;
+    setError(event.message || event.error || "Speech recognition error");
+  });
 
   const start = useCallback(
     async (continuous: boolean) => {
@@ -83,7 +81,11 @@ export function useSpeechRecognition(callbacks: SpeechCallbacks) {
   const stop = useCallback(async () => {
     continuousRef.current = false;
     if (restartTimerRef.current) clearTimeout(restartTimerRef.current);
-    await Voice.stop().catch(() => undefined);
+    try {
+      ExpoSpeechRecognitionModule.stop();
+    } catch {
+      // Already stopped — nothing to unwind.
+    }
   }, []);
 
   // Stable identity: consumers put this in dep arrays, and a fresh object per
