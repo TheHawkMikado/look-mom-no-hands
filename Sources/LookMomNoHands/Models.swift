@@ -12,6 +12,10 @@ enum AppIdentity {
     static let keychainService = "com.lookmomnohands.anthropic"
     static let manualKeychainNames = ["Look Ma No Hands", "Look Mom No Hands"]
     static let storeQueueLabel = "com.lookmomnohands.store.io"
+    /// Folder name written into the user's own synced storage (Dropbox etc.) by
+    /// the notes exporter. Frozen the moment the first user syncs it — renaming
+    /// would split their exports across two trees. Comma-free on purpose.
+    static let exportFolder = "Look Ma No Hands"
 }
 
 /// One step decoded from the model's forced `emit_plan` tool call.
@@ -351,11 +355,15 @@ struct ProcessingProfile: Codable, Identifiable, Sendable, Equatable {
         self.builtIn = builtIn
     }
 
+    /// The Meeting profile's seed id — referenced by the meeting-notes pipeline,
+    /// so it lives as a constant instead of a string scattered across files.
+    static let meetingID = "builtin.meeting"
+
     /// Seeded on first run; the user can edit/duplicate/add their own.
     static let seeds: [ProcessingProfile] = [
         ProcessingProfile(id: "builtin.general", name: "General note", builtIn: true, instructionsText:
             "A clear title, a 2–3 sentence summary, the key points, and any concrete action items (with an owner and date when stated)."),
-        ProcessingProfile(id: "builtin.meeting", name: "Meeting", builtIn: true, instructionsText:
+        ProcessingProfile(id: meetingID, name: "Meeting", builtIn: true, instructionsText:
             "Treat this as meeting notes. Summary of what was discussed, decisions made, action items with owners and due dates, and any open questions. List attendees if named."),
         ProcessingProfile(id: "builtin.tasks", name: "Task list", builtIn: true, instructionsText:
             "Extract a checklist of concrete to-dos, each as a short imperative bullet under action items. Keep the summary to one line. Ignore filler."),

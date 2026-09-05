@@ -30,6 +30,15 @@ final class ProfileStore: ObservableObject {
 
     var active: ProcessingProfile? { profiles.first { $0.id == activeID } ?? profiles.first }
 
+    /// Instructions of a specific profile (the meeting-notes pipeline wants the
+    /// Meeting profile regardless of what's active). Built-ins can't miss —
+    /// undeletable, re-seeded every launch. An unknown id degrades to ""
+    /// (the report's default framing), never to whatever profile happens to be
+    /// active — the caller asked for a specific one precisely to avoid that.
+    func instructions(forID id: String) -> String {
+        profiles.first { $0.id == id }?.instructions ?? ""
+    }
+
     func add(name: String, instructions: String) {
         let p = ProcessingProfile(name: name.trimmingCharacters(in: .whitespacesAndNewlines),
                                   instructions: instructions.trimmingCharacters(in: .whitespacesAndNewlines))

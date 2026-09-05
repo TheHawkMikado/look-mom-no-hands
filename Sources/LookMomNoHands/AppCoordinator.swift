@@ -205,6 +205,7 @@ final class AppCoordinator: ObservableObject {
     private var scheduledTask: Task<Void, Never>?
     private var fleetSync: Set<AnyCancellable> = []
     let knowledge: KnowledgeStore
+    let notesExporter = NotesExporter()
     let calendarMeetings = CalendarMeetings()
     /// The meeting currently being recorded (drives the dashboard row + guards
     /// against double-joins). Nil = not in a recorded meeting.
@@ -363,11 +364,9 @@ final class AppCoordinator: ObservableObject {
         calendarMeetings.autoJoinEnabled = autoJoinMeetings
         calendarMeetings.onMeetingStarting = { [weak self] m in self?.autoJoinMeeting(m) ?? false }
         calendarMeetings.start { [weak self] msg in self?.store.log("calendar", msg) }
-        // SettingsTab observes only the coordinator; forward the calendar store's
-        // changes (the authorized pill) or the Grant button never visibly works.
-        calendarMeetings.objectWillChange
-            .sink { [weak self] _ in self?.objectWillChange.send() }
-            .store(in: &fleetSync)
+        // No objectWillChange forwarding: SettingsTab observes these child
+        // stores directly as @ObservedObject (the MemoryTab pattern).
+        notesExporter.log = { [weak self] msg in self?.store.log("export", msg) }
         meetingRecorder.onFailure = { [weak self] message in
             guard let self, self.meetingRecording != nil else { return }
             self.store.log("meeting", "recording failed: \(message)")
@@ -1087,21 +1086,19 @@ final class AppCoordinator: ObservableObject {
                 }
                 if output.producesNote {
                     guard let claude = self.claude else {
-                        self.store.addTranscript(TranscriptRecord(kind: "dictation", transcript: text))
+                        self.fileNote(transcript: text)
                         return
                     }
                     let report = try await claude.buildDictationReport(text, vocabulary: self.vocabulary.promptContext, instructions: self.profiles.activeInstructions)
                     try Task.checkCancellation()
                     self.lastReport = report
-                    self.store.addTranscript(TranscriptRecord(kind: "dictation", transcript: text,
-                        title: report.title, summary: report.summary,
-                        keyPoints: report.keyPoints, actionItems: report.actionItems))
+                    self.fileNote(transcript: text, report: report)
                     self.store.log("claude", "note ready — \(report.keyPoints.count) points, \(report.actionItems.count) action items")
                 }
             } catch {
                 // Never lose the note — the raw text is the only durable copy.
                 let outcome = Task.isCancelled ? "cancelled" : "error: \(error)"
-                self.store.addTranscript(TranscriptRecord(kind: "dictation", transcript: text, outcome: outcome))
+                self.fileNote(transcript: text, outcome: outcome)
                 guard !Task.isCancelled, gen == self.runGeneration else { return }
                 self.phase = .error("\(error)")
                 self.store.log("error", "\(error)")
@@ -1262,9 +1259,7 @@ final class AppCoordinator: ObservableObject {
             defer { self.liveBusy = false }
             if let report = try? await claude.buildDictationReport(text, vocabulary: self.vocabulary.promptContext, instructions: self.profiles.activeInstructions) {
                 self.lastReport = report
-                self.store.addTranscript(TranscriptRecord(kind: "dictation", transcript: text,
-                    title: report.title, summary: report.summary,
-                    keyPoints: report.keyPoints, actionItems: report.actionItems))
+                self.fileNote(transcript: text, report: report)
                 self.store.log("live", "summarized \(text.count) chars")
             }
         }
@@ -1287,7 +1282,7 @@ final class AppCoordinator: ObservableObject {
     func saveLiveAsNote() {
         let text = liveTranscript.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return }
-        store.addTranscript(TranscriptRecord(kind: "dictation", transcript: text, title: "Live note"))
+        fileNote(title: "Live note", transcript: text)
         store.log("live", "saved as note")
     }
 
@@ -1675,7 +1670,7 @@ final class AppCoordinator: ObservableObject {
     /// manual ⌘V even when auto-paste can't happen.
     private func pasteRemoteDictation(_ text: String) async {
         ScreenController.setClipboard(text)
-        store.addTranscript(TranscriptRecord(kind: "dictation", transcript: text))
+        fileSnippet(text)
         let title = String(text.prefix(60))
         guard ScreenController.isTrusted else {
             store.log("phone", "dictation (\(text.count) chars) on clipboard — press ⌘V (auto-paste needs Accessibility)")
@@ -2060,13 +2055,25 @@ final class AppCoordinator: ObservableObject {
         meetingWatchTask = nil
         meetingRecording = nil
         listener.onTapBuffer = nil
-        let seconds = await meetingRecorder.stop()
+        let secs = await meetingRecorder.stop() ?? 0
+        // One threshold decides "this recording is real" for the spoken line,
+        // the export, AND the notes — a mismatch here once told the user
+        // "saved" while silently skipping both.
         let line: String
-        if let seconds, seconds > 1 {
-            let minutes = max(1, Int((seconds / 60).rounded()))
+        if secs > 5 {
+            let minutes = max(1, Int((secs / 60).rounded()))
             line = "Recorded \(minutes) minute\(minutes == 1 ? "" : "s") — saved to \(info.fileURL.lastPathComponent)."
+            notesExporter.exportRecording(info.fileURL)
+            produceMeetingNotes(info, seconds: secs)
+        } else if secs > 0 {
+            let s = max(1, Int(secs.rounded()))
+            line = "Recorded only \(s) second\(s == 1 ? "" : "s") — kept \(info.fileURL.lastPathComponent), skipped the notes."
+            // Still mirrored: the Settings copy promises kept recordings land in
+            // the export folder; only the notes pipeline is skipped for a clip.
+            notesExporter.exportRecording(info.fileURL)
         } else {
-            // Don't dress a dead capture up as a saved recording.
+            // Don't dress a dead capture up as a saved recording (nil and 0
+            // both mean the capture never produced frames).
             line = "The recording couldn't be saved."
         }
         store.log("meeting", "stopped (\(reason)): \(line)")
@@ -2075,6 +2082,86 @@ final class AppCoordinator: ObservableObject {
                                              outcome: "\(line) (\(reason))"))
         events.report(kind: .goalDone, title: "Meeting recording", detail: line)
         return line
+    }
+
+    /// Turns a finished recording into meeting notes: Scribe transcribes the
+    /// m4a (streamed from disk — it can be >100 MB), the dictation-report
+    /// pipeline with the Meeting profile summarizes it, and the note lands in
+    /// Transcripts + the export folder. Soft-fails — the audio file is already
+    /// safe on disk either way.
+    private func produceMeetingNotes(_ info: ActiveMeeting, seconds: Double) {
+        guard let key = elevenLabsKey, let claude else {
+            store.log("meeting", "no meeting notes — \(elevenLabsKey == nil ? "add an ElevenLabs key" : "add an Anthropic key") to transcribe recordings")
+            return
+        }
+        let instructions = profiles.instructions(forID: ProcessingProfile.meetingID)
+        let vocab = vocabulary.promptContext
+        // Captured now: a bumped generation later means the user Stopped the
+        // assistant or moved on — the notes still get filed, but silently, and
+        // without clobbering whatever report they're looking at.
+        let gen = runGeneration
+        store.log("meeting", "transcribing the recording (\(Int(seconds))s)…")
+        Task { [weak self] in
+            let text: String
+            do {
+                // 30 min idle timeout: Scribe processes a multi-hour file
+                // silently after the upload, and timing out mid-wait forfeits
+                // a transcription the user would happily have waited for.
+                text = try await ScribeClient(apiKey: key).transcribeFile(
+                    at: info.fileURL, contentType: MeetingRecorder.contentType,
+                    billedSeconds: seconds, timeout: 1800)
+            } catch {
+                self?.store.log("meeting", "transcription failed: \(error) — the recording itself is saved")
+                return
+            }
+            guard let self else { return }
+            do {
+                let report = try await claude.buildDictationReport(text, vocabulary: vocab,
+                                                                   instructions: instructions, kind: .meetingNotes,
+                                                                   timeout: 600, includeTranscript: false)
+                let title = report.title.isEmpty ? "\(info.title) — meeting notes" : report.title
+                if gen == self.runGeneration { self.lastReport = report }
+                self.fileNote(title: title, transcript: text, report: report)
+                self.store.log("meeting", "meeting notes ready — \(report.keyPoints.count) points, \(report.actionItems.count) action items")
+                if gen == self.runGeneration, self.isRunning {
+                    await self.speak("Your meeting notes are ready.", gen: gen)
+                }
+            } catch {
+                // The transcript is paid for — never drop it because the summary failed.
+                self.fileNote(title: "\(info.title) — meeting transcript", transcript: text)
+                self.store.log("meeting", "summary failed: \(error) — saved the raw transcript instead")
+            }
+        }
+    }
+
+    /// The single path for filing a finished NOTE: transcript store + export
+    /// mirror, so the export folder can never silently diverge from the notes
+    /// in the Transcripts tab. Everything dictation-shaped goes through here
+    /// or through fileSnippet — never store.addTranscript directly — so the
+    /// note/snippet rule is a named function, not call-site discipline.
+    private func fileNote(title: String? = nil, transcript: String,
+                          report: DictationReport? = nil, outcome: String? = nil) {
+        // One title resolution feeding BOTH stores — two chains here would be
+        // one edit away from the exported file diverging from its record.
+        let resolved = title ?? report?.title
+        store.addTranscript(TranscriptRecord(kind: "dictation", transcript: transcript,
+                                             title: resolved,
+                                             summary: report?.summary,
+                                             keyPoints: report?.keyPoints,
+                                             actionItems: report?.actionItems,
+                                             outcome: outcome))
+        // A failed/cancelled take stays LOCAL. The words are preserved in the
+        // Transcripts tab, but a discarded half-thought — often discarded
+        // BECAUSE it was sensitive — must not sync to every Dropbox device.
+        guard outcome == nil else { return }
+        notesExporter.exportNote(title: resolved ?? "", transcript: transcript, report: report)
+    }
+
+    /// A paste snippet (local insert mode, phone dictation): recorded for the
+    /// Transcripts tab but deliberately NOT exported — forty "sounds good,
+    /// ship it" clipboard scraps must not silt up the user's synced folder.
+    private func fileSnippet(_ text: String) {
+        store.addTranscript(TranscriptRecord(kind: "dictation", transcript: text))
     }
 
     /// While recording, watches for the meeting to end underneath us (window/tab
@@ -2953,7 +3040,7 @@ final class AppCoordinator: ObservableObject {
         let shouldSubmit = submitAfterInsert
         submitAfterInsert = false
         ScreenController.setClipboard(final)   // always — recoverable without Accessibility
-        store.addTranscript(TranscriptRecord(kind: "dictation", transcript: final))
+        fileSnippet(final)
         guard ScreenController.isTrusted else {
             store.log("dictation", "\(final.count) chars on clipboard — press ⌘V (auto-paste needs Accessibility)")
             return

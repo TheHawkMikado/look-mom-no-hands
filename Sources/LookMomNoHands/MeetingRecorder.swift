@@ -47,6 +47,10 @@ struct MeetingAudioMixer {
 /// All audio state lives on one serial queue; callers touch only start/stop/ingest.
 final class MeetingRecorder: NSObject, SCStreamDelegate, SCStreamOutput, @unchecked Sendable {
     static let sampleRate = 48_000.0
+    /// MIME type of the files this recorder writes (AAC in .m4a). Lives here,
+    /// beside the encoder settings, so a container change can't leave a stale
+    /// content type at an upload call site.
+    static let contentType = "audio/mp4"
 
     enum RecordError: Error { case noDisplay }
 
@@ -248,15 +252,13 @@ final class MeetingRecorder: NSObject, SCStreamDelegate, SCStreamOutput, @unchec
     }
 
     /// Recordings/Meeting <title> <stamp>.m4a under the app-support folder.
-    /// Pure enough to unit-test the sanitizing.
+    /// Sanitizer and timestamp are the notes exporter's — one filename policy
+    /// everywhere, so a forbidden-character fix can't land in only one place.
     static func recordingURL(in directory: URL, title: String, now: Date = Date()) -> URL {
         let folder = directory.appendingPathComponent("Recordings", isDirectory: true)
         try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-        let fmt = DateFormatter()
-        fmt.dateFormat = "yyyy-MM-dd HH.mm"
-        let safe = title.map { "/:\\".contains($0) ? "-" : $0 }.map(String.init).joined()
-            .trimmingCharacters(in: .whitespaces)
-        let name = "Meeting \(safe.isEmpty ? "call" : String(safe.prefix(40))) \(fmt.string(from: now)).m4a"
+        let safe = NotesExporter.safeComponent(title, max: 40)
+        let name = "Meeting \(safe.isEmpty ? "call" : safe) \(NotesExporter.stamp(now)).m4a"
         return folder.appendingPathComponent(name)
     }
 }

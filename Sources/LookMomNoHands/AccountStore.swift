@@ -123,19 +123,15 @@ final class AccountStore: ObservableObject {
     /// once Cloud lands.
     func reportUsage() async {
         guard let bearer = KeychainStore.load(account: Self.appTokenAccount) else { return }
-        let c = CostMeter.shared.controller
-        let d = CostMeter.shared.dictation
-        let a = CostMeter.shared.agents
-        // Every CostMeter bucket must appear here, or that spend silently
-        // vanishes from server-side accounting — agents is plausibly the
-        // largest bucket (Opus, long turns).
-        let payload: [String: Any] = [
+        // Built from CostMeter.snapshot — the same enumeration persistence
+        // uses — so a future bucket can't compile without being reported.
+        var payload: [String: Any] = [
             "device": LicenseStore.deviceID,
             "mode": info?.mode ?? "byok",
-            "controller": ["cost": c.cost, "calls": c.calls, "seconds": c.activeSeconds],
-            "dictation": ["cost": d.cost, "calls": d.calls, "seconds": d.activeSeconds],
-            "agents": ["cost": a.cost, "calls": a.calls, "seconds": a.activeSeconds],
         ]
+        for (name, b) in CostMeter.shared.snapshot {
+            payload[name] = ["cost": b.cost, "calls": b.calls, "seconds": b.activeSeconds]
+        }
         var req = request("api/app/usage", method: "POST", bearer: bearer)
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.httpBody = try? JSONSerialization.data(withJSONObject: payload)

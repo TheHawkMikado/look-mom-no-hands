@@ -882,7 +882,8 @@ final class WavAndScribeTests: XCTestCase {
 
     func testScribeMultipartContainsModelAndFile() {
         let wav = VoiceListener.wav(from: [1, 2, 3], sampleRate: 16000)
-        let body = ScribeClient.multipartBody(wav: wav, boundary: "B")
+        let body = ScribeClient.multipartBody(audio: wav, filename: "audio.wav",
+                                              contentType: "audio/wav", boundary: "B")
         let s = String(decoding: body, as: UTF8.self)
         XCTAssertTrue(s.contains("name=\"model_id\""))
         XCTAssertTrue(s.contains("scribe_v1"))

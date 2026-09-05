@@ -259,6 +259,15 @@ async function ensureSchemaOnce() {
       updated_at   timestamptz NOT NULL DEFAULT now(),
       PRIMARY KEY (email, device)
     )`;
+  // Agent + meeting workloads arrived after the table shipped; without these
+  // columns their spend silently vanishes from pricing analysis (one recorded
+  // meeting's transcription can outspend a whole day of commands).
+  await db`ALTER TABLE usage_reports ADD COLUMN IF NOT EXISTS agent_cost double precision NOT NULL DEFAULT 0`;
+  await db`ALTER TABLE usage_reports ADD COLUMN IF NOT EXISTS agent_calls integer NOT NULL DEFAULT 0`;
+  await db`ALTER TABLE usage_reports ADD COLUMN IF NOT EXISTS agent_seconds double precision NOT NULL DEFAULT 0`;
+  await db`ALTER TABLE usage_reports ADD COLUMN IF NOT EXISTS meet_cost double precision NOT NULL DEFAULT 0`;
+  await db`ALTER TABLE usage_reports ADD COLUMN IF NOT EXISTS meet_calls integer NOT NULL DEFAULT 0`;
+  await db`ALTER TABLE usage_reports ADD COLUMN IF NOT EXISTS meet_seconds double precision NOT NULL DEFAULT 0`;
 
   // Cloud vs BYOK per subscription — which keys the app runs on. Set at checkout
   // (nohands_mode metadata → webhook) or by an admin. Default 'byok', the app's
@@ -658,26 +667,37 @@ export async function recordUsage(
   mode: string,
   controller: UsageBucket,
   dictation: UsageBucket,
+  agents: UsageBucket,
+  meetings: UsageBucket,
 ): Promise<{ dCtrlSeconds: number; dDictSeconds: number }> {
   const db = sql();
   const prev = await db<{ ctrl_seconds: number; dict_seconds: number }[]>`
     SELECT ctrl_seconds, dict_seconds FROM usage_reports
      WHERE email = ${email} AND device = ${device}`;
+  // Only controller + dictation seconds feed the metering delta: agent runs and
+  // meeting recordings report zero/passive active time by design.
   const dCtrlSeconds = Math.max(0, controller.seconds - (prev[0]?.ctrl_seconds ?? 0));
   const dDictSeconds = Math.max(0, dictation.seconds - (prev[0]?.dict_seconds ?? 0));
 
   await db`
     INSERT INTO usage_reports
       (email, device, mode, ctrl_cost, ctrl_calls, ctrl_seconds,
-       dict_cost, dict_calls, dict_seconds, updated_at)
+       dict_cost, dict_calls, dict_seconds,
+       agent_cost, agent_calls, agent_seconds,
+       meet_cost, meet_calls, meet_seconds, updated_at)
     VALUES (${email}, ${device}, ${mode},
        ${controller.cost}, ${controller.calls}, ${controller.seconds},
-       ${dictation.cost}, ${dictation.calls}, ${dictation.seconds}, now())
+       ${dictation.cost}, ${dictation.calls}, ${dictation.seconds},
+       ${agents.cost}, ${agents.calls}, ${agents.seconds},
+       ${meetings.cost}, ${meetings.calls}, ${meetings.seconds}, now())
     ON CONFLICT (email, device) DO UPDATE SET
       mode = EXCLUDED.mode,
       ctrl_cost = EXCLUDED.ctrl_cost, ctrl_calls = EXCLUDED.ctrl_calls,
       ctrl_seconds = EXCLUDED.ctrl_seconds, dict_cost = EXCLUDED.dict_cost,
       dict_calls = EXCLUDED.dict_calls, dict_seconds = EXCLUDED.dict_seconds,
+      agent_cost = EXCLUDED.agent_cost, agent_calls = EXCLUDED.agent_calls,
+      agent_seconds = EXCLUDED.agent_seconds, meet_cost = EXCLUDED.meet_cost,
+      meet_calls = EXCLUDED.meet_calls, meet_seconds = EXCLUDED.meet_seconds,
       updated_at = now()`;
 
   return { dCtrlSeconds, dDictSeconds };

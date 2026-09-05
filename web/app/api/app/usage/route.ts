@@ -31,7 +31,8 @@ export async function POST(req: NextRequest) {
   const mode = body.mode === "cloud" ? "cloud" : "byok";
 
   await ensureSchema();
-  const delta = await recordUsage(email, device, mode, bucket(body.controller), bucket(body.dictation));
+  const delta = await recordUsage(email, device, mode, bucket(body.controller), bucket(body.dictation),
+                                  bucket(body.agents), bucket(body.meetings));
   // Cloud usage draws down the weekly allowance (and then the wallet); BYOK no-ops.
   await chargeCloudMeter(email, delta.dCtrlSeconds, delta.dDictSeconds);
   return NextResponse.json({ ok: true });

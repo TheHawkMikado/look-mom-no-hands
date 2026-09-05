@@ -89,7 +89,9 @@ struct DashboardView: View {
         case .activity:
             ActivityTab(store: coordinator.store)
         case .settings:
-            SettingsTab(coordinator: coordinator)
+            SettingsTab(coordinator: coordinator,
+                        calendar: coordinator.calendarMeetings,
+                        exporter: coordinator.notesExporter)
         }
     }
 }
@@ -1075,6 +1077,11 @@ private struct VocabularyTab: View {
 /// Every control binds to a coordinator property that persists itself on change.
 private struct SettingsTab: View {
     @ObservedObject var coordinator: AppCoordinator
+    // Child stores observed directly (the MemoryTab pattern) — the coordinator
+    // does not republish their changes, so going through it leaves the pills
+    // and folder label stale.
+    @ObservedObject var calendar: CalendarMeetings
+    @ObservedObject var exporter: NotesExporter
     @ObservedObject private var meter = CostMeter.shared
     @State private var section: SettingsSection = .general
 
@@ -1143,6 +1150,9 @@ private struct SettingsTab: View {
             Section("Measured cost (this device)") {
                 costRow("Controller", meter.controller)
                 costRow("Dictation", meter.dictation)
+                if meter.meetings.calls > 0 {
+                    costRow("Meetings", meter.meetings)
+                }
                 Text("Real API spend so far, priced at current rates and split by workload. The per-hour figure is approximate — active time is inferred from usage. Reset before a timed run to measure a clean $/hr.")
                     .font(.caption).foregroundStyle(.secondary)
                 Button("Reset measurements", role: .destructive) { meter.reset() }
@@ -1186,9 +1196,9 @@ private struct SettingsTab: View {
             Section("Meetings") {
                 Text("Say “Hey Mama, join my meeting” (or name it: “join the standup”) — it finds the Google Meet, Zoom, or Teams link on your calendar or in your words, clicks through the join screens, and records the audio. “Mama, leave the meeting” hangs up and saves the file.")
                     .font(.caption).foregroundStyle(.secondary)
-                LabeledContent("Calendar access") { statusPill(coordinator.calendarMeetings.authorized) }
-                if !coordinator.calendarMeetings.authorized {
-                    Button("Grant Calendar…") { coordinator.calendarMeetings.requestAccess() }
+                LabeledContent("Calendar access") { statusPill(calendar.authorized) }
+                if !calendar.authorized {
+                    Button("Grant Calendar…") { calendar.requestAccess() }
                 }
                 Toggle("Auto-join calendar meetings", isOn: $coordinator.autoJoinMeetings)
                 Text("Joins (and records) each calendar meeting by itself at its start time, when the Mac is free. Off = join by voice only.")
@@ -1202,6 +1212,35 @@ private struct SettingsTab: View {
                     let folder = coordinator.store.directory.appendingPathComponent("Recordings", isDirectory: true)
                     try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
                     NSWorkspace.shared.open(folder)
+                }
+            }
+
+            Section("Notes export") {
+                Text("Mirrors every finished note — dictations, live-transcript summaries, and meeting notes — into this folder as Markdown, plus meeting recordings as audio. Point it at your Dropbox folder and they sync everywhere on their own.")
+                    .font(.caption).foregroundStyle(.secondary)
+                LabeledContent("Folder") {
+                    Text(exporter.folderPath ?? "Off")
+                        .font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
+                }
+                HStack {
+                    Button("Choose folder…") {
+                        let panel = NSOpenPanel()
+                        panel.canChooseDirectories = true
+                        panel.canChooseFiles = false
+                        panel.allowsMultipleSelection = false
+                        panel.prompt = "Export here"
+                        if panel.runModal() == .OK, let url = panel.url {
+                            exporter.folderPath = url.path
+                        }
+                    }
+                    // dropboxFolder is a once-per-launch cached probe, so this
+                    // read is free even though the body re-renders constantly.
+                    if let dropbox = NotesExporter.dropboxFolder, exporter.folderPath == nil {
+                        Button("Use Dropbox") { exporter.folderPath = dropbox }
+                    }
+                    if exporter.folderPath != nil {
+                        Button("Turn off") { exporter.folderPath = nil }
+                    }
                 }
             }
         }

@@ -19,6 +19,7 @@ final class CostMeter: ObservableObject {
     @Published private(set) var controller = Bucket()
     @Published private(set) var dictation = Bucket()
     @Published private(set) var agents = Bucket()
+    @Published private(set) var meetings = Bucket()
 
     /// A gap between two events in the same bucket longer than this doesn't count
     /// as active time — it's a break, not usage.
@@ -43,17 +44,27 @@ final class CostMeter: ObservableObject {
         case command, vision, appDocs     // controller
         case cleanup, report, answer      // dictation
         case agent                        // background agents
+        case meetingNotes                 // meeting transcription + summary
 
         var bucket: BucketID {
             switch self {
             case .command, .vision, .appDocs: return .controller
             case .cleanup, .report, .answer: return .dictation
             case .agent: return .agents
+            case .meetingNotes: return .meetings
             }
         }
     }
 
-    enum BucketID { case controller, dictation, agents }
+    enum BucketID: String, CaseIterable {
+        case controller, dictation, agents, meetings
+
+        /// Whether event cadence counts as active time for this bucket. False
+        /// for passive workloads (a recorded meeting isn't "usage" while it
+        /// sits in transcription), so their $/hr can never be a wall-clock
+        /// artifact. A new bucket declares its behavior here, in one place.
+        var infersActiveTimeFromCadence: Bool { self != .meetings }
+    }
 
     struct Bucket: Codable {
         var cost: Double = 0
@@ -82,12 +93,15 @@ final class CostMeter: ObservableObject {
         Task { @MainActor in self.add(to: kind.bucket, cost: cost, tin: tin, tout: out) }
     }
 
-    /// Scribe transcription — bill by the audio duration, which doubles as the
-    /// bucket's active time (you were dictating for exactly that long).
-    nonisolated func recordAudio(seconds: Double) {
+    /// The one place Scribe audio is priced. Active time is derived from the
+    /// bucket, in one expression: dictation audio IS the user's dictating time,
+    /// while a meeting's passive wall-clock is not usage — hours of it in the
+    /// dictation bucket once skewed that $/hour in both directions.
+    nonisolated func recordScribe(seconds: Double, to bucket: BucketID) {
         guard seconds > 0 else { return }
         let cost = seconds * Self.sttPerSecond
-        Task { @MainActor in self.add(to: .dictation, cost: cost, seconds: seconds) }
+        let active = bucket == .dictation ? seconds : 0
+        Task { @MainActor in self.add(to: bucket, cost: cost, seconds: active) }
     }
 
     /// ElevenLabs spoken reply (controller side).
@@ -103,6 +117,7 @@ final class CostMeter: ObservableObject {
         case .controller: b = controller
         case .dictation: b = dictation
         case .agents: b = agents
+        case .meetings: b = meetings
         }
         let now = Date().timeIntervalSince1970
         b.cost += cost
@@ -111,7 +126,7 @@ final class CostMeter: ObservableObject {
         b.tokensOut += tout
         if let seconds {
             b.activeSeconds += seconds
-        } else if b.lastEventEpoch > 0, now - b.lastEventEpoch < gapThreshold {
+        } else if id.infersActiveTimeFromCadence, b.lastEventEpoch > 0, now - b.lastEventEpoch < gapThreshold {
             b.activeSeconds += now - b.lastEventEpoch
         }
         b.lastEventEpoch = now
@@ -119,6 +134,7 @@ final class CostMeter: ObservableObject {
         case .controller: controller = b
         case .dictation: dictation = b
         case .agents: agents = b
+        case .meetings: meetings = b
         }
         save()
     }
@@ -127,13 +143,29 @@ final class CostMeter: ObservableObject {
         controller = Bucket()
         dictation = Bucket()
         agents = Bucket()
+        meetings = Bucket()
         save()
     }
 
     // MARK: - Persistence
 
+    /// Every bucket, keyed by its id string. The ONE enumeration — persistence
+    /// and usage reporting both consume it, so a new bucket cannot exist
+    /// without being saved and reported.
+    var snapshot: [String: Bucket] {
+        var out: [String: Bucket] = [:]
+        for id in BucketID.allCases {
+            switch id {
+            case .controller: out[id.rawValue] = controller
+            case .dictation: out[id.rawValue] = dictation
+            case .agents: out[id.rawValue] = agents
+            case .meetings: out[id.rawValue] = meetings
+            }
+        }
+        return out
+    }
+
     private func save() {
-        let snapshot = ["controller": controller, "dictation": dictation, "agents": agents]
         if let data = try? JSONEncoder().encode(snapshot) {
             UserDefaults.standard.set(data, forKey: defaultsKey)
         }
@@ -146,5 +178,6 @@ final class CostMeter: ObservableObject {
         controller = snapshot["controller"] ?? Bucket()
         dictation = snapshot["dictation"] ?? Bucket()
         agents = snapshot["agents"] ?? Bucket()
+        meetings = snapshot["meetings"] ?? Bucket()   // absent in pre-meeting saves
     }
 }

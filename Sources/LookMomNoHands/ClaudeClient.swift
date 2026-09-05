@@ -423,24 +423,39 @@ final class ClaudeClient: @unchecked Sendable {
 
     // MARK: Dictation report (output_config.format + adaptive thinking where supported)
 
-    func buildDictationReport(_ rawTranscript: String, vocabulary: String = "", instructions: String = "") async throws -> DictationReport {
-        let json = try await post(Self.reportRequestBody(transcript: rawTranscript, vocabulary: vocabulary, instructions: instructions, model: .opus48), kind: .report)
+    /// `timeout`: a meeting-length transcript takes Opus minutes to summarize —
+    /// the 30s default that suits dictations would time out every real meeting.
+    /// `includeTranscript: false` drops the echoed-transcript field entirely:
+    /// a 60-minute meeting's transcript alone exceeds the output-token cap, and
+    /// the meeting pipeline files the Scribe text itself, so echoing it back
+    /// would deterministically (and expensively) fail long meetings.
+    func buildDictationReport(_ rawTranscript: String, vocabulary: String = "", instructions: String = "",
+                              kind: CostMeter.Kind = .report, timeout: TimeInterval = 30,
+                              includeTranscript: Bool = true) async throws -> DictationReport {
+        let json = try await post(Self.reportRequestBody(transcript: rawTranscript, vocabulary: vocabulary, instructions: instructions, model: .opus48, includeTranscript: includeTranscript),
+                                  timeout: timeout, kind: kind)
         try Self.checkRefusal(json)
         return try Self.decodeBlock(json, blockType: "text", payloadKey: "text")
     }
 
-    static func reportRequestBody(transcript: String, vocabulary: String = "", instructions: String = "", model: ClaudeModel) -> [String: Any] {
+    static func reportRequestBody(transcript: String, vocabulary: String = "", instructions: String = "",
+                                  model: ClaudeModel, includeTranscript: Bool = true) -> [String: Any] {
+        var properties: [String: Any] = [
+            "title": ["type": "string"],
+            "summary": ["type": "string"],
+            "key_points": ["type": "array", "items": ["type": "string"]],
+            "action_items": ["type": "array", "items": ["type": "string"]]
+        ]
+        var required = ["title", "summary", "key_points", "action_items"]
+        if includeTranscript {
+            properties["transcript"] = ["type": "string"]
+            required.append("transcript")
+        }
         let schema: [String: Any] = [
             "type": "object",
             "additionalProperties": false,
-            "properties": [
-                "title": ["type": "string"],
-                "summary": ["type": "string"],
-                "key_points": ["type": "array", "items": ["type": "string"]],
-                "action_items": ["type": "array", "items": ["type": "string"]],
-                "transcript": ["type": "string"]
-            ],
-            "required": ["title", "summary", "key_points", "action_items", "transcript"]
+            "properties": properties,
+            "required": required
         ]
 
         var outputConfig: [String: Any] = [
@@ -460,8 +475,10 @@ final class ClaudeClient: @unchecked Sendable {
                 - summary: a tight TLDR (1-3 sentences).
                 - key_points: the main ideas as short bullets (empty if none).
                 - action_items: concrete to-dos as short bullets (empty if none).
+                \(includeTranscript ? """
                 - transcript: the dictation lightly cleaned up (fix obvious ASR errors, \
                 remove filler, keep the meaning and wording).
+                """ : "Do not repeat the transcript back.")
                 \(instructions.isEmpty ? "" : "\n                Follow the user's processing instructions for what to emphasize and include:\n                \(instructions)\n")
                 Dictation:
                 \(transcript)
