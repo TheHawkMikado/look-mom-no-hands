@@ -140,10 +140,10 @@ final class ClaudeClient: @unchecked Sendable {
             "additionalProperties": false,
             "properties": [
                 "kind": ["type": "string",
-                         "enum": ["click", "type", "scroll", "open_app", "open_url", "focus_window", "move_window", "switch_tab", "keystroke", "dictate_start", "describe_screen", "watch_start", "spawn_background_agent", "use_tool", "none"]],
+                         "enum": ["click", "type", "scroll", "open_app", "open_url", "focus_window", "move_window", "switch_tab", "keystroke", "dictate_start", "describe_screen", "watch_start", "spawn_background_agent", "use_tool", "join_meeting", "leave_meeting", "none"]],
                 "target": ["type": "string", "description": "UI element / app name; for open_url optionally the browser; for focus_window/move_window the window description to match (empty for move_window = the current/context window); for switch_tab the browser tab title; for describe_screen the question to answer about the screen; for watch_start a short name for the task being demonstrated; empty if unused"],
                 "text": ["type": "string", "description": "text to type; for move_window the destination display (\"main display\", \"second display\", \"display 2\"); empty if unused"],
-                "url": ["type": "string", "description": "open_url only: the website, e.g. \"youtube.com\"; empty if unused"],
+                "url": ["type": "string", "description": "open_url: the website, e.g. \"youtube.com\"; join_meeting: the full meeting link copied EXACTLY from the context or the user's words (empty = the next calendar meeting); empty if unused"],
                 "keys": ["type": "string", "description": "keystroke only: shortcut like \"cmd+t\", \"cmd+shift+t\", \"enter\"; empty if unused"],
                 "prompt": ["type": "string", "description": "spawn_background_agent only: the explicit instruction for the background agent to execute, like \"build a react app in ~/dev/myapp\"; empty if unused"],
                 "direction": ["type": "string", "enum": ["up", "down", "left", "right"],
@@ -177,6 +177,19 @@ final class ClaudeClient: @unchecked Sendable {
             The tool's output arrives in the next turn's task progress; act on it \
             (answer the user, or continue) rather than re-calling the same tool. \
             If no listed tool covers the task, use the screen as usual.
+
+            MEETINGS. "Join my meeting / my 3 o'clock / the standup" (Google Meet, \
+            Zoom, or Microsoft Teams) = ONE join_meeting step. url = the exact \
+            meeting link when the user said one or the calendar context lists it; \
+            otherwise leave url empty and put any identifying words ("standup", \
+            "zoom") in target — the app resolves the meeting itself. join_meeting \
+            opens the right app, clicks through the join screens, and RECORDS the \
+            meeting; never join by hand with open_url + clicks, and never click \
+            join buttons or permission dialogs yourself — join_meeting owns that \
+            flow. "Leave the meeting / hang up / stop recording the meeting" = ONE \
+            leave_meeting step (it also saves the recording). After emitting \
+            join_meeting or leave_meeting, set goal_complete=true — the app \
+            finishes the flow on its own.
 
             If the request is ambiguous or you are not confident what the user wants, \
             emit NO steps and set clarify with one concise question and 2-4 short \

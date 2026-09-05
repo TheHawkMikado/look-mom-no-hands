@@ -41,6 +41,9 @@ final class VoiceListener {
     /// Main queue; smoothed 0…1 mic level for the recorder pill's waveform. Only
     /// emitted while `metering` is on (recording), to avoid needless main-thread churn.
     var onLevel: ((Float) -> Void)?
+    /// REALTIME AUDIO THREAD: raw tee of every mic buffer, for the meeting
+    /// recorder. The callee must hop off this thread itself; keep it cheap here.
+    var onTapBuffer: ((AVAudioPCMBuffer) -> Void)?
     var metering = false
     private var levelSmoothed: Float = 0
 
@@ -214,6 +217,7 @@ final class VoiceListener {
             self.requestLock.unlock()
             self.captureIfNeeded(buffer)
             self.emitLevel(buffer)
+            self.onTapBuffer?(buffer)
         }
         engine.prepare()
         do {

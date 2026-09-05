@@ -88,6 +88,23 @@ final class AppCoordinator: ObservableObject {
     @Published var appDocsEnabled = true {
         didSet { UserDefaults.standard.set(appDocsEnabled, forKey: Self.appDocsKey) }
     }
+    /// Join calendar meetings (Meet/Zoom/Teams) by themselves at start time.
+    /// Off by default — an unexpected auto-join puts the user IN a meeting. Persisted.
+    @Published var autoJoinMeetings = false {
+        didSet {
+            UserDefaults.standard.set(autoJoinMeetings, forKey: Self.autoJoinKey)
+            calendarMeetings.autoJoinEnabled = autoJoinMeetings
+            if autoJoinMeetings { calendarMeetings.requestAccess() }
+        }
+    }
+    /// Speak "I'm recording this meeting" when a recording starts. Default ON:
+    /// many jurisdictions require every participant's consent to record a call,
+    /// and the announcement is the app's side of that. Persisted.
+    @Published var announceMeetingRecording = true {
+        didSet { UserDefaults.standard.set(announceMeetingRecording, forKey: Self.announceRecKey) }
+    }
+    private static let autoJoinKey = "autoJoinMeetings"
+    private static let announceRecKey = "announceMeetingRecording"
     private static let chordKey = "dictationChord"
     private static let submitChordKey = "submitChord"
     private static let sessionStartChordKey = "sessionStartChord"
@@ -188,6 +205,19 @@ final class AppCoordinator: ObservableObject {
     private var scheduledTask: Task<Void, Never>?
     private var fleetSync: Set<AnyCancellable> = []
     let knowledge: KnowledgeStore
+    let calendarMeetings = CalendarMeetings()
+    /// The meeting currently being recorded (drives the dashboard row + guards
+    /// against double-joins). Nil = not in a recorded meeting.
+    @Published private(set) var meetingRecording: ActiveMeeting?
+    private let meetingRecorder = MeetingRecorder()
+    private var meetingWatchTask: Task<Void, Never>?
+    struct ActiveMeeting: Equatable {
+        let link: MeetingLink
+        let title: String
+        let startedAt: Date
+        let fileURL: URL
+        let openedInApp: Bool   // native Zoom/Teams app vs. a browser tab, for end detection
+    }
     let insertRules: InsertRulesStore
     let learnedControls: ElementMemoryStore
     let appCapabilities: AppCapabilityStore
@@ -296,6 +326,12 @@ final class AppCoordinator: ObservableObject {
         if UserDefaults.standard.object(forKey: Self.appDocsKey) != nil {
             appDocsEnabled = UserDefaults.standard.bool(forKey: Self.appDocsKey)
         }
+        if UserDefaults.standard.object(forKey: Self.autoJoinKey) != nil {
+            autoJoinMeetings = UserDefaults.standard.bool(forKey: Self.autoJoinKey)
+        }
+        if UserDefaults.standard.object(forKey: Self.announceRecKey) != nil {
+            announceMeetingRecording = UserDefaults.standard.bool(forKey: Self.announceRecKey)
+        }
         micUID = UserDefaults.standard.string(forKey: Self.micKey)
         listener.preferredInputUID = micUID
         refreshContextualPhrases()
@@ -322,6 +358,21 @@ final class AppCoordinator: ObservableObject {
         environment.start()   // track open apps/windows/tabs continuously, even before listening
         scheduler = ProcedureScheduler(procedures: procedures, coordinator: self)
         scheduler?.start()
+        // Meetings: calendar links feed the planner. The mic tee into the
+        // recorder is wired only while a meeting records — never at idle.
+        calendarMeetings.autoJoinEnabled = autoJoinMeetings
+        calendarMeetings.onMeetingStarting = { [weak self] m in self?.autoJoinMeeting(m) ?? false }
+        calendarMeetings.start { [weak self] msg in self?.store.log("calendar", msg) }
+        // SettingsTab observes only the coordinator; forward the calendar store's
+        // changes (the authorized pill) or the Grant button never visibly works.
+        calendarMeetings.objectWillChange
+            .sink { [weak self] _ in self?.objectWillChange.send() }
+            .store(in: &fleetSync)
+        meetingRecorder.onFailure = { [weak self] message in
+            guard let self, self.meetingRecording != nil else { return }
+            self.store.log("meeting", "recording failed: \(message)")
+            Task { await self.endMeetingRecording(reason: "recording failed: \(message)") }
+        }
         // Warm configured MCP servers off the command path — an npx cold-start
         // mid-task would eat the whole 20s parse budget.
         Task { await self.mcp.connectAll() }
@@ -653,6 +704,13 @@ final class AppCoordinator: ObservableObject {
         mode = .standby
         stopTicker()
         listener.stop()
+        // Stop means NOTHING is capturing anymore. Leaving the meeting recorder
+        // running after the user turned the assistant off — with no voice path
+        // left to end it — is the consent failure the announcement exists to
+        // prevent (and the mic half just died with the tap anyway).
+        if meetingRecording != nil {
+            Task { await self.endMeetingRecording(reason: "you stopped the assistant") }
+        }
         phase = .idle
         store.log("app", "listening disabled")
     }
@@ -1811,6 +1869,302 @@ final class AppCoordinator: ObservableObject {
         }
     }
 
+    // MARK: Meetings (join + record)
+
+    /// What the planner needs to know while a meeting records, so "stop recording
+    /// the meeting" resolves to leave_meeting instead of a guess.
+    private var meetingStatusPromptText: String {
+        guard let m = meetingRecording else { return "" }
+        return "Currently IN a \(m.link.service.label) meeting (“\(m.title)”), recording since \(m.startedAt.formatted(date: .omitted, time: .shortened)). Leaving/stopping = one leave_meeting step."
+    }
+
+    /// join_meeting executor: resolve the link (spoken → calendar), open the
+    /// native app or browser, click through the join screens deterministically,
+    /// then start recording. Returns the task-progress line.
+    private func joinMeeting(_ step: ScreenAction, gen: Int) async -> String {
+        if let current = meetingRecording {
+            await speak("You're already in the \(current.title) meeting and I'm recording it.", gen: gen)
+            return "join_meeting skipped: already in a recorded meeting"
+        }
+        var link = MeetingLink.detect(in: [step.url, step.target, step.text].joined(separator: " "))
+        var title = ""
+        if link == nil, let m = calendarMeetings.nextJoinable(matching: step.target) {
+            link = m.link
+            title = m.title
+        }
+        guard let link else {
+            if !calendarMeetings.authorized {
+                // First calendar-dependent use is the opt-in moment: fire the TCC
+                // prompt now (or route to System Settings after a past denial).
+                calendarMeetings.requestAccess()
+                await speak("I need calendar access to find your meeting — say the link, or grant access and ask again.", gen: gen)
+                return "join_meeting FAILED: no link spoken and calendar access not granted yet"
+            }
+            await speak("I don't see a meeting link — say it, or put the meeting on your calendar.", gen: gen)
+            return "join_meeting FAILED: no meeting link in the request or on the calendar"
+        }
+        store.log("meeting", "joining \(link.service.label): \(link.url)")
+        var openedInApp = false
+        do {
+            openedInApp = try await openMeetingLink(link)
+        } catch {
+            await speak("I couldn't open the \(link.service.label) meeting.", gen: gen)
+            return "join_meeting FAILED: couldn't open \(link.url) (\(error))"
+        }
+        let joined = await clickThroughJoin(link: link, gen: gen)
+        guard joined else {
+            await speak("I opened \(link.service.label) but couldn't get through the join screen — it's up on your screen.", gen: gen)
+            return "join_meeting: opened \(link.service.label) but could not confirm joining — the join screen is left for the user"
+        }
+        await startMeetingRecording(link: link, title: title, openedInApp: openedInApp, gen: gen)
+        return "joined the \(link.service.label) meeting\(title.isEmpty ? "" : " “\(title)”") and started recording"
+    }
+
+    /// Opens the meeting in the installed native app (deep link) when there is
+    /// one, else the default browser. Returns whether the native app took it.
+    private func openMeetingLink(_ link: MeetingLink) async throws -> Bool {
+        let deep = link.service.appName.flatMap {
+            ScreenController.resolveAppPath($0) == nil ? nil : link.appDeepLink
+        }
+        return try await withThrowingTaskGroup(of: Bool.self) { group in
+            group.addTask {
+                if let deep {
+                    // A stale/unregistered scheme makes `open` fail — the https
+                    // link is always a valid fallback, so a deep-link failure
+                    // must not fail the join.
+                    do { try ScreenController.openURL(deep, inApp: ""); return true } catch {}
+                }
+                try ScreenController.openURL(link.url, inApp: "")
+                return false
+            }
+            return try await group.next() ?? false
+        }
+    }
+
+    /// One bounded, off-main read of the focused window.
+    private static func meetingSnapshot(maxElements: Int = 60) async -> ScreenController.Snapshot? {
+        try? await withThrowingTaskGroup(of: ScreenController.Snapshot?.self) { group in
+            group.addTask { try? ScreenController.focusedWindowSnapshot(maxElements: maxElements) }
+            return try await group.next() ?? nil
+        }
+    }
+
+    /// Polls the frontmost window and clicks the join-flow controls in order
+    /// (pre-join buttons, browser mic permission, the join button itself) until
+    /// an in-meeting marker appears. Deterministic code, not the planner: the
+    /// planner is structurally forbidden from clicking permission dialogs.
+    private func clickThroughJoin(link: MeetingLink, gen: Int) async -> Bool {
+        // Let the page BECOME the meeting before reading it — the first snapshot
+        // otherwise sees the previous page and wastes clicks on stale labels.
+        await waitForPage(toHost: Self.domainLabel(link.url), requireChange: true, gen: gen, maxWait: 8)
+        let deadline = Date().addingTimeInterval(75)
+        var clicked: Set<String> = []   // stepping stones (cookie/permission/dismiss) — once each
+        var joinClicked = false
+        var lastJoinPoll = Int.min      // join buttons stay retryable (a disabled pre-join
+                                        // button swallows the first click) but are rate-limited
+        var quietPolls = 0
+        var triedVision = false
+        var poll = 0
+        while Date() < deadline {
+            // Joins resolve in the first seconds or not at all — poll fast early,
+            // back off once it's clearly waiting on something slow.
+            try? await Task.sleep(nanoseconds: poll < 10 ? 1_200_000_000 : 2_500_000_000)
+            poll += 1
+            guard gen == runGeneration, !Task.isCancelled else { return false }
+            guard let snap = await Self.meetingSnapshot() else { continue }
+            let labels = snap.elements.map(\.label)
+            if labels.contains(where: MeetingLink.indicatesInMeeting) { return true }
+            if let target = MeetingLink.nextJoinControl(in: labels, service: link.service, alreadyClicked: clicked) {
+                quietPolls = 0
+                if MeetingLink.isJoinLabel(target) {
+                    guard poll - lastJoinPoll >= 3 else { continue }
+                    lastJoinPoll = poll
+                } else {
+                    clicked.insert(target)
+                }
+                if (try? await clickViaAX(target)) == true {
+                    store.log("meeting", "clicked “\(target)”")
+                    if MeetingLink.isJoinLabel(target) { joinClicked = true }
+                }
+            } else if joinClicked {
+                // Joined but no toolbar marker surfaced (canvas UIs expose poor
+                // AX): after the join click and a few quiet polls, trust the click.
+                quietPolls += 1
+                if quietPolls >= 3 { return true }
+            } else {
+                quietPolls += 1
+                // A canvas/Electron join screen can expose NOTHING to AX. One
+                // shot at the vision click ladder (screenshot + locate) — with
+                // teach-on-miss off; mid-join is no time to ask for a lesson.
+                if quietPolls >= 3, !triedVision {
+                    triedVision = true
+                    if (try? await performClick(target: "the Join meeting button", gen: gen, teachOnMiss: false)) != nil {
+                        store.log("meeting", "clicked the join button via the vision fallback")
+                        joinClicked = true
+                        lastJoinPoll = poll
+                    }
+                }
+            }
+        }
+        return joinClicked
+    }
+
+    private func startMeetingRecording(link: MeetingLink, title: String, openedInApp: Bool, gen: Int) async {
+        do {
+            let name = title.isEmpty ? link.service.label : title
+            let url = try await meetingRecorder.start(into: store.directory, title: name)
+            meetingRecording = ActiveMeeting(link: link, title: name, startedAt: Date(),
+                                             fileURL: url, openedInApp: openedInApp)
+            let recorder = meetingRecorder
+            listener.onTapBuffer = { recorder.ingestMic($0) }   // mic tee, only while recording
+            store.log("meeting", "recording → \(url.lastPathComponent)")
+            events.report(kind: .goalStarted, title: "Meeting recording", detail: "\(link.service.label): \(name)")
+            if announceMeetingRecording {
+                await speak("Heads up — I'm recording this meeting.", gen: gen)
+            }
+            startMeetingWatcher()
+        } catch {
+            store.log("meeting", "recording couldn't start: \(error)")
+            await speak("I joined, but recording couldn't start — check Screen Recording permission.", gen: gen)
+        }
+    }
+
+    /// leave_meeting executor: clicks the leave control only when it is visible
+    /// in the FOCUSED window's snapshot (Zoom asks for a confirm, hence up to two
+    /// passes), then always stops + saves the recording — a missed click must
+    /// never lose the file, and pass two must never blind-fire "Leave" into
+    /// whatever app came forward after the meeting window closed.
+    private func leaveMeeting(gen: Int) async -> String {
+        for _ in 0..<2 {
+            guard let snap = await Self.meetingSnapshot(),
+                  let target = MeetingLink.leaveControl(in: snap.elements.map(\.label)) else { break }
+            if (try? await clickViaAX(target)) == true {
+                store.log("meeting", "clicked “\(target)”")
+            }
+            try? await Task.sleep(nanoseconds: 800_000_000)
+        }
+        if let line = await endMeetingRecording(reason: "you left the meeting") {
+            await speak("Left the meeting. \(line)", gen: gen)
+            return "left the meeting; \(line)"
+        }
+        await speak("Left the meeting.", gen: gen)
+        return "left the meeting (nothing was recording)"
+    }
+
+    /// Stops the recorder, files the transcript entry, and clears state. Returns
+    /// a spoken-friendly summary, or nil if nothing was recording.
+    @discardableResult
+    private func endMeetingRecording(reason: String) async -> String? {
+        guard let info = meetingRecording else { return nil }
+        meetingWatchTask?.cancel()
+        meetingWatchTask = nil
+        meetingRecording = nil
+        listener.onTapBuffer = nil
+        let seconds = await meetingRecorder.stop()
+        let line: String
+        if let seconds, seconds > 1 {
+            let minutes = max(1, Int((seconds / 60).rounded()))
+            line = "Recorded \(minutes) minute\(minutes == 1 ? "" : "s") — saved to \(info.fileURL.lastPathComponent)."
+        } else {
+            // Don't dress a dead capture up as a saved recording.
+            line = "The recording couldn't be saved."
+        }
+        store.log("meeting", "stopped (\(reason)): \(line)")
+        store.addTranscript(TranscriptRecord(kind: "command",
+                                             transcript: "\(info.link.service.label) meeting: \(info.title)",
+                                             outcome: "\(line) (\(reason))"))
+        events.report(kind: .goalDone, title: "Meeting recording", detail: line)
+        return line
+    }
+
+    /// While recording, watches for the meeting to end underneath us (window/tab
+    /// gone) so the file is finalized without being asked. Conservative: three
+    /// consecutive misses before stopping — a Space switch or minimized window
+    /// must not end a live recording. Hard cap so a missed ending can't record
+    /// the desk all day.
+    private func startMeetingWatcher() {
+        meetingWatchTask?.cancel()
+        meetingWatchTask = Task { [weak self] in
+            var missing = 0
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 5_000_000_000)
+                guard let self, let info = self.meetingRecording, !Task.isCancelled else { return }
+                if Date().timeIntervalSince(info.startedAt) > 4 * 3600 {
+                    await self.endMeetingRecording(reason: "4-hour cap")
+                    await self.speak("I stopped the meeting recording at the four hour mark and saved it.", gen: self.runGeneration)
+                    return
+                }
+                // Six misses = 30s of tolerance, so a Space switch, a minimized
+                // window, or one slow environment refresh can't end a live call.
+                missing = self.meetingStillVisible(info) ? 0 : missing + 1
+                if missing >= 6 {
+                    if let line = await self.endMeetingRecording(reason: "meeting window closed") {
+                        await self.speak("The meeting ended. \(line)", gen: self.runGeneration)
+                    }
+                    return
+                }
+            }
+        }
+    }
+
+    /// Whether the environment still shows the meeting. Deliberately errs toward
+    /// "still alive" — a false stop silently truncates a live call's recording,
+    /// while a false alive only costs time up to the 4-hour cap (or a spoken
+    /// "leave the meeting"). Native apps: any window of the app — in-call window
+    /// titles are localized, so title text can't be trusted to say "meeting".
+    /// Browser Meet joins match the room code (it's in the tab title); other
+    /// browser joins fall back to the service name.
+    private func meetingStillVisible(_ info: ActiveMeeting) -> Bool {
+        let snap = environment.snapshot
+        if info.openedInApp {
+            let appWord = info.link.service == .zoom ? "zoom" : "teams"
+            return snap.apps.contains { $0.name.lowercased().contains(appWord) && !$0.windows.isEmpty }
+        }
+        let needle = info.link.roomCode?.lowercased() ?? info.link.service.rawValue
+        return snap.apps.contains { app in
+            app.windows.contains { w in
+                w.title.lowercased().contains(needle) || w.tabs.contains { $0.lowercased().contains(needle) }
+            }
+        }
+    }
+
+    /// Auto-join fires through the SAME goal path as a spoken "join my meeting" —
+    /// the calendar is just a different way of saying it. The planner sees the
+    /// meeting (with url) in its calendar context and emits join_meeting. Uses a
+    /// scheduled screen lease, so live voice preempts it. Returns whether the
+    /// join actually started — a false leaves the meeting unfired in
+    /// CalendarMeetings, so a transiently busy Mac retries on the next tick.
+    private func autoJoinMeeting(_ m: CalendarMeetings.UpcomingMeeting) -> Bool {
+        guard autoJoinMeetings else { return true }   // toggled off mid-window: stamp it done
+        guard meetingRecording == nil else { return true }
+        guard automatedSlotFree else {
+            store.log("meeting", "auto-join of \(m.title) waiting — a session is active")
+            return false
+        }
+        switch phase {
+        case .idle, .listeningWake: break
+        default:
+            store.log("meeting", "auto-join of \(m.title) waiting — app is \(phase.label)")
+            return false
+        }
+        guard claude != nil else {
+            store.log("meeting", "auto-join skipped for \(m.title) — no API key")
+            return true   // no key won't fix itself within the window; don't spin
+        }
+        store.log("meeting", "auto-joining \(m.title)")
+        events.report(kind: .goalStarted, title: m.title, detail: "auto-joining calendar meeting")
+        // Same rail as fleet/phone/scheduled goals: the adapter owns the slot,
+        // the lease, and the retry-signal semantics.
+        runAutomatedGoal(text: "join my \(m.title) meeting and record it",
+                         holder: .scheduled("meeting-\(m.id)"), tag: "meeting") { [weak self] kind, detail in
+            switch kind {
+            case .goalProgress, .goalDone: break   // the join/record flow announces itself
+            default: self?.events.report(kind: kind, title: m.title, detail: detail)
+            }
+        }
+        return true
+    }
+
     // MARK: Background agents
 
     /// Hands a non-UI goal to a headless agent and narrates its lifecycle. The
@@ -1903,6 +2257,16 @@ final class AppCoordinator: ObservableObject {
                     performed.append("tool \(step.target) FAILED: \(error) — fall back to the screen if it matters")
                     self.store.log("tool", "\(step.target) failed: \(error)")
                 }
+            case .joinMeeting:
+                // NOT a stop: falling through the normal loop tail keeps the
+                // transcript/recent-actions bookkeeping and phase settling that
+                // an early return skips (the planner sets goal_complete on the
+                // same plan, so no extra round runs on success).
+                self.phase = .acting
+                performed.append(await self.joinMeeting(step, gen: gen))
+            case .leaveMeeting:
+                self.phase = .acting
+                performed.append(await self.leaveMeeting(gen: gen))
             case .none:
                 continue
             case .openApp where Self.namesOurDashboard(step.target),
@@ -2083,6 +2447,8 @@ final class AppCoordinator: ObservableObject {
         var parts = [workingContext.promptText,
                      procedures.promptContext(for: command),
                      capabilities,
+                     calendarMeetings.promptText,
+                     meetingStatusPromptText,
                      environment.snapshot.promptText,
                      recentActionsBlock()]
         if !taskProgress.isEmpty {
@@ -2181,7 +2547,10 @@ final class AppCoordinator: ObservableObject {
     /// Clicks `target`, first via the Accessibility tree; if that finds nothing and
     /// vision is enabled, screenshots the screen and lets Claude locate it by pixel.
     /// The vision path is why an all-canvas/Electron UI (poor AX) is still clickable.
-    private func performClick(target: String, gen: Int) async throws {
+    /// `teachOnMiss: false` throws instead of asking the user to demonstrate —
+    /// for callers (the meeting join flow) where a 20s teaching pause is worse
+    /// than a clean failure.
+    private func performClick(target: String, gen: Int, teachOnMiss: Bool = true) async throws {
         guard ScreenController.isTrusted else { throw ScreenController.ControlError.notTrusted }
         let app = NSWorkspace.shared.frontmostApplication
 
@@ -2214,6 +2583,7 @@ final class AppCoordinator: ObservableObject {
 
         // 4. Everything automated failed — ask the user to show us, and learn it.
         guard gen == runGeneration, !Task.isCancelled else { throw CancellationError() }
+        guard teachOnMiss else { throw ScreenController.ControlError.elementNotFound(target) }
         beginTeaching(target: target, app: app, gen: gen)
     }
 
@@ -2313,6 +2683,8 @@ final class AppCoordinator: ObservableObject {
 
     private static func describe(_ step: ScreenAction) -> String {
         switch step.kind {
+        case .joinMeeting:
+            return "join_meeting \(step.url.isEmpty ? (step.target.isEmpty ? "next calendar meeting" : step.target) : step.url)"
         case .openURL: return "open_url \(step.url)\(step.target.isEmpty ? "" : " in \(step.target)")"
         case .focusWindow: return "focus_window \(step.target)"
         case .keystroke: return "keystroke \(step.keys)"

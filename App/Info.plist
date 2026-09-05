@@ -33,6 +33,8 @@
 	<string>14.0</string>
 	<key>LSUIElement</key>
 	<true/>
+	<key>NSCalendarsFullAccessUsageDescription</key>
+	<string>Your calendar is read on-device to find meeting links (Google Meet, Zoom, Teams) so “join my meeting” knows which meeting you mean.</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Look Ma, No Hands listens to your voice so you can control your Mac hands-free.</string>
 	<key>NSScreenCaptureUsageDescription</key>

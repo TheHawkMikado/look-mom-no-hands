@@ -1182,6 +1182,28 @@ private struct SettingsTab: View {
                 Text("The first time you command an app, it researches that app's documented features and keyboard shortcuts on the web and feeds them to the planner — so it acts precisely instead of guessing. One web-search lookup per app, then cached. Review what it learned in the Memory tab.")
                     .font(.caption).foregroundStyle(.secondary)
             }
+
+            Section("Meetings") {
+                Text("Say “Hey Mama, join my meeting” (or name it: “join the standup”) — it finds the Google Meet, Zoom, or Teams link on your calendar or in your words, clicks through the join screens, and records the audio. “Mama, leave the meeting” hangs up and saves the file.")
+                    .font(.caption).foregroundStyle(.secondary)
+                LabeledContent("Calendar access") { statusPill(coordinator.calendarMeetings.authorized) }
+                if !coordinator.calendarMeetings.authorized {
+                    Button("Grant Calendar…") { coordinator.calendarMeetings.requestAccess() }
+                }
+                Toggle("Auto-join calendar meetings", isOn: $coordinator.autoJoinMeetings)
+                Text("Joins (and records) each calendar meeting by itself at its start time, when the Mac is free. Off = join by voice only.")
+                    .font(.caption).foregroundStyle(.secondary)
+                Toggle("Announce recording out loud", isOn: $coordinator.announceMeetingRecording)
+                Text("Says “I'm recording this meeting” as the recording starts. Many places require every participant's consent to record a call — leave this on unless everyone already knows.")
+                    .font(.caption).foregroundStyle(.secondary)
+                Button("Show recordings") {
+                    // The folder only exists after the first recording; create it
+                    // so the button always lands somewhere instead of no-opping.
+                    let folder = coordinator.store.directory.appendingPathComponent("Recordings", isDirectory: true)
+                    try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+                    NSWorkspace.shared.open(folder)
+                }
+            }
         }
         .formStyle(.grouped)
     }
