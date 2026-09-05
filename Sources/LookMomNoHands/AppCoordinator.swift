@@ -1150,7 +1150,15 @@ final class AppCoordinator: ObservableObject {
     /// back on the queue; it is never dropped.
     private func flushLiveChunk(final: Bool) {
         guard let key = elevenLabsKey else { return }
-        let queue = drainPendingAudio()
+        // The silence meter: dead-air chunks never leave the machine. Scribe
+        // fed room tone hallucinates ("thank you"), and that scrap then poisons
+        // cleanup downstream — cheaper and safer to drop it here. Gated on the
+        // LOUDEST window, so one word in a long quiet chunk still ships whole.
+        let queue = drainPendingAudio().filter { wav in
+            if SpeechGate.hasVoice(wav: wav) { return true }
+            store.log("scribe", "chunk skipped — no speech energy (silence never uploads)")
+            return false
+        }
         guard !queue.isEmpty else { lastFlushAt = Date(); return }
         flushing = true
         lastFlushAt = Date()
@@ -2511,6 +2519,11 @@ final class AppCoordinator: ObservableObject {
             // truncates and Haiku drifts into condensing — never risk content for polish.
             if raw.count > 8000 {
                 store.log("dictation", "long dictation (\(raw.count) chars) — pasted raw, no cleanup pass")
+            } else if SpeechGate.tooShortForCleanup(raw) {
+                // ≤3 words: verbatim loses nothing, and never calling the model
+                // closes the hole where a hallucinated scrap came back as the
+                // model's own commentary and got pasted as if spoken.
+                store.log("dictation", "\(raw.count) chars — too short for a cleanup pass, pasted verbatim")
             } else {
                 let cleaned = (try? await claude.cleanUpDictation(raw, vocabulary: vocabulary.promptContext,
                                                                   instructions: rules, cleanup: cleanUpInsertedText)) ?? raw
@@ -2518,6 +2531,10 @@ final class AppCoordinator: ObservableObject {
                 // paste rule (an explicit reformat) is allowed to shrink that much.
                 if rules.isEmpty, raw.count > 400, cleaned.count < raw.count / 2 {
                     store.log("dictation", "cleanup shrank \(raw.count)→\(cleaned.count) chars — pasting raw")
+                } else if SpeechGate.cleanupLooksInvented(raw: raw, cleaned: cleaned) {
+                    // Ballooning from a short input is the model talking, not the user.
+                    store.log("dictation", "cleanup grew \(raw.count)→\(cleaned.count) chars from a short input — pasting raw")
+                    final = raw
                 } else {
                     final = cleaned
                 }
