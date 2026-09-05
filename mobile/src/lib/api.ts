@@ -69,6 +69,13 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   return (await res.json()) as T;
 }
 
+/** Who this token belongs to — shown in Settings so a phone signed into the
+ *  wrong account (goals vanish into an inbox no Mac polls) is visible at a
+ *  glance instead of failing silently. */
+export function getSession(): Promise<{ email: string }> {
+  return request("/api/app/session");
+}
+
 /** "goal" runs the Mac's agent; "dictation" pastes at the Mac's cursor. */
 export type GoalKind = "goal" | "dictation";
 

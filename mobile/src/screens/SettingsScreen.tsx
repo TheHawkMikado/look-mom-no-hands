@@ -1,13 +1,28 @@
-import React from "react";
+import React, { useEffect, useState } from "react";
 import { Pressable, StyleSheet, Text, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
-import { SERVER_URL } from "../lib/api";
+import { getSession, SERVER_URL } from "../lib/api";
 import { useAuth } from "../state/AuthContext";
 import { colors, spacing } from "../theme";
 
 export function SettingsScreen() {
   const insets = useSafeAreaInsets();
   const { signOut } = useAuth();
+  // The email is the load-bearing detail: goals go to the ACCOUNT's Macs, so a
+  // phone signed in as the wrong identity fails with no other symptom than
+  // "my computer isn't doing it". Bare "Connected" hid exactly that.
+  const [email, setEmail] = useState<string | null>(null);
+  useEffect(() => {
+    let alive = true;
+    getSession()
+      .then((s) => {
+        if (alive) setEmail(s.email);
+      })
+      .catch(() => undefined);
+    return () => {
+      alive = false;
+    };
+  }, []);
 
   return (
     <View style={[styles.container, { paddingTop: insets.top + spacing.md }]}>
@@ -17,8 +32,11 @@ export function SettingsScreen() {
         <Text style={styles.label}>Account</Text>
         <View style={styles.statusRow}>
           <View style={styles.dot} />
-          <Text style={styles.value}>Connected</Text>
+          <Text style={styles.value}>{email ?? "Connected"}</Text>
         </View>
+        <Text style={styles.accountHint}>
+          Your Mac must be signed in as this same account to receive tasks.
+        </Text>
       </View>
 
       {/* The server URL is shown (not editable) so the user can verify where
@@ -68,6 +86,11 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     gap: spacing.sm,
+  },
+  accountHint: {
+    color: colors.muted,
+    fontSize: 13,
+    marginTop: spacing.sm,
   },
   dot: {
     width: 8,
