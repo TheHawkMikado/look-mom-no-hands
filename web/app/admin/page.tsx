@@ -13,6 +13,7 @@ import {
 } from "@/lib/db";
 import { stripe } from "@/lib/stripe";
 import { Lockup } from "@/components/Logo";
+import BrainReview from "./BrainReview";
 import {
   adminArchivePrice,
   adminCreatePrice,
@@ -94,6 +95,7 @@ export default async function Admin({
         <a href="#platform">Platform keys</a>
         <a href="#orderform">Order form</a>
         <a href="#promos">Promo codes</a>
+        <a href="#brain">Shared Brain</a>
         <a href="/account">My account</a>
         <form action="/api/auth/logout" method="post" style={{ display: "inline" }}>
           <button className="linkish">Sign out</button>
@@ -437,6 +439,8 @@ export default async function Admin({
           immediately on the pricing page.
         </p>
       </section>
+
+      <BrainReview />
     </div>
   );
 }

@@ -1,0 +1,21 @@
+{
+  "task_type": "task_extract",
+  "kind": "deterministic",
+  "cases": [
+    { "id": "te-01", "text": "have the content agent draft a post about co-living and bring it to me by 3", "expected": { "capability": "draft_copy", "blast_tier": 0, "named_owner": "content agent", "budget_cap_cents": null } },
+    { "id": "te-02", "text": "research the top three co-living operators in Florida", "expected": { "capability": "research", "blast_tier": 0, "named_owner": null, "budget_cap_cents": null } },
+    { "id": "te-03", "text": "pay the plumber's invoice before end of day", "expected": { "capability": "purchase", "blast_tier": 3, "named_owner": null, "budget_cap_cents": null } },
+    { "id": "te-04", "text": "write the newsletter about the new offer and publish it Friday", "expected": { "capability": "draft_copy", "blast_tier": 2, "named_owner": null, "budget_cap_cents": null } },
+    { "id": "te-05", "text": "run the ad process for the co-living offer with a $300 cap", "expected": { "capability": "ad_process", "blast_tier": 3, "named_owner": null, "budget_cap_cents": 30000 } },
+    { "id": "te-06", "text": "ask the researcher to compare PadSplit and Roomies fees", "expected": { "capability": "research", "blast_tier": 0, "named_owner": "researcher", "budget_cap_cents": null } },
+    { "id": "te-07", "text": "email the client the revised proposal", "expected": { "capability": "email", "blast_tier": 3, "named_owner": null, "budget_cap_cents": null } },
+    { "id": "te-08", "text": "fix the bug in the checkout function and open a pull request", "expected": { "capability": "code", "blast_tier": 0, "named_owner": null, "budget_cap_cents": null } },
+    { "id": "te-09", "text": "call the tow company about the truck", "expected": { "capability": "call", "blast_tier": 3, "named_owner": null, "budget_cap_cents": null } },
+    { "id": "te-10", "text": "schedule a meeting with the lender for Tuesday", "expected": { "capability": "schedule", "blast_tier": 0, "named_owner": null, "budget_cap_cents": null } },
+    { "id": "te-11", "text": "delete the old Mailchimp list", "expected": { "capability": "other", "blast_tier": 4, "named_owner": null, "budget_cap_cents": null } },
+    { "id": "te-12", "text": "kick off the ad workflow for the Tampa rooms, budget $1,200", "expected": { "capability": "ad_process", "blast_tier": 3, "named_owner": null, "budget_cap_cents": 120000 } },
+    { "id": "te-13", "text": "reserve a table for four at Bern's on Friday", "expected": { "capability": "other", "blast_tier": 1, "named_owner": null, "budget_cap_cents": null } },
+    { "id": "te-14", "text": "open the CRM and paste the lead list into the new tab", "expected": { "capability": "screen_action", "blast_tier": 0, "named_owner": null, "budget_cap_cents": null } },
+    { "id": "te-15", "text": "hire a photographer for the Orlando house, up to $250", "expected": { "capability": "purchase", "blast_tier": 3, "named_owner": null, "budget_cap_cents": 25000 } }
+  ]
+}

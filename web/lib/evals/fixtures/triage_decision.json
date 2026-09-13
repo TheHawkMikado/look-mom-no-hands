@@ -1,0 +1,23 @@
+{
+  "task_type": "triage_decision",
+  "kind": "deterministic",
+  "agents": [
+    { "id": "a-content", "name": "Content Drafter", "role": "general", "title": "Content Drafter", "capabilities": "Blog posts, social copy, newsletters, emails, scripts. Drafts and hands back for approval; never publishes." },
+    { "id": "a-research", "name": "Researcher", "role": "researcher", "title": "Researcher", "capabilities": "Research and synthesis: compare options, dig up facts, summarise sources into a brief." },
+    { "id": "a-summary", "name": "Summarizer", "role": "general", "title": "Summarizer", "capabilities": "Writes short status summaries." }
+  ],
+  "cases": [
+    { "id": "td-01", "text": "have the content agent draft a post about co-living and bring it to me by 3", "has_paperclip": true, "expected": { "owner_kind": "agent", "owner_ref": "a-content" } },
+    { "id": "td-02", "text": "research the top three co-living operators in Florida", "has_paperclip": true, "expected": { "owner_kind": "agent", "owner_ref": "a-research" } },
+    { "id": "td-03", "text": "pay the plumber's invoice before end of day", "has_paperclip": true, "expected": { "owner_kind": "user", "owner_ref": null } },
+    { "id": "td-04", "text": "draft a newsletter about the new offer", "has_paperclip": false, "expected": { "owner_kind": "user", "owner_ref": null } },
+    { "id": "td-05", "text": "ask the researcher to compare PadSplit and Roomies fees", "has_paperclip": true, "expected": { "owner_kind": "agent", "owner_ref": "a-research" } },
+    { "id": "td-06", "text": "write a script for the welcome video", "has_paperclip": true, "expected": { "owner_kind": "agent", "owner_ref": "a-content" } },
+    { "id": "td-07", "text": "email the team that standup moves to 9:30", "has_paperclip": true, "expected": { "owner_kind": "agent", "owner_ref": "a-content" } },
+    { "id": "td-08", "text": "have Amari get the vendor quote for the roof", "has_paperclip": true, "expected": { "owner_kind": "user", "owner_ref": null } },
+    { "id": "td-09", "text": "run the ad process for the co-living offer with a $300 cap", "has_paperclip": true, "expected": { "owner_kind": "agent", "owner_ref": "a-content" } },
+    { "id": "td-10", "text": "call the tow company about the truck", "has_paperclip": true, "expected": { "owner_kind": "user", "owner_ref": null } },
+    { "id": "td-11", "text": "summarise the lender call into a brief", "has_paperclip": true, "expected": { "owner_kind": "agent", "owner_ref": "a-research" } },
+    { "id": "td-12", "text": "open the CRM and paste the lead list into the new tab", "has_paperclip": true, "expected": { "owner_kind": "user", "owner_ref": null } }
+  ]
+}

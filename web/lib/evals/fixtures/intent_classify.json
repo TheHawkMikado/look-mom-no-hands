@@ -1,0 +1,20 @@
+{
+  "task_type": "intent_classify",
+  "kind": "deterministic",
+  "cases": [
+    { "id": "ic-01", "text": "have the content agent draft a post about the co-living offer and bring it to me by 3", "expected": { "intent": "task" } },
+    { "id": "ic-02", "text": "what did we decide about the Tampa property last week?", "expected": { "intent": "question" } },
+    { "id": "ic-03", "text": "research the top three co-living operators in Florida", "expected": { "intent": "task" } },
+    { "id": "ic-04", "text": "note that the roofer wants half up front", "expected": { "intent": "note" } },
+    { "id": "ic-05", "text": "we're going with the blue logo, final answer", "expected": { "intent": "decision" } },
+    { "id": "ic-06", "text": "how many rooms does the Orlando house have?", "expected": { "intent": "question" } },
+    { "id": "ic-07", "text": "book a table for four at Bern's on Friday", "expected": { "intent": "task" } },
+    { "id": "ic-08", "text": "email the team that standup moves to 9:30 tomorrow", "expected": { "intent": "task" } },
+    { "id": "ic-09", "text": "good morning, how's it going", "expected": { "intent": "smalltalk" } },
+    { "id": "ic-10", "text": "is the ad account still paused?", "expected": { "intent": "question" } },
+    { "id": "ic-11", "text": "pay the plumber's invoice before end of day", "expected": { "intent": "task" } },
+    { "id": "ic-12", "text": "can you write a newsletter about the new offer", "expected": { "intent": "task" } },
+    { "id": "ic-13", "text": "who owns the vendor quote for the roof?", "expected": { "intent": "question" } },
+    { "id": "ic-14", "text": "run the ad process for the co-living offer with a $300 cap", "expected": { "intent": "task" } }
+  ]
+}

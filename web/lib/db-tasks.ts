@@ -3,6 +3,7 @@ import { assertCloudWritable, capCloudText, type Residency } from "@/lib/residen
 import type { Tier } from "@/lib/tiers";
 import { ensureRoutingSchema } from "@/lib/router";
 import { ensureTeamSchemaSQL } from "@/lib/team";
+import { ensureBrainSchema } from "@/lib/db-brain";
 import { decryptSecret, encryptSecret } from "@/lib/crypto";
 import { ensureSettingsSchema } from "@/lib/settings";
 import { ensurePromptSchema } from "@/lib/prompts";
@@ -226,6 +227,8 @@ export async function ensureTaskSchema(db = sql()) {
   await ensureIntegrationSchema(db);
   await ensurePushSchema(db);
   await ensureCallSchema(db);
+  // Phase 4–5: eval runs, shared brain, promotion queue, ad-process steps.
+  await ensureBrainSchema(db);
 }
 
 const norm = (email: string) => email.trim().toLowerCase();

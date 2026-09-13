@@ -252,3 +252,50 @@ and the Mac speaks it when idle (`GET /api/app/prompts`), while the phone gets
 the same question as an Expo push. Push is bounded (4 s) and swallowed on
 failure: a phone that is off must never stall an approval. Expo receipts are
 collected by the cron so uninstalled apps drop their tokens.
+
+## 2026-09-13 — Evals measure the rules engine too, and an unrunnable candidate scores 0
+
+`web/lib/evals/run.ts` runs every `routing_scores` row that has a fixture
+set. Deterministic sets (intent, extraction, triage) are scored exactly —
+a case passes only when every expected field matches — and the `local`
+provider is the actual rules engine in extract.ts/triage.ts, so the table
+can be measured with no model key at all. Rubric sets (summaries, short
+copy) go through the `eval_judge` route and are skipped, with a warning and
+the seed score left in place, when there is no key: unmeasured is not the
+same as wrong. A `local` model the runner has no engine for is scored 0:
+nothing may route to code that does not exist. Reason: the seed is an
+opinion; the demo inserts a candidate claiming 0.99 and shows the winner
+change back once it is measured. The seed never clobbers a measured score
+(router.ts), so scores only ever move by evidence after the first run.
+Fixtures are realistic and the engine's misses are recorded in
+MODEL_ROUTING.md rather than papered over.
+
+## 2026-09-13 — The Shared Brain scrubber is deterministic and sits on the only write path
+
+`web/lib/brain.ts` replaces emails, URLs with ids, phones, cards, SSNs,
+street addresses, dollar amounts, dates and introduced names ("I'm X",
+"with X", "for X") with placeholders, in a fixed order, with no model in
+the loop. `prepareCandidate` is the only way a promotion_queue row is built
+and it scrubs unconditionally, then refuses to return if an email or phone
+survived; publishing re-scrubs and refuses again. The classifier's
+heuristics decide alone when certain (first-person facts → never; two or
+more process signals → generic) and the `promotion_classify` model only
+breaks the borderline, on scrubbed text. Consent is one question, default
+no, and a no is final. Publishing attributes a SOP to
+sha256(email + SESSION_SECRET), never an email. Reason: §4.3 says zero
+personal data by construction; a model-based scrubber would make that a
+probability, and a test can only enforce a function that always runs.
+
+## 2026-09-13 — The ad process is a project with a cap; 80% asks, the cap refuses
+
+`web/lib/projects.ts` turns an `ad_process` intake into a `projects` row
+with the spoken cap and seven `project_steps` — research, angles, variants,
+image prompts, compliance, the owner's review gate (tier 2), publish/fund
+(tier 3 when there is a budget, tier 2 staging otherwise) — filed as
+Paperclip issues under the task's issue when the connection is direct, in
+the "Ad process" template project from `bootstrap.mjs --ads`. Spend goes
+through `POST /api/app/projects/:id/spend`, is a receipt on the task,
+asks the owner once at 80% via the same goal_progress event the phone
+already renders, and is refused (409) when it would cross the cap. Reason:
+§6 — money is tier 3 and a false low tier costs money; the cap is enforced
+where the spend is recorded, not where the agent promises to behave.

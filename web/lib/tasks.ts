@@ -22,6 +22,7 @@ import { getSettings } from "@/lib/settings";
 import { needsApproval, type Tier } from "@/lib/tiers";
 import { triage } from "@/lib/triage";
 import { captureDirect, storeRawBoard, type RawBoard } from "@/lib/team";
+import { onAdProcessIntake } from "@/lib/projects";
 import { parseWhen, schedule } from "@/lib/when";
 
 /**
@@ -152,6 +153,11 @@ export async function intake(
     const d = await deliverTask(email, task, deliver, "ticket", now);
     delivery = d.outcome;
     out = d.task ?? task;
+  }
+  // Phase 5: "run the ad process for X with a $N cap" gets a project with a
+  // budget and the step issues nested under the task's issue.
+  if (x.capability === "ad_process") {
+    await onAdProcessIntake(out, x).catch((e) => console.warn("[ad-process]", e instanceof Error ? e.message : e));
   }
   return { intent: x.intent, task: out, confirmation: t.confirmation, extraction: x, delivery };
 }

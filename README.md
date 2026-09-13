@@ -35,10 +35,13 @@ choices and their reasons are in [DECISIONS.md](DECISIONS.md); the model
 routing table is [MODEL_ROUTING.md](MODEL_ROUTING.md); what each machine
 needs is in [SYSTEM-REQUIREMENTS.md](SYSTEM-REQUIREMENTS.md).
 
-Phase 0 (shipped): the web service takes a spoken or typed request, extracts a
-task, tiers its blast radius, delegates it to a Paperclip agent, asks you to
-approve from the phone when the action leaves the building, and keeps a
-receipt. Set up the team with three commands — see
+All six phases have a first implementation (see the status table in
+SPEC.md §9): talk to it and it delegates to your team and confirms out loud;
+let it sit in a meeting and it captures who said what, extracts the action
+items, hands them out and reads back the summary; it follows up on its own,
+asks you one question at a time at a good moment, calls people when you let
+it, keeps itself updated, and can revert to the last version that worked.
+Set up the team with three commands — see
 [Scripts/paperclip/README.md](Scripts/paperclip/README.md).
 
 ## Architecture

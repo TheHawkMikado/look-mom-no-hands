@@ -1,0 +1,11 @@
+{
+  "task_type": "summarize_meeting",
+  "kind": "rubric",
+  "cases": [
+    { "id": "sm-01", "prompt": "Summarise this meeting in under 120 words with a bullet list of action items, each with an owner.\n\nTranscript: [Owner] We need the Orlando house listed by the 20th. Jordan, can you get the photos done? [Jordan] Yes, Thursday. [Owner] Priya, the lease template still has the old deposit clause. [Priya] I'll fix it tomorrow and send it to legal. [Owner] And I'll call the lender about the rate lock myself.", "rubric": "Must list exactly three action items: photos (Jordan, Thursday), lease deposit clause fix sent to legal (Priya, tomorrow), lender rate-lock call (Owner). Under 120 words. No invented details." },
+    { "id": "sm-02", "prompt": "Summarise: [Owner] The ad account got paused again. [Sam] It's the landing page claim about guaranteed income. [Owner] Remove the word guaranteed everywhere and resubmit. [Sam] Will do today. Also we're at 70% of the monthly budget.", "rubric": "Captures: cause (guaranteed-income claim), decision (remove 'guaranteed' and resubmit, Sam, today), and the budget status (70%). No speculation about outcomes." },
+    { "id": "sm-03", "prompt": "Summarise: [Owner] Let's not renew the coworking lease. [Dana] Agreed, month to month is fine. [Owner] Decision made. Dana, tell the landlord by Friday.", "rubric": "States the decision (do not renew; go month to month) and one action item (Dana tells landlord by Friday). Marks it as a decision, not a discussion." },
+    { "id": "sm-04", "prompt": "Summarise: A 30-minute call where the group debated two vendor quotes for the roof ($8,400 and $9,900), leaned toward the cheaper one but asked for references first; no decision yet.", "rubric": "Does NOT record a decision. Records the two quotes, the lean, and the open action (get references). Says a decision is pending." },
+    { "id": "sm-05", "prompt": "Summarise: [Owner] Standup moves to 9:30 starting Monday. That's all. [Everyone] ok", "rubric": "One or two sentences. Captures the time change and start date. No padding, no invented action items." }
+  ]
+}

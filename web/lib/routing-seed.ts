@@ -16,7 +16,9 @@ export type TaskType =
   | "code_change"
   | "image_prompt"
   | "call_agent_realtime"
-  | "triage_decision";
+  | "triage_decision"
+  | "eval_judge"
+  | "promotion_classify";
 
 export interface RoutingSeed {
   task_type: TaskType;
@@ -33,6 +35,11 @@ export interface RoutingSeed {
   options?: Record<string, unknown>;
 }
 
+/** Providers the eval runner knows how to drive. `local` is the deterministic
+ *  rules engine (lib/extract.ts fallbacks, lib/triage.ts) — a real candidate
+ *  for the hot-path types, and the one that can be measured with no key. */
+export type Provider = RoutingSeed["provider"];
+
 export const QUALITY_FLOOR = 0.6;
 
 export const ROUTING_SEED: readonly RoutingSeed[] = [
@@ -46,6 +53,11 @@ export const ROUTING_SEED: readonly RoutingSeed[] = [
   { task_type: "research_synthesize", model: "claude-opus-5", provider: "anthropic", score: 0.9, cost_per_1k: 0.025, latency_p50: 15000, latency_first: false, options: { web_search: true } },
   { task_type: "code_change", model: "claude-opus-5", provider: "anthropic", score: 0.85, cost_per_1k: 0.025, latency_p50: 20000, latency_first: false, options: { effort: "xhigh" } },
   { task_type: "image_prompt", model: "claude-opus-5", provider: "anthropic", score: 0.75, cost_per_1k: 0.025, latency_p50: 2000, latency_first: false },
+  // Phase 4: the LLM judge for rubric eval cases and the Shared Brain
+  // promotion classifier. Both are generic — no user data reaches them
+  // unscrubbed (lib/brain.ts scrubs before the classifier sees anything).
+  { task_type: "eval_judge", model: "claude-opus-5", provider: "anthropic", score: 0.9, cost_per_1k: 0.025, latency_p50: 4000, latency_first: false, options: { effort: "medium" } },
+  { task_type: "promotion_classify", model: "claude-haiku-4-5", provider: "anthropic", score: 0.75, cost_per_1k: 0.005, latency_p50: 700, latency_first: true },
   { task_type: "stt", model: "apple-speech", provider: "apple", score: 0.8, cost_per_1k: 0, latency_p50: 300, latency_first: true },
   { task_type: "speaker_id", model: "ecapa-tdnn-coreml", provider: "local", score: 0.8, cost_per_1k: 0, latency_p50: 50, latency_first: true },
 ];

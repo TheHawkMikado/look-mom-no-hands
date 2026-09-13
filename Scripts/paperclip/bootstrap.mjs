@@ -19,6 +19,9 @@
  *   NOHANDS_APP_TOKEN  register the connection (bridge mode)
  *   --direct           register in direct mode (the web service can reach
  *                      PAPERCLIP_URL itself — a VPS, not your laptop)
+ *   --ads              only create the "Ad process" goal + project template
+ *                      (SPEC.md §9 Phase 5) in the company and exit; the web
+ *                      service files each run's step issues into it
  */
 import { readFileSync, writeFileSync, existsSync } from "node:fs";
 import { dirname, resolve } from "node:path";
@@ -73,6 +76,40 @@ if (!company) {
   console.log(`Created company "No Hands" (${company.id})`);
 } else {
   console.log(`Company "No Hands" exists (${company.id})`);
+}
+
+// 2b. --ads: the Phase 5 template. A company goal ("why") and a project
+// ("what") named "Ad process"; lib/projects.ts finds the project by name and
+// files each run's seven step issues into it. Idempotent.
+if (flag("--ads")) {
+  const goals = await pc("GET", `/api/companies/${company.id}/goals`);
+  let goal = goals.find((g) => g.title === "Ad process");
+  if (!goal) {
+    goal = await pc("POST", `/api/companies/${company.id}/goals`, {
+      title: "Ad process",
+      description: "Hawk's multi-model ad-creation workflow: research the offer → 3 angles → 5 copy variants per angle → image prompts → compliance/brand check → owner review gate (tier 2) → publish/fund within the cap (tier 3). Budget cap and review gate live in No Hands.",
+      level: "company",
+      status: "active",
+    });
+    console.log(`Created goal "Ad process" (${goal.id})`);
+  } else {
+    console.log(`Goal "Ad process" exists (${goal.id})`);
+  }
+  const projects = await pc("GET", `/api/companies/${company.id}/projects`);
+  let project = projects.find((p) => p.name === "Ad process");
+  if (!project) {
+    project = await pc("POST", `/api/companies/${company.id}/projects`, {
+      name: "Ad process",
+      description: "Template project for ad runs. Each run from No Hands adds seven step issues here, under the task's issue. Nothing is published or funded before the owner's review gate.",
+      goalIds: [goal.id],
+      status: "in_progress",
+    });
+    console.log(`Created project "Ad process" (${project.id})`);
+  } else {
+    console.log(`Project "Ad process" exists (${project.id})`);
+  }
+  console.log(`Ad process template ready: goal ${goal.id}, project ${project.id}`);
+  process.exit(0);
 }
 
 // 3. Starter agents on the process adapter, pointing at ./agents/*.mjs.

@@ -280,6 +280,21 @@ a source user id only.
 
 ## 9. Build Phases
 
+**Status (2026-09-13):** every phase below has a first implementation on
+`main`. What is real code and what still needs a credential or a device:
+
+| Phase | Built | Needs from the owner |
+|---|---|---|
+| 0 Foundation | tasks, tiers, gate, router, Paperclip (direct + bridge), receipts, team boards | — |
+| 1 Voice front door | speaker enrolment + verification (on-device model), delegation from the planner, spoken confirmation, Local Brain, router client, rollback | enrol your voice once in Settings › Voice identity |
+| 2 Meeting loop | consent line, introduction ritual, diarized transcript, extraction, triage, spoken summary, human tickets | GoHighLevel key for SMS; Resend for email |
+| 3 Follow-ups + calls | check-ins, nudges, escalation by voice at a good moment, daily brief, push, outbound calls | Vapi key + number for calls; phone push credentials (EAS) |
+| 4 Evals + Shared Brain | fixtures, eval runner, weekly cron, scrubber, consent, admin review, SOP API | an Anthropic key for model candidates and the judge |
+| 5 Ad process | intake with a budget cap, project + 7 step issues in Paperclip, 80% check-in, spend cap | your real ad steps replacing the generic template |
+| 6 Wearables + hardening | Limitless ingest, quiet hours, lock/meeting-aware speaking, outbox, meeting-approval channel rule | Limitless API key; Plaud when their API allows |
+
+
+
 ### Phase 0 — Foundation
 - SPEC.md, DECISIONS.md, MODEL_ROUTING.md, SYSTEM-REQUIREMENTS.md.
 - Web schema (§10) with residency + build-failing test.
