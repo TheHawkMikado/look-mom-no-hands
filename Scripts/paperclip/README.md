@@ -16,6 +16,12 @@ Get the token by opening `https://nohandsapp.com/app/login?client=bridge`
 after signing in. Put a real `ANTHROPIC_API_KEY` in `Scripts/paperclip/.env`
 so the Content Drafter writes real drafts (stubs otherwise).
 
+On a laptop, make it survive reboots and lid-closes:
+
+```sh
+./Scripts/paperclip/install-launchagents.sh    # starts at login, restarts if it stops; --uninstall to remove
+```
+
 ## Two ways to connect
 
 | | bridge (default) | direct |

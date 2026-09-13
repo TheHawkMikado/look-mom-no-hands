@@ -2,6 +2,7 @@ import { sql } from "@/lib/db";
 import { assertCloudWritable, capCloudText, type Residency } from "@/lib/residency";
 import type { Tier } from "@/lib/tiers";
 import { ensureRoutingSchema } from "@/lib/router";
+import { ensureTeamSchemaSQL } from "@/lib/team";
 import { decryptSecret, encryptSecret } from "@/lib/crypto";
 
 /**
@@ -200,6 +201,7 @@ export async function ensureTaskSchema(db = sql()) {
     )`;
 
   await ensureRoutingSchema(db);
+  await ensureTeamSchemaSQL(db);
 }
 
 const norm = (email: string) => email.trim().toLowerCase();

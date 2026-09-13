@@ -65,8 +65,9 @@ case "${1:-up}" in
     else
       command -v node >/dev/null || { echo "Node.js 20+ is required (https://nodejs.org). Or: PAPERCLIP_ENGINE=docker $0" >&2; exit 1; }
       # Paperclip loads ./.env from the working directory, so the secrets above
-      # reach the server without touching your home directory config.
-      PAPERCLIP_HOME="$HERE/data/home" nohup npx --yes paperclipai run --bind loopback >"$LOG" 2>&1 &
+      # reach the server. A dedicated instance ("nohands") keeps this apart from
+      # any earlier Paperclip attempt on this machine (~/.paperclip/instances).
+      nohup npx --yes paperclipai run --bind loopback --instance nohands >"$LOG" 2>&1 &
       echo $! > "$PIDFILE"
     fi
     wait_up

@@ -50,7 +50,8 @@ it in Docker.
 
 Notes:
 - Agents only work while the host is awake. A laptop that sleeps pauses the
-  company. For "it works while my Mac sleeps", host Paperclip on a small
+  company; `Scripts/paperclip/install-launchagents.sh` brings Paperclip and
+  the bridge back at login and after any crash, but not through sleep. For "it works while my Mac sleeps", host Paperclip on a small
   VPS (2 vCPU / 4 GB / 40 GB is enough for one person) and point the
   connection at it. That is a URL change, not a reinstall.
 - Local agents that run a CLI (Claude Code, Codex) need that CLI installed and

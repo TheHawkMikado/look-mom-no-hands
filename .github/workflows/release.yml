@@ -1,0 +1,123 @@
+# Every merge to main becomes a release the app's Update button can pull.
+#
+#   pull_request → build + unit tests on a Mac runner (proves the Swift compiles)
+#   push to main → build, sign, notarise, package the DMG, tag, publish the
+#                  GitHub release, and move LATEST_APP_VERSION on Vercel so
+#                  every installed copy sees it within its next check.
+#
+# Signing needs secrets (see DISTRIBUTION.md → "Automatic releases"). Without
+# them the job still builds and tests, then stops and says what is missing —
+# the updater refuses unsigned builds by design, so an unsigned release would
+# reach nobody.
+name: release
+
+on:
+  pull_request:
+    paths: ["Sources/**", "Tests/**", "App/**", "Package.swift", "Scripts/**", ".github/workflows/release.yml"]
+  push:
+    branches: [main]
+    paths: ["Sources/**", "Tests/**", "App/**", "Package.swift", "Scripts/**", ".github/workflows/release.yml"]
+  workflow_dispatch:
+    inputs:
+      notes:
+        description: "What's new (shown under the update nudge)"
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build & test (macOS)
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Swift toolchain
+        run: swift --version && xcodebuild -version
+      - name: Build
+        run: swift build -c release
+      - name: Unit tests
+        run: swift test
+
+  release:
+    name: Sign, notarise, publish
+    needs: build
+    if: github.event_name != 'pull_request'
+    runs-on: macos-15
+    env:
+      MAC_SIGN_ID: ${{ secrets.MAC_SIGN_ID }}
+      MAC_CERT_P12_BASE64: ${{ secrets.MAC_CERT_P12_BASE64 }}
+      MAC_CERT_PASSWORD: ${{ secrets.MAC_CERT_PASSWORD }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+      VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+      VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+      VERCEL_TEAM_ID: ${{ secrets.VERCEL_TEAM_ID }}
+      VERCEL_DEPLOY_HOOK_URL: ${{ secrets.VERCEL_DEPLOY_HOOK_URL }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Check signing secrets
+        id: secrets
+        run: |
+          missing=""
+          for v in MAC_SIGN_ID MAC_CERT_P12_BASE64 MAC_CERT_PASSWORD APPLE_ID APPLE_TEAM_ID APPLE_APP_PASSWORD; do
+            [ -n "${!v}" ] || missing="$missing $v"
+          done
+          if [ -n "$missing" ]; then
+            echo "::warning::Not releasing — missing repository secrets:$missing (see DISTRIBUTION.md → Automatic releases)"
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Import Developer ID certificate
+        if: steps.secrets.outputs.ready == 'true'
+        run: |
+          set -euo pipefail
+          KEYCHAIN="$RUNNER_TEMP/release.keychain-db"
+          KEYPASS="$(openssl rand -hex 16)"
+          echo "$MAC_CERT_P12_BASE64" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security create-keychain -p "$KEYPASS" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYPASS" "$KEYCHAIN"
+          security import "$RUNNER_TEMP/cert.p12" -P "$MAC_CERT_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYPASS" "$KEYCHAIN"
+          security list-keychains -d user -s "$KEYCHAIN" login.keychain-db
+          security find-identity -v -p codesigning "$KEYCHAIN"
+          rm -f "$RUNNER_TEMP/cert.p12"
+          xcrun notarytool store-credentials ci --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" --password "$APPLE_APP_PASSWORD" --keychain "$KEYCHAIN"
+
+      - name: Cut the release
+        if: steps.secrets.outputs.ready == 'true'
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          MARKETING="$(/usr/libexec/PlistBuddy -c 'Print CFBundleShortVersionString' App/Info.plist | cut -d. -f1-2)"
+          NOTES="${{ github.event.inputs.notes }}"
+          if [ -z "$NOTES" ]; then
+            NOTES="$(git log -1 --pretty=%s)"
+          fi
+          SIGN_ID="$MAC_SIGN_ID" NOTARY_PROFILE=ci ./Scripts/release.sh "$MARKETING" --notes "$NOTES"
+          echo "VERSION=$(/usr/libexec/PlistBuddy -c 'Print CFBundleShortVersionString' App/Info.plist)" >> "$GITHUB_ENV"
+          echo "NOTES=$NOTES" >> "$GITHUB_ENV"
+
+      - name: Tell every installed app (Vercel LATEST_APP_VERSION)
+        if: steps.secrets.outputs.ready == 'true'
+        run: |
+          if [ -z "$VERCEL_TOKEN" ] || [ -z "$VERCEL_PROJECT_ID" ]; then
+            echo "::warning::Release v$VERSION is on GitHub but VERCEL_TOKEN / VERCEL_PROJECT_ID are not set — set LATEST_APP_VERSION=$VERSION on Vercel by hand and redeploy."
+            exit 0
+          fi
+          node web/scripts/vercel-set-version.mjs "$VERSION" "$NOTES"

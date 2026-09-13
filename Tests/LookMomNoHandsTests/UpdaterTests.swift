@@ -41,6 +41,41 @@ final class UpdaterTests: XCTestCase {
         XCTAssertTrue(script.contains("/usr/bin/open"), "the swap must end in a relaunch")
     }
 
+    func testSwapScriptRelaunchesEvenWhenTheSwapFails() {
+        // A failed copy must never strand the user with no app: the script
+        // relaunches the destination, and falls back to the bundle we ran from.
+        let script = AppUpdater.swapScript(pid: 1,
+                                           staged: "/tmp/stage/Look Ma, No Hands.app",
+                                           app: "/Applications/Look Ma, No Hands.app",
+                                           running: "/private/var/folders/x/AppTranslocation/y/d/Look Ma, No Hands.app",
+                                           cleanup: ["/Users/h/Library/Application Support/LookMaNoHands/updates/update.dmg"],
+                                           log: "/Users/h/Library/Application Support/LookMaNoHands/updates/swap.log")
+        XCTAssertTrue(script.contains("|| /usr/bin/open '/private/var/folders/x/AppTranslocation/y/d/Look Ma, No Hands.app'"))
+        XCTAssertTrue(script.contains("/bin/rm -f '/Users/h/Library/Application Support/LookMaNoHands/updates/update.dmg'"),
+                      "the downloaded image is removed after install")
+        XCTAssertTrue(script.contains("swap.log"), "the swap is logged so a failure can be read afterwards")
+    }
+
+    // MARK: install destination
+
+    func testInPlaceInstallForANormalBundle() {
+        XCTAssertEqual(AppUpdater.installDestination(forRunningBundle: "/Applications/Look Ma, No Hands.app"),
+                       "/Applications/Look Ma, No Hands.app")
+        XCTAssertEqual(AppUpdater.installDestination(forRunningBundle: "/Users/h/Desktop/Look Ma, No Hands.app"),
+                       "/Users/h/Desktop/Look Ma, No Hands.app",
+                       "a bundle the user put somewhere deliberate is updated where it is")
+    }
+
+    func testTranslocatedOrMountedBundlesLandInApplications() {
+        // Swapping a translocated copy updates a throwaway; swapping on the DMG
+        // is impossible. Both must go to /Applications.
+        XCTAssertEqual(AppUpdater.installDestination(
+            forRunningBundle: "/private/var/folders/x/AppTranslocation/y/d/Look Ma, No Hands.app"),
+            "/Applications/Look Ma, No Hands.app")
+        XCTAssertEqual(AppUpdater.installDestination(forRunningBundle: "/Volumes/Look Ma No Hands/Look Ma, No Hands.app"),
+                       "/Applications/Look Ma, No Hands.app")
+    }
+
     // MARK: signature requirement
 
     func testRequirementPinsTheTeam() {

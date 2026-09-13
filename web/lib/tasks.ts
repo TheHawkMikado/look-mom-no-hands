@@ -15,6 +15,7 @@ import { extractTask, type Extraction } from "@/lib/extract";
 import { applyVerdict, gateNotify, requestApproval } from "@/lib/gate";
 import { ISSUE_DELIVERED, ISSUE_FAILED, latestAgentComment, PaperclipClient } from "@/lib/paperclip";
 import { triage } from "@/lib/triage";
+import { captureDirect, storeRawBoard, type RawBoard } from "@/lib/team";
 
 /**
  * The task pipeline: intake → extract → triage → dispatch → (agent works) →
@@ -271,6 +272,8 @@ export async function syncAccount(email: string): Promise<{ touched: number; mod
       await advance(email, { task_id: task.id, error: e instanceof Error ? e.message : String(e) });
     }
   }
+  // The team board rides the same clock. A failed capture keeps the last one.
+  await captureDirect(email, conn).catch((e) => console.warn("[team] capture failed:", e instanceof Error ? e.message : e));
   return { touched, mode: conn.mode };
 }
 
@@ -315,7 +318,10 @@ export async function bridgeWork(email: string): Promise<BridgeWork | null> {
   return work;
 }
 
-export async function bridgeReport(email: string, observations: Observation[]): Promise<number> {
+export async function bridgeReport(email: string, observations: Observation[], board?: RawBoard | null): Promise<number> {
+  if (board && typeof board === "object") {
+    await storeRawBoard(email, board).catch((e) => console.warn("[team] bridge board failed:", e instanceof Error ? e.message : e));
+  }
   let n = 0;
   for (const o of observations) {
     if (!o || typeof o.task_id !== "string") continue;

@@ -46,6 +46,8 @@ function latestAgentComment(comments) {
 }
 
 let lastAgentsSync = 0;
+let lastBoardSync = 0;
+const BOARD_EVERY_MS = Number(process.env.BRIDGE_BOARD_MS || 15000);
 async function round() {
   const work = await web("GET", "/api/app/bridge/work");
   const observations = [];
@@ -87,7 +89,23 @@ async function round() {
     agents = (await pc("GET", `/api/companies/${work.company_id}/agents`)).map((a) => ({ id: a.id, name: a.name, role: a.role, title: a.title ?? null, capabilities: a.capabilities ?? null }));
     lastAgentsSync = Date.now();
   }
-  if (observations.length || agents) await web("POST", "/api/app/bridge/report", { observations, agents });
+  // The team board: every member's open issues, humans and bots. Titles and
+  // statuses only — descriptions and comments never leave Paperclip.
+  let board = null;
+  if (Date.now() - lastBoardSync > BOARD_EVERY_MS) {
+    const [ag, mem, issues] = await Promise.all([
+      pc("GET", `/api/companies/${work.company_id}/agents`),
+      pc("GET", `/api/companies/${work.company_id}/members`).catch(() => ({ members: [] })),
+      pc("GET", `/api/companies/${work.company_id}/issues?status=backlog,todo,in_progress,in_review,blocked`),
+    ]);
+    board = {
+      agents: ag.map((a) => ({ id: a.id, name: a.name, role: a.role, title: a.title ?? null, status: a.status ?? null })),
+      members: (mem.members ?? []).map((m) => ({ id: m.id, principalType: m.principalType, principalId: m.principalId, status: m.status, membershipRole: m.membershipRole, user: m.user ? { id: m.user.id, email: m.user.email ?? null, name: m.user.name ?? null } : null })),
+      issues: issues.map((i) => ({ id: i.id, identifier: i.identifier ?? null, title: i.title, status: i.status, priority: i.priority ?? null, assigneeAgentId: i.assigneeAgentId ?? null, assigneeUserId: i.assigneeUserId ?? null, updatedAt: i.updatedAt })),
+    };
+    lastBoardSync = Date.now();
+  }
+  if (observations.length || agents || board) await web("POST", "/api/app/bridge/report", { observations, agents, board });
 }
 
 console.log(`[bridge] ${PC} ⇄ ${API} every ${INTERVAL} ms`);

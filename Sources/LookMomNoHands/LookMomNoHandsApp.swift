@@ -20,6 +20,16 @@ struct LookMomNoHandsApp: App {
                 // window content, which isn't materialised until it's shown.
                 .onAppear {
                     updates.modeProvider = { account.info?.mode }
+                    // Idle = standby or off. Anything else (recording, thinking,
+                    // acting, clarifying, watching) is a moment an update must
+                    // not relaunch the app in.
+                    updates.isIdle = { [weak coordinator] in
+                        guard let coordinator else { return false }
+                        switch coordinator.phase {
+                        case .idle, .listeningWake: return true
+                        default: return false
+                        }
+                    }
                     updates.startPeriodicChecks()
                     account.attach(coordinator: coordinator)
                     AccountBridge.handler = { url in
@@ -29,6 +39,10 @@ struct LookMomNoHandsApp: App {
                     Task { await account.syncOnLaunch() }
                 }
                 .onOpenURL { url in AccountBridge.handle(url) }
+                // An update found mid-goal waits; the return to standby is its cue.
+                .onChange(of: coordinator.phase) { _, phase in
+                    if phase == .idle || phase == .listeningWake { updates.tryPendingInstall() }
+                }
         }
         .menuBarExtraStyle(.window)
 
@@ -662,6 +676,18 @@ struct PanelView: View {
     /// line here the button looks broken — indistinguishable from an update check
     /// that never fired.
     private var versionRow: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            versionLine
+            Toggle("Update automatically when idle",
+                   isOn: Binding(get: { updates.autoInstall }, set: { updates.autoInstall = $0 }))
+                .toggleStyle(.switch)
+                .controlSize(.mini)
+                .font(.caption2)
+        }
+        .padding(.top, 2)
+    }
+
+    private var versionLine: some View {
         HStack(spacing: 6) {
             Text("v\(updates.currentVersion)").font(.caption2).foregroundStyle(.secondary)
             Spacer()
@@ -683,7 +709,6 @@ struct PanelView: View {
                 Text("Update available").font(.caption2).foregroundStyle(Color.accentColor)
             }
         }
-        .padding(.top, 2)
     }
 }
 

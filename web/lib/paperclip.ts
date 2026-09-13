@@ -40,8 +40,17 @@ export interface PcIssue {
   status: string;
   priority: string | null;
   assigneeAgentId: string | null;
+  assigneeUserId: string | null;
   createdAt: string;
   updatedAt: string;
+}
+export interface PcMember {
+  id: string;
+  principalType: string;
+  principalId: string;
+  status: string;
+  membershipRole: string;
+  user?: { id: string; email: string | null; name: string | null } | null;
 }
 export interface PcComment {
   id: string;
@@ -161,6 +170,11 @@ export class PaperclipClient {
     return this.req<unknown>("POST", `/api/agents/${agentId}/heartbeat/invoke`, { reason });
   }
 
+  /** Human members of the company (board users). */
+  listMembers(companyId: string) {
+    return this.req<{ members: PcMember[] }>("GET", `/api/companies/${companyId}/members`);
+  }
+
   // Issues
   listIssues(companyId: string, q: { status?: string; assigneeAgentId?: string } = {}) {
     const p = new URLSearchParams();
@@ -200,6 +214,9 @@ export function latestAgentComment(comments: PcComment[]): PcComment | null {
   if (byAgent.length === 0) return null;
   return byAgent.reduce((a, b) => (a.createdAt > b.createdAt ? a : b));
 }
+
+/** Issue statuses that are still someone's work. */
+export const ISSUE_OPEN = ["backlog", "todo", "in_progress", "in_review", "blocked"] as const;
 
 /** Paperclip issue statuses that mean "the agent has produced something". */
 export const ISSUE_DELIVERED = new Set(["in_review", "done"]);

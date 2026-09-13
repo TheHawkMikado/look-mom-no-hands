@@ -87,3 +87,30 @@ web service. Both feed the same `advance()` in `web/lib/tasks.ts`, so "the
 draft is ready" is decided in exactly one place and the bridge holds no
 state. Verified end to end in both modes on 2026-09-13
 (`web/scripts/phase0-demo.mjs`).
+
+## 2026-09-13 — Updates install themselves (owner's call), still through the signature gate
+
+The earlier trust line was "notify, never install". The owner asked for the
+opposite: every release goes live and every Mac keeps itself current. So
+`UpdateChecker.autoInstall` (default on, one switch in the panel) installs a
+newer build as soon as the app is idle — never mid-dictation or mid-goal —
+once per version (a failed attempt is shown, not retried). What did NOT
+move: AppUpdater's Developer ID requirement. Automatic means no click, not
+less checking. Translocated or DMG-mounted copies install to /Applications;
+a swap that cannot succeed fails before the app quits.
+
+## 2026-09-13 — Releases are cut by CI on every merge to main
+
+`.github/workflows/release.yml` on macOS runners: build + tests on PRs;
+sign, notarise, package, tag, publish, and bump Vercel on main. The commit
+made by the workflow uses the Actions token, which GitHub never re-triggers
+on, so there is no loop. Without signing secrets it builds and stops — an
+unsigned release would reach nobody.
+
+## 2026-09-13 — Team boards: every member's work, bots included, without opening Paperclip
+
+`web/lib/team.ts` snapshots every open issue per assignee (agents and human
+members) on each sync round or bridge report, overlays No Hands tasks that
+never reached Paperclip, and serves it at `/team` and `GET /api/app/team`.
+Titles, statuses and owners only — descriptions and comments stay in
+Paperclip (residency).
