@@ -30,6 +30,14 @@ struct LookMomNoHandsApp: App {
                         default: return false
                         }
                     }
+                    // The wake word opens the door only for the enrolled owner
+                    // (SPEC §5.1 step 2). shouldAccept fails open — off, no
+                    // profile, no model, or too little audio all mean "yes" —
+                    // so an unverified wake is never a locked-out wake.
+                    coordinator.wakeGate = {
+                        SpeakerVerifier.shared.shouldAccept(
+                            recentAudio: VoiceListener.active?.recentAudio(seconds: 3) ?? [])
+                    }
                     updates.startPeriodicChecks()
                     account.attach(coordinator: coordinator)
                     AccountBridge.handler = { url in

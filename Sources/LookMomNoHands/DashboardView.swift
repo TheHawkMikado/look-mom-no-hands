@@ -1250,6 +1250,8 @@ private struct SettingsTab: View {
                 }
             }
 
+            VoiceIdentitySection(log: { coordinator.store.log("voice", $0) })
+
             versionSection
         }
         .formStyle(.grouped)
