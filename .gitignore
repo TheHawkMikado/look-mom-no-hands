@@ -6,3 +6,6 @@ build/
 # Secrets — never commit. Apple Sign in key, etc.
 *.p8
 AuthKey_*.p8
+Scripts/paperclip/.env
+Scripts/paperclip/data/
+Scripts/paperclip/.connection.json

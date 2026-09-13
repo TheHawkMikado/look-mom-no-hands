@@ -1,6 +1,7 @@
 import { createHash, randomBytes } from "node:crypto";
 import postgres from "postgres";
 import { decryptSecret, encryptSecret } from "@/lib/crypto";
+import { ensureTaskSchema } from "@/lib/db-tasks";
 
 /**
  * Licence storage.
@@ -32,7 +33,10 @@ export function sql() {
           "integration, which sets POSTGRES_URL).",
       );
     }
-    global.__sql = postgres(url, { ssl: "require", max: 3, idle_timeout: 20 });
+    // Hosted Postgres requires TLS; a local dev/test database (sslmode=disable in
+    // the URL) has none. The URL decides, so the same code runs in both places.
+    const ssl = /sslmode=disable/.test(url) ? false : ("require" as const);
+    global.__sql = postgres(url, { ssl, max: 3, idle_timeout: 20 });
   }
   return global.__sql;
 }
@@ -380,6 +384,10 @@ async function ensureSchemaOnce() {
   await db`
     CREATE INDEX IF NOT EXISTS phone_goals_by_age
       ON phone_goals (email, created_at)`;
+
+  // Chief-of-staff tables (tasks, approvals, receipts, router, Paperclip
+  // connection) live in lib/db-tasks.ts; same idempotent, memoized contract.
+  await ensureTaskSchema(db);
 }
 
 // MARK: - Phone goals (the mobile app's spoken tasks, queued for a Mac)

@@ -25,6 +25,9 @@ export const dynamic = "force-dynamic";
 const CLIENTS: Record<string, { scheme: string }> = {
   mac: { scheme: "lookmomnohands" },
   mobile: { scheme: "nohands" },
+  // The Paperclip bridge (Scripts/paperclip/bridge.mjs) has no URL scheme; it
+  // shows the token on a page for the user to paste into the terminal.
+  bridge: { scheme: "" },
 };
 
 export async function GET(req: NextRequest) {
@@ -45,7 +48,19 @@ export async function GET(req: NextRequest) {
   }
 
   await ensureSchema();
-  const token = await createAppToken(session.email, null);
+  const token = await createAppToken(session.email, client === "bridge" ? "paperclip-bridge" : null);
+  if (client === "bridge") {
+    return new NextResponse(
+      `<!doctype html><meta charset="utf-8"><title>Connect Paperclip</title>
+<body style="font:16px/1.5 system-ui;max-width:40rem;margin:4rem auto;padding:0 1rem">
+<h1>Connect Paperclip</h1>
+<p>Signed in as <b>${escapeHtml(session.email)}</b>. Paste this into your terminal:</p>
+<pre style="background:#111;color:#eee;padding:1rem;border-radius:8px;overflow:auto">NOHANDS_APP_TOKEN=${escapeHtml(token)} node Scripts/paperclip/bootstrap.mjs</pre>
+<p>This token acts as your account on this machine. Treat it like a password; revoke it from your account page.</p>
+</body>`,
+      { headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" } },
+    );
+  }
   const scheme = `${appScheme}://auth?token=${encodeURIComponent(token)}`;
 
   // An HTML page rather than a bare 3xx: browsers open custom-scheme URLs more

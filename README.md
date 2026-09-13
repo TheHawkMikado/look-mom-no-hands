@@ -27,6 +27,20 @@ routing, summaries) runs through the **Anthropic Messages API** (Claude).
    you add its API key (natural voice, low latency), or the built-in macOS voice
    otherwise. Recognition is muted while it talks so it never hears itself.
 
+## Where this is going: the chief of staff
+
+The app is becoming a voice-first chief of staff that delegates to a team of
+agents and only brings you decisions. The master brief is **[SPEC.md](SPEC.md)**;
+choices and their reasons are in [DECISIONS.md](DECISIONS.md); the model
+routing table is [MODEL_ROUTING.md](MODEL_ROUTING.md); what each machine
+needs is in [SYSTEM-REQUIREMENTS.md](SYSTEM-REQUIREMENTS.md).
+
+Phase 0 (shipped): the web service takes a spoken or typed request, extracts a
+task, tiers its blast radius, delegates it to a Paperclip agent, asks you to
+approve from the phone when the action leaves the building, and keeps a
+receipt. Set up the team with three commands — see
+[Scripts/paperclip/README.md](Scripts/paperclip/README.md).
+
 ## Architecture
 
 | File | Role |
