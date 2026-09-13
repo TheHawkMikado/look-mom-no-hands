@@ -8,7 +8,7 @@ import {
   View,
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
-import { ApiError, GoalKind, submitGoal } from "../lib/api";
+import { ApiError, GoalKind } from "../lib/api";
 import {
   PttEffect,
   PttEvent,
@@ -18,6 +18,7 @@ import {
 import { extractCommand, splitStopPhrase } from "../lib/wake";
 import { useSpeechRecognition } from "../hooks/useSpeechRecognition";
 import { useFeed } from "../state/FeedContext";
+import { useGoalQueue } from "../state/GoalQueueContext";
 import { ApprovalCard } from "../components/ApprovalCard";
 import { colors, spacing } from "../theme";
 
@@ -31,6 +32,7 @@ const FINAL_RESULT_GRACE_MS = 900;
 export function TalkScreen() {
   const insets = useSafeAreaInsets();
   const { pendingApprovals, decide, setKeepPolling } = useFeed();
+  const { submit, pending: queued } = useGoalQueue();
 
   const [pttState, setPttState] = useState<PttState>("idle");
   const pttRef = useRef<PttState>("idle");
@@ -52,19 +54,26 @@ export function TalkScreen() {
       return;
     }
     try {
-      await submitGoal(trimmed, kind);
+      // Offline (or a server hiccup) never loses a goal: the queue holds it
+      // and delivers in order once a request gets through.
+      const outcome = await submit(trimmed, kind);
+      if (outcome === "queued") {
+        setStatus("Queued — will send when online.");
+        return;
+      }
       setStatus(
         kind === "dictation"
           ? "Sent — pasting at your Mac's cursor."
           : "Sent — your Mac is on it.",
       );
     } catch (e) {
-      // A 401 already signed the user out; anything else is transient.
+      // A 401 already signed the user out; anything else here is the server
+      // rejecting the goal itself (a retry wouldn't help, so it isn't queued).
       if (!(e instanceof ApiError && e.status === 401)) {
-        setStatus("Couldn't reach the server — goal not sent.");
+        setStatus("The server rejected that goal — it wasn't sent.");
       }
     }
-  }, []);
+  }, [submit]);
 
   const speech = useSpeechRecognition({
     onPartial: (text) => {
@@ -205,6 +214,15 @@ export function TalkScreen() {
       </View>
 
       <View style={styles.transcriptZone}>
+        {queued.length > 0 ? (
+          <View style={styles.queuedBanner}>
+            <Text style={styles.queuedText}>
+              {queued.length === 1
+                ? "1 goal queued — will send when online"
+                : `${queued.length} goals queued — will send when online`}
+            </Text>
+          </View>
+        ) : null}
         {partial ? (
           <Text style={styles.partial} numberOfLines={4}>
             {partial}
@@ -300,6 +318,20 @@ const styles = StyleSheet.create({
     justifyContent: "flex-end",
     alignItems: "center",
     paddingBottom: spacing.lg,
+  },
+  queuedBanner: {
+    borderColor: colors.warning,
+    borderWidth: 1,
+    borderRadius: 12,
+    paddingVertical: 8,
+    paddingHorizontal: spacing.md,
+    marginBottom: spacing.md,
+    backgroundColor: colors.surface,
+  },
+  queuedText: {
+    color: colors.warning,
+    fontSize: 13,
+    fontWeight: "600",
   },
   partial: {
     color: colors.text,

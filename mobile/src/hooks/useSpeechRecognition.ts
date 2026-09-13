@@ -10,6 +10,16 @@ interface SpeechCallbacks {
 }
 
 /**
+ * The native engine is a singleton and every hook instance hears every event.
+ * With more than one consumer mounted (Talk's mic, a dictate button on Tasks),
+ * results are routed to whichever instance started the engine last; the owner
+ * is only ever reassigned by a start, never cleared, so a final result that
+ * lands after stop() still reaches the instance that asked for it.
+ */
+let engineOwner = 0;
+let nextInstanceId = 1;
+
+/**
  * Lifecycle wrapper around expo-speech-recognition. (Its predecessor,
  * @react-native-voice/voice, started without error on current React Native but
  * its result events never arrived — the app looked deaf with nothing to show.)
@@ -20,6 +30,8 @@ interface SpeechCallbacks {
 export function useSpeechRecognition(callbacks: SpeechCallbacks) {
   const callbacksRef = useRef(callbacks);
   callbacksRef.current = callbacks;
+  const instanceIdRef = useRef(0);
+  if (instanceIdRef.current === 0) instanceIdRef.current = nextInstanceId++;
 
   const continuousRef = useRef(false);
   const restartTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -30,6 +42,7 @@ export function useSpeechRecognition(callbacks: SpeechCallbacks) {
 
   const startEngine = useCallback(async () => {
     restartingRef.current = true;
+    engineOwner = instanceIdRef.current;
     try {
       const permission = await ExpoSpeechRecognitionModule.requestPermissionsAsync();
       if (!permission.granted) {
@@ -50,6 +63,7 @@ export function useSpeechRecognition(callbacks: SpeechCallbacks) {
   }, []);
 
   useSpeechRecognitionEvent("result", (event) => {
+    if (engineOwner !== instanceIdRef.current) return;
     const text = event.results?.[0]?.transcript;
     if (!text) return;
     if (event.isFinal) callbacksRef.current.onFinal(text);
@@ -57,6 +71,7 @@ export function useSpeechRecognition(callbacks: SpeechCallbacks) {
   });
 
   useSpeechRecognitionEvent("end", () => {
+    if (engineOwner !== instanceIdRef.current) return;
     if (!continuousRef.current || restartingRef.current) return;
     if (restartTimerRef.current) clearTimeout(restartTimerRef.current);
     // Small delay: restarting the instant the engine ends races native teardown.
@@ -64,6 +79,7 @@ export function useSpeechRecognition(callbacks: SpeechCallbacks) {
   });
 
   useSpeechRecognitionEvent("error", (event) => {
+    if (engineOwner !== instanceIdRef.current) return;
     // "no-speech" is the engine giving up on silence, not a failure — the
     // continuous restart path handles it; surfacing it would cry wolf.
     if (event.error === "no-speech" || event.error === "aborted") return;
