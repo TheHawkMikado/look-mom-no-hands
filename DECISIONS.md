@@ -114,3 +114,22 @@ members) on each sync round or bridge report, overlays No Hands tasks that
 never reached Paperclip, and serves it at `/team` and `GET /api/app/team`.
 Titles, statuses and owners only — descriptions and comments stay in
 Paperclip (residency).
+
+## 2026-09-13 — The previous build is kept, and "revert" is one click
+
+The update swap moves the replaced bundle to `updates/previous/` instead of
+deleting it and records `previous.json` only after the move succeeds.
+Settings › Version offers "Revert to v<previous>", which goes through the
+same Developer ID signature gate as an update. After a revert the automatic
+installer skips exactly the version reverted from, so it cannot bounce the
+user straight back; a manual "Update now" still can. Reason: the owner
+wants "go back to the last version that worked on this computer" without a
+download or a Finder ritual.
+
+## 2026-09-13 — Team steps ride the existing planner, not a second model call
+
+Delegation ("have the content agent draft…"), "what's outstanding" and
+spoken verdicts are step kinds the one existing planner call can emit,
+decoded into `ActionPlan.teamSteps` alongside screen steps. Reason: the hot
+path stays one model call; a separate intent classifier before the planner
+would add a network round trip to every command.

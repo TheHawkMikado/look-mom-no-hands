@@ -35,10 +35,12 @@ score above floor, then cost.
 
 ## Where the Mac app is today
 
-`Sources/LookMomNoHands/ClaudeClient.swift` hardcodes `claude-haiku-4-5` for
-command routing and `claude-opus-4-8` for dictation reports. Phase 1 moves
-both behind the router (fetch + cache, fall back to the built-in seed when
-offline).
+`ModelRouter.swift` fetches `GET /api/app/routing` at launch and every 6 h,
+caches it as `routing.json`, and falls back to a built-in seed identical to
+this table when offline. The planner (`intent_classify`) and dictation
+reports (`summarize_meeting`) go through it. Remaining hardcoded uses
+(agent loop, cleanup, vision, research) move behind the router as those
+paths are touched.
 
 ## Provider notes
 
