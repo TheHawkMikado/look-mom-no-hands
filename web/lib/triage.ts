@@ -30,6 +30,9 @@ const ROLE_FOR: Record<Capability, RegExp> = {
   screen_action: /^$/, // Local Runner, not a Paperclip agent
   call: /^$/, // Phase 3
   purchase: /^$/, // never auto-delegated in Phase 0
+  // Phase 5: the multi-step ad workflow is owned by whoever drafts the copy;
+  // its step issues (lib/projects.ts) are handed out per step from there.
+  ad_process: /\bads?\b|advert|marketing|content|draft/i,
   other: /assistant|generalist|ops/i,
 };
 
@@ -89,6 +92,7 @@ function verbFor(cap: Capability): string {
     case "code": return "build";
     case "email": return "write";
     case "schedule": return "schedule";
+    case "ad_process": return "run the ad process for";
     default: return "handle";
   }
 }

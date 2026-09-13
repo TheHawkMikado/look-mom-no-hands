@@ -20,10 +20,11 @@ export type Capability =
   | "email"
   | "schedule"
   | "purchase"
+  | "ad_process"
   | "other";
 
 export const CAPABILITIES: readonly Capability[] = [
-  "draft_copy", "research", "code", "screen_action", "call", "email", "schedule", "purchase", "other",
+  "draft_copy", "research", "code", "screen_action", "call", "email", "schedule", "purchase", "ad_process", "other",
 ];
 
 export type Intent = "question" | "task" | "decision" | "note" | "smalltalk";
@@ -39,6 +40,9 @@ export interface Extraction {
   named_owner: string | null;
   /** Free-text due phrase ("by 3", "Friday"), unparsed in Phase 0. */
   due_phrase: string | null;
+  /** Hard spend cap the user named ("with a $300 cap"), in cents; null when
+   *  no money was mentioned. Any cap at all floors the tier at 3 (§6). */
+  budget_cap_cents: number | null;
   /** How we got here — on every receipt. */
   model_used: string | null;
 }
@@ -48,7 +52,8 @@ Rules:
 - intent: "task" when they want something done; "question" when they want an answer; "decision" when they are recording a choice; "note" when they are just capturing; "smalltalk" otherwise.
 - title: imperative, under 12 words, no trailing period.
 - detail: everything else needed to do it well, in their words, at most 3 sentences.
-- capability: the ONE kind of work the doer needs: draft_copy (writing), research, code, screen_action (clicking around apps/sites), call (phone), email, schedule (calendar), purchase (spending money), other.
+- capability: the ONE kind of work the doer needs: draft_copy (writing), research, code, screen_action (clicking around apps/sites), call (phone), email, schedule (calendar), purchase (spending money), ad_process (run the multi-step ad-creation workflow for an offer: research, angles, copy variants, images, compliance, review, publish), other.
+- budget_cap_cents: the spend cap they named, in cents ("$300 cap" → 30000), else null.
 - blast_tier: 0 = internal only (drafts, research, summaries); 1 = reversible external with no money (reservations, calendar holds); 2 = public or team-facing (publish, post, email a teammate); 3 = money or a commitment to a third party (pay, hire, email a client, commit a vendor); 4 = irreversible (delete data, cancel a contract). Tier the action the request will eventually take in the world, not the drafting step. "Draft a post and bring it to me" is 0; "post it" is 2.
 - named_owner: the person or agent they named to do it, else null.
 - due_phrase: the time phrase they used, verbatim, else null.
@@ -57,7 +62,7 @@ Never invent detail they did not say.`;
 const SCHEMA = {
   type: "object",
   additionalProperties: false,
-  required: ["intent", "title", "detail", "capability", "blast_tier", "named_owner", "due_phrase"],
+  required: ["intent", "title", "detail", "capability", "blast_tier", "named_owner", "due_phrase", "budget_cap_cents"],
   properties: {
     intent: { type: "string", enum: ["question", "task", "decision", "note", "smalltalk"] },
     title: { type: "string" },
@@ -66,8 +71,68 @@ const SCHEMA = {
     blast_tier: { type: "integer", minimum: 0, maximum: 4 },
     named_owner: { type: ["string", "null"] },
     due_phrase: { type: ["string", "null"] },
+    budget_cap_cents: { type: ["integer", "null"], minimum: 0 },
   },
 } as const;
+
+/** What the model returns before the deterministic floors are applied. */
+export type RawExtraction = Omit<Extraction, "model_used" | "blast_tier"> & { blast_tier: number };
+
+/**
+ * One extraction call against a specific model — the unit the eval runner
+ * measures per candidate (lib/evals/run.ts). Features never call this with a
+ * hardcoded model; they go through `extractTask`, which asks the router.
+ */
+export async function extractWithModel(
+  key: string,
+  model: string,
+  options: Record<string, unknown>,
+  text: string,
+): Promise<{ parsed: RawExtraction; usage: { input_tokens: number; output_tokens: number }; ms: number }> {
+  const client = new Anthropic({ apiKey: key });
+  const t0 = Date.now();
+  const res = await client.messages.create({
+    model,
+    max_tokens: 1024,
+    system: SYSTEM,
+    messages: [{ role: "user", content: text }],
+    output_config: {
+      format: { type: "json_schema", schema: SCHEMA },
+      ...(options.effort ? { effort: options.effort as "low" | "medium" | "high" } : {}),
+    },
+  });
+  const block = res.content.find((b) => b.type === "text");
+  if (!block || block.type !== "text") throw new Error("no text block in extraction response");
+  return {
+    parsed: JSON.parse(block.text) as RawExtraction,
+    usage: { input_tokens: res.usage.input_tokens, output_tokens: res.usage.output_tokens },
+    ms: Date.now() - t0,
+  };
+}
+
+/** Apply the deterministic floors to a model proposal. Pure, so the eval
+ *  runner scores exactly what a user would get. */
+export function finalizeExtraction(text: string, parsed: RawExtraction, modelUsed: string | null): Extraction {
+  const budget = parseBudgetCents(text) ?? (typeof parsed.budget_cap_cents === "number" ? parsed.budget_cap_cents : null);
+  const adProcess = AD_PROCESS.test(text);
+  const cap: Capability = adProcess ? "ad_process" : CAPABILITIES.includes(parsed.capability) ? parsed.capability : "other";
+  return {
+    intent: parsed.intent,
+    title: parsed.title || text.slice(0, 80),
+    detail: parsed.detail ?? "",
+    capability: cap,
+    blast_tier: resolveTier(text, Math.max(clampProposed(parsed.blast_tier), budget != null ? 3 : 0)),
+    named_owner: parsed.named_owner ?? null,
+    due_phrase: parsed.due_phrase ?? null,
+    budget_cap_cents: budget,
+    model_used: modelUsed,
+  };
+}
+
+function clampProposed(n: unknown): number {
+  const v = Math.round(Number(n));
+  return Number.isFinite(v) ? Math.min(4, Math.max(0, v)) : 0;
+}
 
 /** The Anthropic key this account runs on — same resolution as /api/app/keys:
  *  platform key for Cloud plans, the account's own key for BYOK. Env override
@@ -84,31 +149,9 @@ export async function extractTask(email: string, text: string): Promise<Extracti
   const route = await pick("task_extract");
   if (!key || !route || route.provider !== "anthropic") return fallbackExtract(text, null);
 
-  const client = new Anthropic({ apiKey: key });
   try {
-    const res = await client.messages.create({
-      model: route.model,
-      max_tokens: 1024,
-      system: SYSTEM,
-      messages: [{ role: "user", content: text }],
-      output_config: {
-        format: { type: "json_schema", schema: SCHEMA },
-        ...(route.options.effort ? { effort: route.options.effort as "low" | "medium" | "high" } : {}),
-      },
-    });
-    const block = res.content.find((b) => b.type === "text");
-    if (!block || block.type !== "text") return fallbackExtract(text, route.model);
-    const parsed = JSON.parse(block.text) as Omit<Extraction, "model_used" | "blast_tier"> & { blast_tier: number };
-    return {
-      intent: parsed.intent,
-      title: parsed.title || text.slice(0, 80),
-      detail: parsed.detail ?? "",
-      capability: CAPABILITIES.includes(parsed.capability) ? parsed.capability : "other",
-      blast_tier: resolveTier(text, parsed.blast_tier),
-      named_owner: parsed.named_owner ?? null,
-      due_phrase: parsed.due_phrase ?? null,
-      model_used: route.model,
-    };
+    const { parsed } = await extractWithModel(key, route.model, route.options, text);
+    return finalizeExtraction(text, parsed, route.model);
   } catch (e) {
     // A model hiccup must not lose the request: fall through to the rules.
     console.warn("[extract] model call failed, using fallback:", e instanceof Error ? e.message : e);
@@ -116,7 +159,21 @@ export async function extractTask(email: string, text: string): Promise<Extracti
   }
 }
 
+/** "run the ad process for X", "kick off the ad workflow", "ad campaign process". */
+export const AD_PROCESS = /\b(?:ad|ads|advert(?:ising)?)[\s-]+(?:process|workflow|pipeline|playbook)\b|\brun (?:the )?ads?\b/i;
+
+/** "$300 cap", "cap of $1,200", "budget $2.5k", "up to $50". Cents, or null. */
+const BUDGET_BEFORE = /\$\s?(\d[\d,]*(?:\.\d+)?)\s*(k)?\b[^.\n]{0,24}?\b(?:cap|budget|limit|max(?:imum)?|ceiling)\b/i;
+const BUDGET_AFTER = /\b(?:cap|budget|limit|max(?:imum)?|ceiling|up to|spend(?:ing)?)\b[^.\n$]{0,24}?\$\s?(\d[\d,]*(?:\.\d+)?)\s*(k)?\b/i;
+export function parseBudgetCents(text: string): number | null {
+  const m = BUDGET_BEFORE.exec(text) ?? BUDGET_AFTER.exec(text);
+  if (!m) return null;
+  const dollars = Number(m[1].replace(/,/g, "")) * (m[2] ? 1000 : 1);
+  return Number.isFinite(dollars) ? Math.round(dollars * 100) : null;
+}
+
 const CAP_RULES: [RegExp, Capability][] = [
+  [AD_PROCESS, "ad_process"],
   [/\b(draft|write|blog|post|copy|caption|newsletter|script|tweet|article)\b/i, "draft_copy"],
   [/\b(research|look into|find out|compare|investigate|summari[sz]e)\b/i, "research"],
   [/\b(code|bug|deploy|repo|function|implement|refactor|pull request)\b/i, "code"],
@@ -141,14 +198,16 @@ export function fallbackExtract(text: string, modelUsed: string | null): Extract
   // Title: the first clause, minus politeness and the "have X do…" delegation
   // wrapper (the owner is recorded separately), cut at a word boundary.
   const title = titleFrom(t);
+  const budget = parseBudgetCents(t);
   return {
     intent,
     title: title || t.slice(0, 80),
     detail: t,
     capability: cap,
-    blast_tier: floorTierFor(t),
+    blast_tier: Math.max(floorTierFor(t), budget != null ? 3 : 0) as Tier,
     named_owner: owner,
     due_phrase: due ? due[0] : null,
+    budget_cap_cents: budget,
     model_used: modelUsed,
   };
 }
@@ -157,8 +216,9 @@ export function titleFrom(text: string, max = 80): string {
   let t = text.trim()
     .replace(/^(please|hey|ok|okay|can you|could you|i want you to|i need you to|i'd like you to)\s+/i, "")
     .replace(/^(?:have|ask|tell|get)\s+(?:the\s+)?[a-z][a-z-]*(?:\s+(?:agent|drafter|researcher|engineer|writer))?\s+(?:to\s+)?/i, "")
-    .split(/[.;\n]|,? and (?:then )?bring/i)[0]
+    .split(/[;\n]|\.(?=\s|$)|,? and (?:then )?bring/i)[0]
     .replace(/,?\s+and\s+(?:post|publish|send|email|share)\s+(?:it|this|that)\b.*$/i, "")
+    .replace(/,?\s+(?:with|under|at)\s+(?:a|an)?\s*\$\s?\d[\d,]*(?:\.\d+)?k?\s*(?:cap|budget|limit|max(?:imum)?|ceiling)\b.*$/i, "")
     .trim();
   if (t.length > max) {
     const cut = t.slice(0, max);

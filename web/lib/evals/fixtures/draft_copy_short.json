@@ -1,0 +1,11 @@
+{
+  "task_type": "draft_copy_short",
+  "kind": "rubric",
+  "cases": [
+    { "id": "dc-01", "prompt": "Write a LinkedIn post (under 80 words) announcing a co-living investing masterclass for first-time landlords. Warm, direct, one call to action.", "rubric": "Under 80 words, one clear CTA, mentions co-living and first-time landlords, no hype words like 'guaranteed' or 'passive income overnight'." },
+    { "id": "dc-02", "prompt": "Write a two-line SMS to a tenant applicant confirming their viewing is Thursday at 5pm and asking them to reply YES to confirm.", "rubric": "Two lines max, includes Thursday 5pm, asks for a YES reply, polite, no emojis required." },
+    { "id": "dc-03", "prompt": "Write an ad headline (under 12 words) for furnished rooms in Tampa with utilities included.", "rubric": "Under 12 words, names Tampa, conveys furnished + utilities included, no ALL CAPS, no exclamation spam." },
+    { "id": "dc-04", "prompt": "Write a three-sentence email to a vendor asking for two references before we accept their roofing quote.", "rubric": "Exactly three sentences, asks for two references, courteous, does not accept or reject the quote." },
+    { "id": "dc-05", "prompt": "Write a 40-word Instagram caption for a before/after photo of a renovated shared kitchen.", "rubric": "Around 40 words (30–50), references the before/after, positive tone, ends with a light CTA or question, at most one hashtag." }
+  ]
+}

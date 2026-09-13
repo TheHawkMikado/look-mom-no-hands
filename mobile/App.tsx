@@ -14,13 +14,19 @@ import {
 } from "./src/lib/auth";
 import { AuthContext } from "./src/state/AuthContext";
 import { FeedProvider } from "./src/state/FeedContext";
+import { GoalQueueProvider } from "./src/state/GoalQueueContext";
+import { TasksProvider, useTasks } from "./src/state/TasksContext";
+import { PushBridge } from "./src/components/PushBridge";
 import { SignInScreen } from "./src/screens/SignInScreen";
 import { TalkScreen } from "./src/screens/TalkScreen";
+import { TasksScreen } from "./src/screens/TasksScreen";
+import { TeamScreen } from "./src/screens/TeamScreen";
 import { ActivityScreen } from "./src/screens/ActivityScreen";
 import { SettingsScreen } from "./src/screens/SettingsScreen";
+import { navigationRef, RootTabParamList } from "./src/navigation";
 import { colors } from "./src/theme";
 
-const Tab = createBottomTabNavigator();
+const Tab = createBottomTabNavigator<RootTabParamList>();
 
 const navTheme = {
   ...DarkTheme,
@@ -36,6 +42,62 @@ const navTheme = {
 
 function TabIcon({ glyph, color }: { glyph: string; color: string }) {
   return <Text style={{ color, fontSize: 17 }}>{glyph}</Text>;
+}
+
+/** Inside the providers so the Tasks tab can wear its badge. */
+function Tabs() {
+  const { badgeCount } = useTasks();
+  return (
+    <Tab.Navigator
+      screenOptions={{
+        headerShown: false,
+        tabBarActiveTintColor: colors.accent,
+        tabBarInactiveTintColor: colors.muted,
+        tabBarStyle: {
+          backgroundColor: colors.surface,
+          borderTopColor: colors.border,
+        },
+        tabBarBadgeStyle: { backgroundColor: colors.accent, color: colors.text },
+      }}
+    >
+      <Tab.Screen
+        name="Talk"
+        component={TalkScreen}
+        options={{
+          tabBarIcon: ({ color }) => <TabIcon glyph={"◉"} color={color} />,
+        }}
+      />
+      <Tab.Screen
+        name="Tasks"
+        component={TasksScreen}
+        options={{
+          tabBarIcon: ({ color }) => <TabIcon glyph={"✓"} color={color} />,
+          tabBarBadge: badgeCount > 0 ? badgeCount : undefined,
+        }}
+      />
+      <Tab.Screen
+        name="Team"
+        component={TeamScreen}
+        options={{
+          tabBarIcon: ({ color }) => <TabIcon glyph={"⁂"} color={color} />,
+        }}
+      />
+      <Tab.Screen
+        name="Activity"
+        component={ActivityScreen}
+        options={{
+          tabBarIcon: ({ color }) => <TabIcon glyph={"☰"} color={color} />,
+        }}
+      />
+      <Tab.Screen
+        name="Settings"
+        component={SettingsScreen}
+        options={{
+          tabBarIcon: ({ color }) => <TabIcon glyph={"⚙︎"} color={color} />,
+        }}
+      />
+    </Tab.Navigator>
+  );
 }
 
 export default function App() {
@@ -92,50 +154,17 @@ export default function App() {
   return (
     <SafeAreaProvider>
       <AuthContext.Provider value={{ signOut: () => void applyToken(null) }}>
-        <FeedProvider>
-          <NavigationContainer theme={navTheme}>
-            <StatusBar style="light" />
-            <Tab.Navigator
-              screenOptions={{
-                headerShown: false,
-                tabBarActiveTintColor: colors.accent,
-                tabBarInactiveTintColor: colors.muted,
-                tabBarStyle: {
-                  backgroundColor: colors.surface,
-                  borderTopColor: colors.border,
-                },
-              }}
-            >
-              <Tab.Screen
-                name="Talk"
-                component={TalkScreen}
-                options={{
-                  tabBarIcon: ({ color }) => (
-                    <TabIcon glyph={"◉"} color={color} />
-                  ),
-                }}
-              />
-              <Tab.Screen
-                name="Activity"
-                component={ActivityScreen}
-                options={{
-                  tabBarIcon: ({ color }) => (
-                    <TabIcon glyph={"☰"} color={color} />
-                  ),
-                }}
-              />
-              <Tab.Screen
-                name="Settings"
-                component={SettingsScreen}
-                options={{
-                  tabBarIcon: ({ color }) => (
-                    <TabIcon glyph={"⚙︎"} color={color} />
-                  ),
-                }}
-              />
-            </Tab.Navigator>
-          </NavigationContainer>
-        </FeedProvider>
+        <GoalQueueProvider>
+          <FeedProvider>
+            <TasksProvider>
+              <NavigationContainer ref={navigationRef} theme={navTheme}>
+                <StatusBar style="light" />
+                <PushBridge />
+                <Tabs />
+              </NavigationContainer>
+            </TasksProvider>
+          </FeedProvider>
+        </GoalQueueProvider>
       </AuthContext.Provider>
     </SafeAreaProvider>
   );

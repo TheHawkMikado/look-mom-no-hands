@@ -280,6 +280,21 @@ a source user id only.
 
 ## 9. Build Phases
 
+**Status (2026-09-13):** every phase below has a first implementation on
+`main`. What is real code and what still needs a credential or a device:
+
+| Phase | Built | Needs from the owner |
+|---|---|---|
+| 0 Foundation | tasks, tiers, gate, router, Paperclip (direct + bridge), receipts, team boards | — |
+| 1 Voice front door | speaker enrolment + verification (on-device model), delegation from the planner, spoken confirmation, Local Brain, router client, rollback | enrol your voice once in Settings › Voice identity |
+| 2 Meeting loop | consent line, introduction ritual, diarized transcript, extraction, triage, spoken summary, human tickets | GoHighLevel key for SMS; Resend for email |
+| 3 Follow-ups + calls | check-ins, nudges, escalation by voice at a good moment, daily brief, push, outbound calls | Vapi key + number for calls; phone push credentials (EAS) |
+| 4 Evals + Shared Brain | fixtures, eval runner, weekly cron, scrubber, consent, admin review, SOP API | an Anthropic key for model candidates and the judge |
+| 5 Ad process | intake with a budget cap, project + 7 step issues in Paperclip, 80% check-in, spend cap | your real ad steps replacing the generic template |
+| 6 Wearables + hardening | Limitless ingest, quiet hours, lock/meeting-aware speaking, outbox, meeting-approval channel rule | Limitless API key; Plaud when their API allows |
+
+
+
 ### Phase 0 — Foundation
 - SPEC.md, DECISIONS.md, MODEL_ROUTING.md, SYSTEM-REQUIREMENTS.md.
 - Web schema (§10) with residency + build-failing test.
@@ -391,9 +406,20 @@ Resolved in v0.2: desktop shell (native Swift), phone (Expo), cloud stack
 (existing Postgres + Vercel cron), Paperclip location (local by default, VPS
 by URL change).
 
+Resolved in Phase 2 (DECISIONS.md 2026-09-13, "Diarization by on-device
+embeddings"): STT for streaming meetings is on-device Apple Speech, and
+diarization is done on the Mac by embedding each turn's audio with the
+bundled speaker model and matching it against enrolled voiceprints (or an
+online clusterer for unknown voices). Cloud streaming STT with diarization
+(Deepgram/AssemblyAI) stays an option behind the `stt` route if the Phase 2
+demo's attribution falls short of the §13 target; the transcript would then
+still be the only thing sent, and only for that call.
+
 Still open, decide before the phase that needs them:
-1. STT for streaming meetings with diarization: on-device vs Deepgram/
-   AssemblyAI streaming (Phase 2).
-2. Outbound calls: Vapi/Retell vs raw Twilio + realtime model (Phase 3).
+1. ~~STT for streaming meetings with diarization~~ — resolved above.
+2. Outbound calls: Vapi/Retell vs raw Twilio + realtime model (Phase 3) —
+   resolved: Vapi (DECISIONS.md).
 3. Phone offline subset and sync channel keying (Phase 1–2).
-4. Wearable partner: Plaud vs Limitless first (Phase 6).
+4. Wearable partner: Plaud vs Limitless first (Phase 6) — resolved:
+   Limitless first (it has a pull API); Plaud is a documented stub behind
+   the same `WearableSource` protocol (DECISIONS.md).

@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { ensureSchema } from "@/lib/db";
 import { approvalsForTask, getTask } from "@/lib/db-tasks";
 import { appEmail } from "@/lib/appauth";
-import { applyVerdict } from "@/lib/gate";
+import { applyVerdict, verdictAllowed } from "@/lib/gate";
 import { syncAccount } from "@/lib/tasks";
 
 /**
@@ -30,7 +30,11 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
   const open = (await approvalsForTask(id)).find((a) => !a.decided_at);
   if (!open) return NextResponse.json({ error: "nothing awaiting approval" }, { status: 409 });
 
+  const allowed = verdictAllowed(task, via, speakerVerified);
   const row = await applyVerdict(task, open.id, verdict, via, speakerVerified);
+  if (!row && !allowed.ok) {
+    return NextResponse.json({ error: "not_allowed", reason: allowed.reason, task }, { status: 409 });
+  }
   // Direct mode can close the issue out immediately; bridge mode does it on
   // the bridge's next poll.
   await syncAccount(email).catch(() => undefined);

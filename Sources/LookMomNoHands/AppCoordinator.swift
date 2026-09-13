@@ -205,6 +205,40 @@ final class AppCoordinator: ObservableObject {
     private var scheduledTask: Task<Void, Never>?
     private var fleetSync: Set<AnyCancellable> = []
     let knowledge: KnowledgeStore
+    /// The Local Brain (SPEC.md §8.1): people, preferences, areas, and the inbox
+    /// of notes and decisions that never leave the Mac.
+    let brain: LocalBrain
+    /// The team behind the app: task intake, outstanding work, voice approvals.
+    let team = TeamClient()
+    /// The most recent request handed to the team, for the panel.
+    @Published private(set) var lastDelegatedTask: TeamTask?
+    /// The live meeting loop (SPEC.md §5.2): consent, introductions, diarized
+    /// transcript, extraction, end-of-session triage. One session at a time.
+    let meetingSession: MeetingSession
+    /// Action items the web could not take at the end of a meeting; retried
+    /// every minute until delivered (Phase 6 offline queueing).
+    let outbox: TaskOutbox
+    /// When the bot may speak on its own (SPEC.md §5.4 "a good moment").
+    let quietHours = QuietHours()
+    /// Limitless (and later Plaud) recordings, pulled and run through the
+    /// meeting pipeline.
+    let wearables = WearableIngest()
+    /// The last wearable recording imported, for the Meetings tab.
+    @Published private(set) var lastImportedRecording: String?
+    private var housekeepingTimer: Timer?
+    private var promptInFlight = false
+    private var outboxRetrying = false
+    /// The team prompt currently being asked by voice; its answer is captured
+    /// from the standby stream for ~8 s (or a click on the panel).
+    private var awaitingPrompt: TeamPrompt?
+    /// Speaker verification (SPEC.md §5.1 step 2, PLAN-SPEAKER-VERIFICATION.md).
+    /// Called right after a wake-word match and before the session opens:
+    /// return false to ignore the wake. Nil = no verifier wired yet — every
+    /// wake opens a session, but counts as UNVERIFIED for approvals.
+    var wakeGate: (() -> Bool)?
+    /// What the gate said for the session in progress. Rides on voice verdicts
+    /// as `speakerVerified` (the web's gate applies its tier policy to it).
+    @Published private(set) var lastWakeVerified = false
     let notesExporter = NotesExporter()
     let calendarMeetings = CalendarMeetings()
     /// The meeting currently being recorded (drives the dashboard row + guards
@@ -292,6 +326,9 @@ final class AppCoordinator: ObservableObject {
         mcp = MCPManager(store: MCPStore(directory: store.directory))
         fleet = FleetService(peers: FleetPeerStore(directory: store.directory))
         knowledge = KnowledgeStore(directory: store.directory)
+        brain = LocalBrain(directory: store.directory)
+        outbox = TaskOutbox(brainDirectory: brain.directory)
+        meetingSession = MeetingSession(brain: brain, outbox: outbox)
         insertRules = InsertRulesStore(directory: store.directory)
         learnedControls = ElementMemoryStore(directory: store.directory)
         appCapabilities = AppCapabilityStore(directory: store.directory)
@@ -356,6 +393,9 @@ final class AppCoordinator: ObservableObject {
             Task { @MainActor in self?.lastExternalApp = app }
         }
         store.log("app", "launched")
+        // The routing table: cached copy now, fresh copy when the network allows,
+        // seed until then. Nothing on the command path waits for it.
+        ModelRouter.shared.start(directory: store.directory) { [weak self] msg in self?.store.log("router", msg) }
         environment.start()   // track open apps/windows/tabs continuously, even before listening
         scheduler = ProcedureScheduler(procedures: procedures, coordinator: self)
         scheduler?.start()
@@ -372,6 +412,15 @@ final class AppCoordinator: ObservableObject {
             self.store.log("meeting", "recording failed: \(message)")
             Task { await self.endMeetingRecording(reason: "recording failed: \(message)") }
         }
+        // The meeting loop: the session gets the mic's timed segments only
+        // while it is active (the listener maps them only when asked), the
+        // model client, the team client, and the speaker embedder.
+        meetingSession.services = makeMeetingServices()
+        quietHours.start()
+        wearables.log = { [weak self] msg in self?.store.log("wearable", msg) }
+        wearables.onRecording = { [weak self] recording in await self?.ingestWearable(recording) }
+        wearables.start()
+        startHousekeeping()
         // Warm configured MCP servers off the command path — an npx cold-start
         // mid-task would eat the whole 20s parse budget.
         Task { await self.mcp.connectAll() }
@@ -770,7 +819,17 @@ final class AppCoordinator: ObservableObject {
         let tail = Self.normalizedForMatching(String(text.suffix(64)))
         switch mode {
         case .standby:
-            if Self.wakePhrases.contains(where: tail.contains) { beginSession() }
+            if Self.wakePhrases.contains(where: tail.contains) {
+                // Speaker verification sits between the wake word and the session.
+                // A rejected wake is dropped from the stream so the same phrase
+                // isn't re-judged on every partial that still contains it.
+                if let gate = wakeGate, !gate() {
+                    store.log("wake", "wake word heard, speaker not verified — ignored")
+                    freshUtterance()
+                } else {
+                    beginSession(verified: wakeGate != nil)
+                }
+            }
             else if Self.liveStartPhrases.contains(where: tail.contains) { startRecording(output: .note) }
             else if Self.dictateStartPhrases.contains(where: tail.contains) { startInsertByVoice() }
         case .command:
@@ -860,8 +919,12 @@ final class AppCoordinator: ObservableObject {
 
     // MARK: Session
 
-    private func beginSession() {
-        store.log("wake", "\"Hey Mama\" — session active")
+    /// `verified` = the speaker gate passed for this wake. A hotkey or an
+    /// unguarded wake is unverified: it opens the session but voice approvals
+    /// go out flagged as such.
+    private func beginSession(verified: Bool = false) {
+        lastWakeVerified = verified
+        store.log("wake", "\"Hey Mama\" — session active\(verified ? " (speaker verified)" : "")")
         mode = .command
         phase = .capturingCommand
         freshUtterance()
@@ -885,6 +948,10 @@ final class AppCoordinator: ObservableObject {
     /// The user clicked an option in the on-screen clarification panel — treat it
     /// exactly as if they'd spoken it.
     func answerClarification(_ option: String) {
+        if awaitingPrompt != nil {
+            resolvePrompt(answer: option)
+            return
+        }
         guard isRunning, mode == .command, !processing else { return }
         // A clicked answer is authoritative — discard any buffered mic audio so
         // scribeAll can't re-transcribe ambient noise over the user's choice.
@@ -893,6 +960,10 @@ final class AppCoordinator: ObservableObject {
     }
 
     func dismissClarification() {
+        if awaitingPrompt != nil {
+            resolvePrompt(answer: "")   // dismissed = the default
+            return
+        }
         pendingClarification = nil
         dialogue = []
         if mode == .command, !processing { phase = .capturingCommand }
@@ -1485,6 +1556,26 @@ final class AppCoordinator: ObservableObject {
             }
 
             dialogue = []                        // request resolved; next utterance is fresh
+
+            // Team steps (delegate / status / decide) run first and never touch
+            // the screen; each speaks its own confirmation. A plan that is ONLY
+            // team work ends here — no observe round, no "did what I could".
+            if !plan.teamSteps.isEmpty {
+                var lines: [String] = []
+                for step in plan.teamSteps {
+                    try Task.checkCancellation()
+                    lines.append(await runTeamStep(step, goal: text, gen: gen))
+                }
+                guard gen == runGeneration, !Task.isCancelled else { return }
+                performedAll += lines
+                if plan.steps.isEmpty {
+                    let outcome = lines.joined(separator: " → ")
+                    store.addTranscript(TranscriptRecord(kind: "command", transcript: text, outcome: outcome))
+                    recordRecentAction("\(contextTag())\"\(text)\" → \(outcome)")
+                    return
+                }
+            }
+
             // Intermediate turns keep `say` empty (per the prompt), so awaiting here
             // costs nothing on multi-step tasks and avoids concurrent TTS.
             if !plan.say.isEmpty { await speak(plan.say, gen: gen) }
@@ -1593,6 +1684,326 @@ final class AppCoordinator: ObservableObject {
             store.log("command", "stopped after \(round) rounds without goal_complete")
             await speak("I did what I could — it may not be fully finished.", gen: gen)
         }
+    }
+
+    // MARK: Team — delegation, outstanding work, voice approvals (SPEC §5.1, §6)
+
+    /// Runs one team-facing step and returns a one-line outcome for the
+    /// transcript. Every branch speaks exactly once.
+    private func runTeamStep(_ step: TeamStep, goal: String, gen: Int) async -> String {
+        switch step.kind {
+        case .delegate:
+            return await delegateToTeam(step.text.isEmpty ? goal : step.text, hint: step.capability, gen: gen)
+        case .teamStatus:
+            return await speakOutstanding(gen: gen)
+        case .decide:
+            return await decidePending(step, gen: gen)
+        }
+    }
+
+    /// Hands a request to the web's intake. The confirmation is spoken the
+    /// moment the server replies — SPEC §1: request → spoken confirmation in
+    /// under five seconds; delegation, drafting and follow-up happen after it,
+    /// never before. Signed out or unreachable: the request is filed in the
+    /// Local Brain inbox rather than lost.
+    private func delegateToTeam(_ request: String, hint: String, gen: Int) async -> String {
+        let text = request.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return "nothing to delegate" }
+        store.log("team", "delegating\(hint.isEmpty ? "" : " (\(hint))"): \(text.prefix(160))")
+        guard let reply = await team.delegate(text: text) else {
+            await speak("I couldn't reach your team — noted it locally.", gen: gen)
+            brain.appendNote(kind: "inbox", text: text)
+            store.log("team", "unreachable — saved to the Local Brain inbox")
+            return "team unreachable; noted in the local inbox"
+        }
+        // Speak FIRST. Everything after this line is bookkeeping.
+        await speak(reply.confirmation.isEmpty ? "On it." : reply.confirmation, gen: gen)
+        if let task = reply.task { lastDelegatedTask = task }
+        store.log("team", TeamClient.receiptLine(reply))
+        // Notes and decisions are Local Brain content (SPEC §4.3): the web only
+        // classified them and holds nothing; the words live here.
+        if reply.intent == "note" || reply.intent == "decision" {
+            brain.appendNote(kind: reply.intent, text: text)
+            store.log("brain", "\(reply.intent) filed in inbox.md")
+        }
+        if let task = reply.task { return "delegated to the team: \(task.title)" }
+        return "team intake: \(reply.intent)"
+    }
+
+    /// "What's outstanding" — one sentence: the count and the top two titles.
+    private func speakOutstanding(gen: Int) async -> String {
+        guard let tasks = await team.tasks(status: TeamClient.outstandingStatuses) else {
+            await speak("I couldn't reach your team right now.", gen: gen)
+            return "team unreachable"
+        }
+        store.log("team", "outstanding: \(tasks.count)\(tasks.isEmpty ? "" : " — " + tasks.prefix(3).map(\.title).joined(separator: "; "))")
+        await speak(TeamClient.outstandingSummary(tasks), gen: gen)
+        return "outstanding: \(tasks.count)"
+    }
+
+    /// A spoken "approve" / "deny". A background agent on THIS Mac waiting for
+    /// its OK (what the panel shows) is answered first; otherwise the newest
+    /// team task awaiting approval gets the verdict, tagged with whether the
+    /// speaker was verified — the web's gate applies the tier policy to that.
+    private func decidePending(_ step: TeamStep, gen: Int) async -> String {
+        guard let verdict = step.verdict else {
+            await speak("Say approve or deny.", gen: gen)
+            return "decide: unclear verdict"
+        }
+        let allow = verdict == "approve"
+        if let agent = BackgroundAgentManager.shared.awaitingApproval.first {
+            BackgroundAgentManager.shared.resolveApproval(agent.id, allow: allow)
+            store.log("agent", "voice verdict for \(agent.name): \(verdict) (speaker \(lastWakeVerified ? "verified" : "unverified"))")
+            await speak(allow ? "Approved." : "Denied.", gen: gen)
+            return "\(verdict): \(agent.name)"
+        }
+        guard let pending = await team.tasks(status: ["awaiting_approval"]) else {
+            await speak("I couldn't reach your team right now.", gen: gen)
+            return "team unreachable"
+        }
+        guard let task = pending.first else {
+            await speak("Nothing is waiting for your approval.", gen: gen)
+            return "decide: nothing pending"
+        }
+        // SPEC.md §12: what other people said in a meeting is data, never an
+        // instruction — an item born in a meeting session is approved by voice
+        // only on the owner's voice verified RIGHT NOW (the last three seconds,
+        // i.e. the "approve" itself), whatever the wake gate said earlier. A
+        // failed or impossible check defers to the phone push, which the web
+        // already sent. `speakerVerified` on the wire is the fresh verdict when
+        // there is one, the wake verdict otherwise — never an upgrade.
+        let verifiedNow: Bool? = await Task.detached { SpeakerVerifier.shared.verifyCurrentSpeaker() }.value
+        let speakerVerified = verifiedNow ?? lastWakeVerified
+        let meetingBorn = task.source == "meeting" || meetingSession.submittedTaskIDs.contains(task.id)
+        if allow, meetingBorn, task.blastTier != 1, verifiedNow != true {
+            store.log("team", "\"\(task.title)\" came from a meeting — voice approval needs the owner's verified voice (\(verifiedNow == nil ? "couldn't verify" : "not verified")); leaving it to the phone")
+            await speak("I need that from the phone.", gen: gen)
+            return "decide: \(task.title) needs a phone approval (meeting-born, voice not verified)"
+        }
+        let ok = await team.decide(taskID: task.id, verdict: verdict, speakerVerified: speakerVerified)
+        store.log("team", "\(verdict) \"\(task.title)\" by voice (speaker \(speakerVerified ? "verified" : "unverified")) → \(ok ? "ok" : "failed")")
+        if ok {
+            lastDelegatedTask = TeamTask(id: task.id, title: task.title, status: allow ? "approved" : "denied",
+                                         ownerName: task.ownerName, confirmation: task.confirmation)
+            await speak(allow ? "Approved \(task.title)." : "Denied \(task.title).", gen: gen)
+            return "\(verdict): \(task.title)"
+        }
+        await speak("That didn't go through.", gen: gen)
+        return "decide failed: \(task.title)"
+    }
+
+    /// What the planner needs to know about the team this turn: the last
+    /// request handed over, and anything waiting on the user right now (so
+    /// "approve" reads as a decide step, not a click).
+    private var teamPromptText: String {
+        var lines: [String] = []
+        if meetingSession.isActive {
+            lines.append("A live meeting session is running (“\(meetingSession.title)”, \(meetingSession.turns.count) turns so far). “End the meeting session” / “stop taking notes” = a decide-free spoken request; the user ends it from the dashboard or by saying so.")
+        }
+        if let t = lastDelegatedTask {
+            lines.append("Last request handed to the team: “\(t.title)” (\(t.status.replacingOccurrences(of: "_", with: " "))).")
+        }
+        let waiting = BackgroundAgentManager.shared.awaitingApproval
+        if !waiting.isEmpty {
+            lines.append("Waiting for the user's approval right now: \(waiting.map(\.name).joined(separator: ", ")) — “approve” / “deny” is a decide step.")
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    // MARK: Meeting session (SPEC §5.2), prompts (§5.4), outbox, wearables
+
+    /// The session's view of the app: the coordinator's speaker (so TTS mutes
+    /// recognition the same way), the log, the routed model call, the team
+    /// intake, the mic ring buffer and the speaker embedder.
+    private func makeMeetingServices() -> MeetingSession.Services {
+        var s = MeetingSession.Services()
+        s.speak = { [weak self] text in
+            guard let self else { return }
+            await self.speak(text, gen: self.runGeneration)
+        }
+        s.log = { [weak self] msg in self?.store.log("meeting", msg) }
+        s.extract = { [weak self] text, names in
+            guard let claude = self?.claude else { throw ClaudeError.decoding("no API key") }
+            return try await claude.extractMeetingItems(text, attendees: names)
+        }
+        s.submit = { [weak self] text, deliver in
+            await self?.team.submitMeetingItem(text: text, deliver: deliver)
+        }
+        s.recentAudio = { [weak self] seconds in self?.listener.recentAudio(seconds: seconds) ?? [] }
+        s.embed = { samples in try SpeakerVerifier.shared.embedding(for: samples) }
+        s.ownerProfile = { SpeakerVerifier.shared.usableProfile }
+        s.threshold = { SpeakerVerifier.shared.threshold }
+        return s
+    }
+
+    /// Dashboard "Start session": consent line, then the ritual. The mic is
+    /// already on (always-listening); the listener starts timing segments
+    /// only now. Recorded calls (join_meeting) are independent — a session
+    /// can run over one or over a room.
+    func startMeetingSession(title: String) {
+        guard isRunning, !meetingSession.isActive else { return }
+        SpeakerVerifier.shared.prepare()   // the embedder, warm before the first turn
+        listener.onSegments = { [weak self] id, startedAt, segments, isFinal in
+            guard let self, !self.speaking, self.meetingSession.isActive else { return }
+            self.meetingSession.ingest(requestID: id, startedAt: startedAt, segments: segments, isFinal: isFinal)
+        }
+        let name = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        events.report(kind: .goalStarted, title: "Meeting session", detail: name.isEmpty ? "meeting" : name)
+        Task {
+            await meetingSession.start(title: name.isEmpty ? (meetingRecording?.title ?? "Meeting") : name)
+            if !meetingSession.isActive { listener.onSegments = nil }   // cancelled during consent
+        }
+    }
+
+    func endMeetingSession() {
+        guard meetingSession.isActive else { return }
+        Task {
+            await meetingSession.end()
+            listener.onSegments = nil
+            let summary = meetingSession.summary
+            store.addTranscript(TranscriptRecord(kind: "command", transcript: "Meeting session: \(meetingSession.title)",
+                                                 outcome: summary))
+            events.report(kind: .goalDone, title: "Meeting session", detail: summary)
+            await retryOutbox()
+        }
+    }
+
+    func cancelMeetingSession() {
+        guard meetingSession.isActive else { return }
+        meetingSession.cancel()
+        listener.onSegments = nil
+        events.report(kind: .goalFailed, title: "Meeting session", detail: "cancelled")
+    }
+
+    /// Every minute: prompts the bot wants to ask (when it's a good moment),
+    /// and the outbox retry. One timer so a sleeping Mac wakes to one tick.
+    private func startHousekeeping() {
+        let t = Timer(timeInterval: 60, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                await self.retryOutbox()
+                await self.pollPrompts()
+            }
+        }
+        t.tolerance = 10
+        RunLoop.main.add(t, forMode: .common)
+        housekeepingTimer = t
+    }
+
+    /// Standby, nothing in flight, nothing on screen — the only state in
+    /// which the bot may start talking by itself.
+    private var isIdleForPrompts: Bool {
+        isRunning && mode == .standby && !processing && !speaking
+            && pendingClarification == nil && awaitingPrompt == nil && phase == .listeningWake
+    }
+
+    private var goodMomentToSpeak: Bool {
+        quietHours.goodMomentToSpeak(idle: isIdleForPrompts,
+                                     inMeeting: meetingSession.isActive || meetingRecording != nil,
+                                     recording: liveActive || phase == .recording)
+    }
+
+    /// `GET /api/app/prompts` → speak the oldest one with its default, listen
+    /// for the answer, post it back (SPEC.md §5.4: the bot initiates, the
+    /// human answers). Not a good moment → nothing is fetched; the web keeps
+    /// the question until it is.
+    private func pollPrompts() async {
+        guard !promptInFlight, goodMomentToSpeak else { return }
+        promptInFlight = true
+        defer { promptInFlight = false }
+        guard let prompts = await team.prompts(), let first = prompts.first else { return }
+        // The network hop took time — re-check before opening our mouth. A
+        // prompt marked spoken but never asked is still open server-side.
+        guard goodMomentToSpeak else {
+            store.log("prompt", "\(prompts.count) waiting — not a good moment (\(quietHours.reasonNotToSpeak(idle: isIdleForPrompts, inMeeting: meetingSession.isActive || meetingRecording != nil, recording: liveActive) ?? "busy"))")
+            return
+        }
+        await askPrompt(first)
+    }
+
+    /// Speaks one prompt and captures the answer: a spoken reply from the
+    /// standby stream (a 1.2 s pause ends it), a click on the panel, or ~8 s
+    /// of silence, which means the default.
+    private func askPrompt(_ p: TeamPrompt) async {
+        let gen = runGeneration
+        let spoken = TeamClient.spokenPrompt(p)
+        store.log("prompt", "\(p.kind): \(spoken)")
+        var options: [String] = []
+        if !p.defaultAnswer.isEmpty { options.append(p.defaultAnswer) }
+        if p.kind == "daily_brief" { options.append("Thanks") } else { options += ["Handle it myself", "Done", "Drop it"] }
+        awaitingPrompt = p
+        pendingClarification = Clarification(question: p.question, options: options)
+        phase = .clarifying
+        await speak(spoken, gen: gen)
+        let deadline = Date().addingTimeInterval(8)
+        while awaitingPrompt?.id == p.id, gen == runGeneration, Date() < deadline {
+            try? await Task.sleep(nanoseconds: 250_000_000)
+            if !utterance.isEmpty, Date().timeIntervalSince(lastHeardAt) > 1.2 { break }
+        }
+        guard awaitingPrompt?.id == p.id else { return }   // answered from the panel meanwhile
+        resolvePrompt(answer: gen == runGeneration ? utterance : "")
+    }
+
+    /// Posts the answer (empty = the default), clears the panel, logs a
+    /// receipt line, and acknowledges out loud.
+    private func resolvePrompt(answer: String) {
+        guard let p = awaitingPrompt else { return }
+        awaitingPrompt = nil
+        pendingClarification = nil
+        if phase == .clarifying { phase = mode == .standby ? .listeningWake : .capturingCommand }
+        let heard = Self.strippingPhrases(Self.wakePhrases, from: answer)
+        freshUtterance()
+        let gen = runGeneration
+        Task {
+            let ok = await team.answerPrompt(id: p.id, answer: heard)
+            let shown = heard.isEmpty ? "(silence → default: \(p.defaultAnswer.isEmpty ? "none" : p.defaultAnswer))" : "“\(heard)”"
+            store.log("prompt", "receipt: \(p.kind) \(p.id) answered \(shown) → \(ok ? "ok" : "failed")")
+            if p.kind != "daily_brief", isRunning {
+                await speak(heard.isEmpty ? "Okay." : "Got it.", gen: gen)
+            }
+        }
+    }
+
+    /// Items the web couldn't take at the end of a meeting. Retried every
+    /// minute; removed only after a 2xx. After three failures the address
+    /// hand-off is dropped so a rejected `deliver` block can't pin the item
+    /// forever — the web then asks the owner for the address later.
+    private func retryOutbox() async {
+        guard !outbox.isEmpty, !outboxRetrying else { return }
+        outboxRetrying = true
+        defer { outboxRetrying = false }
+        for entry in outbox.entries {
+            let deliver = entry.attempts >= 3 ? nil : entry.delivery
+            if let reply = await team.submitMeetingItem(text: entry.text, deliver: deliver) {
+                outbox.remove(id: entry.id)
+                store.log("outbox", "delivered after \(entry.attempts + 1) attempt(s): \(TeamClient.receiptLine(reply))")
+            } else {
+                outbox.recordAttempt(id: entry.id)
+                store.log("outbox", "team unreachable — \(outbox.entries.count) item(s) waiting; next try in a minute")
+                return
+            }
+        }
+    }
+
+    /// A wearable recording through the same pipeline as a live meeting: its
+    /// own MeetingSession instance (the live one may be running), extraction,
+    /// triage, `meetings/<source>-<id>.md`. The summary is spoken only at a
+    /// good moment; otherwise it waits in the log and the Meetings tab.
+    private func ingestWearable(_ r: WearableRecording) async {
+        guard claude != nil else {
+            store.log("wearable", "skipped \(r.id) — no API key to extract with")
+            return
+        }
+        let session = MeetingSession(brain: brain, outbox: outbox, services: makeMeetingServices())
+        let summary = await session.runImported(source: "limitless", id: r.id, title: r.title, text: r.text, startedAt: r.startedAt)
+        lastImportedRecording = "\(r.title): \(summary)"
+        store.addTranscript(TranscriptRecord(kind: "command", transcript: "Limitless recording: \(r.title)", outcome: summary))
+        if goodMomentToSpeak {
+            await speak("From your Limitless recording, \(r.title). \(summary)", gen: runGeneration)
+        } else {
+            store.log("wearable", "\(r.title): \(summary)")
+        }
+        await retryOutbox()
     }
 
     // MARK: Watch-me demonstration
@@ -2536,6 +2947,7 @@ final class AppCoordinator: ObservableObject {
                      capabilities,
                      calendarMeetings.promptText,
                      meetingStatusPromptText,
+                     teamPromptText,
                      environment.snapshot.promptText,
                      recentActionsBlock()]
         if !taskProgress.isEmpty {

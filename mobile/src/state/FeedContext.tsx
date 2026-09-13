@@ -15,6 +15,7 @@ import {
   getFeed,
   Verdict,
 } from "../lib/api";
+import { GoalQueueContext } from "./GoalQueueContext";
 
 const POLL_MS = 5000;
 const SPOKEN_DETAIL_CAP = 200;
@@ -52,6 +53,9 @@ export function FeedProvider({ children }: { children: React.ReactNode }) {
   const [keepPolling, setKeepPolling] = useState(false);
   const [appActive, setAppActive] = useState(AppState.currentState === "active");
   const lastSpokenIdRef = useRef<string | null>(null);
+  // Optional on purpose: FeedProvider also works without a queue above it.
+  const goalQueue = useContext(GoalQueueContext);
+  const flushQueue = goalQueue?.flush;
 
   const speakNewResults = useCallback((fresh: FeedEvent[]) => {
     const anchor = lastSpokenIdRef.current;
@@ -92,6 +96,9 @@ export function FeedProvider({ children }: { children: React.ReactNode }) {
     try {
       const feed = await getFeed();
       setLoaded(true);
+      // A poll that reached the server is the cheapest "we're online" signal
+      // there is — let queued goals through (no-op when nothing is queued).
+      flushQueue?.();
       // null = server said 304: nothing changed, no state churn, no re-render.
       if (feed === null) return;
       setEvents(feed.events);
@@ -107,7 +114,7 @@ export function FeedProvider({ children }: { children: React.ReactNode }) {
       // Polling is best-effort; the next tick retries. A 401 already flipped
       // the app to signed-out via the api client's unauthorized handler.
     }
-  }, [speakNewResults]);
+  }, [speakNewResults, flushQueue]);
 
   useEffect(() => {
     const sub = AppState.addEventListener("change", (state) => {

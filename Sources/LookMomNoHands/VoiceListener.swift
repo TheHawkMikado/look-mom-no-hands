@@ -12,6 +12,16 @@ struct AudioInputDevice: Identifiable, Hashable {
     let name: String
 }
 
+/// One word (or short run of words) as Apple Speech timed it: `timestamp` and
+/// `duration` are seconds relative to the START of the recognition request
+/// that produced it. The meeting loop turns these into speaker-labelled turns
+/// by cutting the matching audio out of the ring buffer (MeetingSession).
+struct SpeechSegment: Equatable, Sendable {
+    let text: String
+    let timestamp: TimeInterval
+    let duration: TimeInterval
+}
+
 /// Single always-on speech pipeline. The audio engine + mic tap run continuously;
 /// only the recognition request is cycled (on utterance boundaries, on errors, and
 /// at Apple's ~1-minute per-request limit). Cycling the request instead of the
@@ -34,6 +44,12 @@ final class VoiceListener {
 
     /// Main queue; the text of the current utterance so far (grows as you speak).
     var onPartial: ((String) -> Void)?
+    /// Main queue; every result's timed segments for the CURRENT recognition
+    /// request, plus the request's id and the wall-clock time it began (so a
+    /// segment's absolute time is `startedAt + timestamp`). Requests cycle on
+    /// pauses and at Apple's cap, so ids change often; consumers key on them.
+    /// Nil until the meeting loop asks — standby pays nothing for it.
+    var onSegments: ((_ requestID: Int, _ startedAt: Date, _ segments: [SpeechSegment], _ isFinal: Bool) -> Void)?
     /// Main queue; diagnostics for the activity log.
     var onInfo: ((String) -> Void)?
     /// Phrases the recognizer is biased toward (wake/stop words). Set before start().
@@ -183,6 +199,121 @@ final class VoiceListener {
         return Self.wav(from: samples, sampleRate: rate)
     }
 
+    // MARK: Recent-audio ring buffer (speaker verification)
+
+    // Always-on ring of the last few seconds at 16 kHz mono Float32, for the
+    // speaker verifier: standby keeps `captureAudio` off by design, but the wake
+    // gate needs the audio that was JUST spoken when the wake phrase matches.
+    // 8 s × 16 kHz × 4 B = 512 KB — cheap enough to run forever, unlike the
+    // unbounded captureSamples buffer. Sized past the plan's ~4 s so an
+    // enrollment sentence (4–6 s) fits in one grab. Written on the audio thread,
+    // read on main, guarded by its own lock. Separate from the Scribe path on
+    // purpose: Scribe wants native-rate Int16 with a different lifetime.
+    static let ringSampleRate: Double = 16000
+    static let ringSeconds: Double = 8
+    private let ringLock = NSLock()
+    private var ring = [Float](repeating: 0, count: Int(VoiceListener.ringSampleRate * VoiceListener.ringSeconds))
+    private var ringWrite = 0                       // next write index (guarded by ringLock)
+    private var ringFilled = 0                      // valid samples, ≤ ring.count (guarded by ringLock)
+    // Native→16 kHz resampler, built once per engine start (the tap format is
+    // fixed for the engine's life). nil when the mic is already 16 kHz mono.
+    private var ringConverter: AVAudioConverter?
+    private var ringOutputBuffer: AVAudioPCMBuffer?
+    private let ringFormat = AVAudioFormat(commonFormat: .pcmFormatFloat32,
+                                           sampleRate: VoiceListener.ringSampleRate,
+                                           channels: 1, interleaved: false)
+
+    /// The listener whose engine is currently running (set in start, cleared in
+    /// stop) — lets code without a handle on the coordinator's private listener
+    /// (the enrollment UI, SpeakerVerifier) read the ring buffer.
+    private(set) static weak var active: VoiceListener?
+
+    /// Snapshot of the most recent `seconds` of 16 kHz mono audio, oldest first.
+    /// Shorter than asked when the engine hasn't run that long; empty when it
+    /// hasn't run at all. Safe from any thread.
+    func recentAudio(seconds: Double) -> [Float] {
+        let wanted = max(0, min(ring.count, Int(seconds * Self.ringSampleRate)))
+        ringLock.lock()
+        defer { ringLock.unlock() }
+        let n = min(wanted, ringFilled)
+        guard n > 0 else { return [] }
+        var out = [Float](repeating: 0, count: n)
+        var read = (ringWrite - n + ring.count) % ring.count
+        for i in 0..<n {
+            out[i] = ring[read]
+            read += 1
+            if read == ring.count { read = 0 }
+        }
+        return out
+    }
+
+    /// Main thread, at engine start: sets up the resampler for the tap format.
+    private func prepareRing(for format: AVAudioFormat) {
+        ringLock.lock()
+        ringWrite = 0
+        ringFilled = 0
+        ringLock.unlock()
+        ringConverter = nil
+        ringOutputBuffer = nil
+        guard let ringFormat else { return }
+        if format.sampleRate == ringFormat.sampleRate && format.channelCount == 1
+            && format.commonFormat == .pcmFormatFloat32 && !format.isInterleaved {
+            return   // tap already delivers what the ring stores
+        }
+        guard let converter = AVAudioConverter(from: format, to: ringFormat) else {
+            onInfo?("speaker ring buffer: no converter for \(Int(format.sampleRate)) Hz — verification audio unavailable")
+            return
+        }
+        if format.channelCount > 1 { converter.channelMap = [0] }   // channel 0 only
+        ringConverter = converter
+    }
+
+    // Realtime audio thread. Resamples the tap buffer to 16 kHz mono and appends
+    // it to the ring.
+    private func appendToRing(_ buffer: AVAudioPCMBuffer) {
+        guard buffer.frameLength > 0 else { return }
+        if let converter = ringConverter, let ringFormat {
+            let ratio = ringFormat.sampleRate / buffer.format.sampleRate
+            let needed = AVAudioFrameCount(Double(buffer.frameLength) * ratio) + 64
+            if ringOutputBuffer == nil || ringOutputBuffer!.frameCapacity < needed {
+                ringOutputBuffer = AVAudioPCMBuffer(pcmFormat: ringFormat, frameCapacity: needed)
+            }
+            guard let out = ringOutputBuffer else { return }
+            out.frameLength = 0
+            var supplied = false
+            var error: NSError?
+            let status = converter.convert(to: out, error: &error) { _, outStatus in
+                if supplied {
+                    outStatus.pointee = .noDataNow
+                    return nil
+                }
+                supplied = true
+                outStatus.pointee = .haveData
+                return buffer
+            }
+            guard status != .error, error == nil, let channel = out.floatChannelData?[0] else { return }
+            writeRing(channel, Int(out.frameLength))
+        } else if let channel = buffer.floatChannelData?[0] {
+            writeRing(channel, Int(buffer.frameLength))
+        }
+    }
+
+    private func writeRing(_ samples: UnsafePointer<Float>, _ n: Int) {
+        guard n > 0 else { return }
+        ringLock.lock()
+        defer { ringLock.unlock() }
+        let capacity = ring.count
+        // More than a whole ring in one buffer can't happen in practice; keep
+        // the tail if it ever does.
+        let start = n > capacity ? n - capacity : 0
+        for i in start..<n {
+            ring[ringWrite] = samples[i]
+            ringWrite += 1
+            if ringWrite == capacity { ringWrite = 0 }
+        }
+        ringFilled = min(capacity, ringFilled + (n - start))
+    }
+
     /// Throws instead of soft-failing so the coordinator can't report a healthy
     /// "listening" state over a dead pipeline.
     func start() throws {
@@ -208,6 +339,7 @@ final class VoiceListener {
             throw ListenError.engineStartFailed("mic has no usable format — is its app running?")
         }
         onInfo?("mic format: \(Int(format.sampleRate)) Hz, \(format.channelCount) ch")
+        prepareRing(for: format)      // resampler for the verification ring buffer
         input.installTap(onBus: 0, bufferSize: 1024, format: format) { [weak self] buffer, _ in
             guard let self else { return }
             // Append INSIDE the lock: swapRequest calls endAudio() under the same
@@ -216,6 +348,7 @@ final class VoiceListener {
             self.request?.append(buffer)
             self.requestLock.unlock()
             self.captureIfNeeded(buffer)
+            self.appendToRing(buffer)
             self.emitLevel(buffer)
             self.onTapBuffer?(buffer)
         }
@@ -227,6 +360,7 @@ final class VoiceListener {
             throw ListenError.engineStartFailed(error.localizedDescription)
         }
         running = true
+        Self.active = self
         onInfo?("audio engine running")
         beginRequest()
     }
@@ -234,6 +368,7 @@ final class VoiceListener {
     func stop() {
         guard running else { return }
         running = false
+        if Self.active === self { Self.active = nil }
         committed = ""
         carryForward = false
         captureAudio = false
@@ -336,6 +471,7 @@ final class VoiceListener {
     private func beginRequest() {
         generation += 1
         let gen = generation
+        let startedAt = Date()
         lastPartial = ""
         task?.cancel(); task = nil
 
@@ -351,6 +487,12 @@ final class VoiceListener {
             let text = result?.bestTranscription.formattedString
             let isFinal = result?.isFinal ?? false
             let failed = error != nil
+            // Timed segments only when someone is listening for them (the
+            // meeting loop) — mapping them on every partial in standby is waste.
+            let segments: [SpeechSegment]? = self?.onSegments == nil ? nil :
+                result?.bestTranscription.segments.map {
+                    SpeechSegment(text: $0.substring, timestamp: $0.timestamp, duration: $0.duration)
+                }
             DispatchQueue.main.async { [weak self] in
                 // Guard first: a superseded request (its generation bumped by a
                 // newer beginRequest) does nothing — no partial, no restart, and
@@ -361,6 +503,9 @@ final class VoiceListener {
                     self.restartDelay = 0.1
                     self.lastPartial = text
                     self.onPartial?(self.committed + text)
+                }
+                if let segments, !segments.isEmpty || isFinal {
+                    self.onSegments?(gen, startedAt, segments, isFinal)
                 }
 
                 // A request ends on error or when the recognizer finalizes (a pause

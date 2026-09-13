@@ -68,12 +68,56 @@ struct ScreenAction: Decodable, Sendable {
     private enum CodingKeys: String, CodingKey { case kind, target, text, url, keys, prompt, direction }
 }
 
+/// A step the planner emits when the request is work for the TEAM rather than
+/// an action on this screen (SPEC.md §5.1 "talk to it"): hand a request to the
+/// web's task intake, answer "what's outstanding", or decide a pending
+/// approval. Emitted through the same `emit_plan` tool as screen steps (the
+/// model sees one `kind` enum) but decoded apart from `ScreenAction`, so the
+/// screen controller's exhaustive switches never see a kind they can't perform.
+struct TeamStep: Decodable, Sendable, Equatable {
+    enum Kind: String, Decodable, Sendable {
+        case delegate                       // POST the request to /api/app/tasks
+        case teamStatus = "team_status"     // "what's outstanding / waiting on me"
+        case decide                         // "approve" / "deny" a pending approval
+    }
+
+    let kind: Kind
+    /// delegate: the request in the user's own words; decide: the verdict.
+    let text: String
+    /// delegate: a one-word capability hint (draft, research, code, email,
+    /// schedule, purchase, call, other) — carried in the step's `target`.
+    let capability: String
+
+    /// Throws for every screen kind: that's the probe ActionPlan's decoder uses
+    /// to tell the two step families apart.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        kind = try c.decode(Kind.self, forKey: .kind)
+        text = (try? c.decodeIfPresent(String.self, forKey: .text)) ?? ""
+        capability = (try? c.decodeIfPresent(String.self, forKey: .target)) ?? ""
+    }
+
+    private enum CodingKeys: String, CodingKey { case kind, target, text }
+
+    /// "approve" / "deny", or nil when the model's verdict text is neither —
+    /// a decision must never be inferred from a vague word. Pure for tests.
+    var verdict: String? {
+        let t = text.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+        if ["approve", "approved", "yes", "go ahead", "ok", "okay"].contains(t) { return "approve" }
+        if ["deny", "denied", "no", "reject", "rejected", "don't", "dont"].contains(t) { return "deny" }
+        return nil
+    }
+}
+
 /// The model's full response to one spoken request: an ordered list of steps,
 /// a short sentence to speak back, and — when the request was too ambiguous to
 /// act on — a clarification question instead of steps.
 struct ActionPlan: Decodable, Sendable {
     let say: String                     // spoken reply ("" = say nothing)
     let steps: [ScreenAction]
+    /// Team-facing steps (delegate / team_status / decide), split out of
+    /// `steps` at decode time. Run by the coordinator before any screen step.
+    let teamSteps: [TeamStep]
     let clarify: Clarification?         // set ⇒ steps is empty; ask before acting
     let learn: LearnedFact?             // a durable mapping the user just taught/corrected
     let teach: TaughtProcedure?         // a task the user just taught how to do
@@ -105,14 +149,17 @@ struct ActionPlan: Decodable, Sendable {
         // clean empty plan.
         if c.contains(.steps), (try? c.decodeNil(forKey: .steps)) == false {
             if let raw = try? c.decode([FailableStep].self, forKey: .steps) {
-                steps = raw.compactMap(\.value)
-                malformed = steps.count != raw.count
+                steps = raw.compactMap(\.screen)
+                teamSteps = raw.compactMap(\.team)
+                malformed = raw.contains { $0.isBad }
             } else {
                 steps = []
+                teamSteps = []
                 malformed = true   // present but not a decodable array
             }
         } else {
             steps = []             // genuinely absent or null
+            teamSteps = []
             malformed = false
         }
         clarify = try? c.decodeIfPresent(Clarification.self, forKey: .clarify)
@@ -128,10 +175,23 @@ struct ActionPlan: Decodable, Sendable {
         case goalComplete = "goal_complete"
     }
 
-    /// Never throws out of an array decode — a bad element becomes nil.
+    /// Never throws out of an array decode — a bad element becomes `isBad`.
+    /// Probes for a team step first (its decoder throws for screen kinds), then
+    /// a screen step; both containers come from the same decoder, which is fine
+    /// for a keyed JSON node.
     private struct FailableStep: Decodable {
-        let value: ScreenAction?
-        init(from decoder: Decoder) throws { value = try? ScreenAction(from: decoder) }
+        let screen: ScreenAction?
+        let team: TeamStep?
+        var isBad: Bool { screen == nil && team == nil }
+        init(from decoder: Decoder) throws {
+            if let t = try? TeamStep(from: decoder) {
+                team = t
+                screen = nil
+            } else {
+                team = nil
+                screen = try? ScreenAction(from: decoder)
+            }
+        }
     }
 }
 
@@ -160,6 +220,13 @@ struct LearnedFact: Decodable, Sendable {
 struct Clarification: Decodable, Sendable {
     let question: String
     let options: [String]
+
+    /// A question the app itself poses (a team prompt spoken at a good
+    /// moment), shown in the same panel as a planner clarification.
+    init(question: String, options: [String]) {
+        self.question = question
+        self.options = options
+    }
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)

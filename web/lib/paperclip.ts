@@ -204,6 +204,36 @@ export class PaperclipClient {
   listIssueRuns(issueId: string) {
     return this.req<PcRun[]>("GET", `/api/issues/${issueId}/runs`);
   }
+
+  // MARK: - Phase 5 additions (goals and projects; docs/api/goals-and-projects.md)
+  listGoals(companyId: string) {
+    return this.req<PcGoal[]>("GET", `/api/companies/${companyId}/goals`);
+  }
+  createGoal(companyId: string, goal: { title: string; description?: string; level?: string; status?: string }) {
+    return this.req<PcGoal>("POST", `/api/companies/${companyId}/goals`, goal);
+  }
+  listProjects(companyId: string) {
+    return this.req<PcProject[]>("GET", `/api/companies/${companyId}/projects`);
+  }
+  createProject(companyId: string, project: { name: string; description?: string; goalIds?: string[]; status?: string }) {
+    return this.req<PcProject>("POST", `/api/companies/${companyId}/projects`, project);
+  }
+}
+
+export interface PcGoal {
+  id: string;
+  companyId: string;
+  title: string;
+  description: string | null;
+  level: string;
+  status: string;
+}
+export interface PcProject {
+  id: string;
+  companyId: string;
+  name: string;
+  description: string | null;
+  status: string;
 }
 
 /** The draft an agent left on an issue, if any: the newest comment authored

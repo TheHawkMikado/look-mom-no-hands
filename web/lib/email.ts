@@ -52,6 +52,27 @@ export async function sendLicenceEmail(to: string, key: string): Promise<boolean
   return true;
 }
 
+/** Is there a mail provider at all? lib/notify asks before composing. */
+export function emailConfigured(): boolean {
+  return !!process.env.RESEND_API_KEY;
+}
+
+/** A plain-text message to one address — human tickets and reminders from
+ *  lib/notify. The address is used for this send and not kept anywhere.
+ *  @returns true if handed to the provider. */
+export async function sendPlainEmail(to: string, subject: string, text: string, replyTo?: string | null): Promise<boolean> {
+  const resend = client();
+  if (!resend) return false;
+  await resend.emails.send({
+    from: process.env.TICKET_FROM ?? FROM,
+    to,
+    subject,
+    text,
+    ...(replyTo ? { replyTo } : {}),
+  });
+  return true;
+}
+
 /** @returns true if the sign-in link was handed to the provider. */
 export async function sendLoginEmail(to: string, url: string): Promise<boolean> {
   const resend = client();

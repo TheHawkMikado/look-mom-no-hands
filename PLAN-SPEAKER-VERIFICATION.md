@@ -1,6 +1,7 @@
 # Plan: Speaker verification ("only respond to MY voice")
 
-**Status: approved, not yet implemented.** Owner picked the bundled on-device ML
+**Status: approved; Phases 1–4 and 6 implemented (see "Implementation notes"
+at the end), Phase 5 wiring pending.** Owner picked the bundled on-device ML
 model route (no Picovoice key, no cloud). This document is the full build plan;
 implement it phase by phase and delete the file when everything ships.
 
@@ -170,3 +171,49 @@ moment the wake phrase matches, so:
   not auth.
 - **Model and profile are coupled** via `modelVersion` — swapping the .mlmodelc
   without bumping it produces garbage scores that look like a threshold bug.
+
+## Implementation notes (what actually shipped vs. the plan above)
+
+- **Model: WeSpeaker ResNet34-LM, not SpeechBrain ECAPA.** The build
+  environment could not reach huggingface.co (egress policy), so the plan's
+  named fallback was used: the ONNX build of `voxceleb_resnet34_LM` published
+  in k2-fsa/sherpa-onnx's GitHub releases, converted with onnx2torch and traced
+  together with a Kaldi-fbank front end (80 mel, 25/10 ms, hamming,
+  pre-emphasis, per-utterance mean norm — exactly what wespeaker's CLI feeds
+  it). Same interface contract: raw 16 kHz `[1, T]` in (T flexible
+  8000…160000), embedding out — **256-dim**, not 192. `modelVersion` is
+  `wespeaker-resnet34-lm-v1`. The ONNX pooling head used a `ReduceProd` over
+  a `Shape` that coremltools can't convert, so the graph is cut before pooling
+  and the mean/unbiased-std/linear tail is re-expressed with tensor ops
+  (verified to cosine 1.000000 against onnxruntime). The front end (through
+  `log`) is kept in float32 — Kaldi's int16 input scale pushes the power
+  spectrum to ~1e14, past fp16 — and the network is fp16. 14.2 MB.
+  `Scripts/convert_speaker_model.py --source speechbrain` still implements the
+  ECAPA route (with the conv1d-STFT fallback) for when huggingface.co is
+  reachable; switching models means bumping `SpeakerVerifier.modelVersion`.
+- **Committed as `.mlpackage`, not `.mlmodelc`** (`xcrun coremlcompiler`
+  isn't available off-macOS). `Package.swift` declares
+  `resources: [.process("Resources/SpeakerEmbedder.mlpackage")]`; SwiftPM
+  compiles it with coremlc on macOS into `SpeakerEmbedder.mlmodelc` inside
+  `LookMomNoHands_LookMomNoHands.bundle`. `SpeakerVerifier.locateModel()`
+  searches that bundle next to the binary (swift run / swift test) and in
+  `Contents/Resources` (the .app, via `assemble_app`), plus a drop-in override
+  at `~/Library/Application Support/LookMaNoHands/SpeakerEmbedder.{mlmodelc,mlpackage}`
+  — no `Bundle.module` dependency, so the app builds and runs (verification
+  visibly disabled) even without the model.
+- **Thresholds** (Lenient 0.22 / Normal 0.30 / Strict 0.40) are the plan's
+  ECAPA numbers. WeSpeaker ResNet34-LM cosine distributions are somewhat wider
+  (same-speaker typically 0.5–0.8, different-speaker ≈ 0–0.25), so the Normal
+  default is expected to be on the lenient side; tune on a real device using
+  the "Test my voice" score in Settings → Voice identity and the Activity log.
+- `VoiceProfile` lives in `SpeakerVerifier.swift` (not `Models.swift`), and
+  the ring buffer keeps 8 s (not ~4 s) so a 6 s enrollment sentence fits in
+  one grab; still 512 KB.
+- Multi-speaker groundwork for SPEC §5.2 landed alongside:
+  `SpeakerVerifier.identify(_:among:)` and `SpeakerClusterer` (online
+  nearest-centroid with running means, "Speaker N" for strangers).
+- Phase 5 (AppCoordinator wake gate) is the remaining wiring:
+  `SpeakerVerifier.shared.shouldAccept(recentAudio: listener.recentAudio(seconds: 3))`
+  off-main, then `beginSession()` on main; `verifyEveryCommand` gates
+  `finalizeCommand`; `verifyCurrentSpeaker()` for tier ≥2 approvals (SPEC §12).
+  `SpeakerVerifier.shared.lastVerdict` carries the score for the log line.

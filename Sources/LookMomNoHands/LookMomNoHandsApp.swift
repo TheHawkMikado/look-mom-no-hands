@@ -30,6 +30,14 @@ struct LookMomNoHandsApp: App {
                         default: return false
                         }
                     }
+                    // The wake word opens the door only for the enrolled owner
+                    // (SPEC §5.1 step 2). shouldAccept fails open — off, no
+                    // profile, no model, or too little audio all mean "yes" —
+                    // so an unverified wake is never a locked-out wake.
+                    coordinator.wakeGate = {
+                        SpeakerVerifier.shared.shouldAccept(
+                            recentAudio: VoiceListener.active?.recentAudio(seconds: 3) ?? [])
+                    }
                     updates.startPeriodicChecks()
                     account.attach(coordinator: coordinator)
                     AccountBridge.handler = { url in
@@ -47,7 +55,7 @@ struct LookMomNoHandsApp: App {
         .menuBarExtraStyle(.window)
 
         Window(Self.dashboardTitle, id: "dashboard") {
-            DashboardView(coordinator: coordinator)
+            DashboardView(coordinator: coordinator, updates: updates)
                 .onAppear { DockPresence.dashboardOpened() }
         }
     }
@@ -243,6 +251,11 @@ struct PanelView: View {
                 Divider()
             }
 
+            if let task = coordinator.lastDelegatedTask {
+                teamRow(task)
+                Divider()
+            }
+
             if !agentManager.agents.isEmpty {
                 agentsSection
                 Divider()
@@ -267,6 +280,21 @@ struct PanelView: View {
         }
         .padding(14)
         .frame(width: 380)
+    }
+
+    /// The last request handed to the team (SPEC §5.1): title and where it is.
+    /// One line — the receipt itself is in the activity log and on the web.
+    private func teamRow(_ task: TeamTask) -> some View {
+        HStack(spacing: 6) {
+            Image(systemName: "person.3.fill").foregroundStyle(Color.accentColor)
+            VStack(alignment: .leading, spacing: 1) {
+                Text("Sent to your team").font(.caption2).foregroundStyle(.secondary)
+                Text(task.title).font(.caption).lineLimit(1)
+            }
+            Spacer()
+            Text(task.status.replacingOccurrences(of: "_", with: " "))
+                .font(.caption2).foregroundStyle(.secondary)
+        }
     }
 
     private var agentsSection: some View {

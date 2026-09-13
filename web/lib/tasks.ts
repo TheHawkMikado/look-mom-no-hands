@@ -1,5 +1,6 @@
 import { approvalVerdictsFor } from "@/lib/db";
 import {
+  approvalsForTask,
   getPaperclipConnection,
   getTask,
   insertReceipt,
@@ -7,15 +8,22 @@ import {
   openAgentTasks,
   openApprovals,
   updateTask,
+  type ApprovalRow,
   type PaperclipConnection,
   type TaskRow,
   type TaskStatus,
 } from "@/lib/db-tasks";
 import { extractTask, type Extraction } from "@/lib/extract";
 import { applyVerdict, gateNotify, requestApproval } from "@/lib/gate";
+import { deliverTicket, deliveryTierFloor, type Delivery, type Purpose, type SendResult } from "@/lib/notify";
 import { ISSUE_DELIVERED, ISSUE_FAILED, latestAgentComment, PaperclipClient } from "@/lib/paperclip";
+import { closePromptsForTask } from "@/lib/prompts";
+import { getSettings } from "@/lib/settings";
+import { needsApproval, type Tier } from "@/lib/tiers";
 import { triage } from "@/lib/triage";
 import { captureDirect, storeRawBoard, type RawBoard } from "@/lib/team";
+import { onAdProcessIntake } from "@/lib/projects";
+import { parseWhen, schedule } from "@/lib/when";
 
 /**
  * The task pipeline: intake → extract → triage → dispatch → (agent works) →
@@ -35,13 +43,32 @@ export interface IntakeResult {
   task: TaskRow | null;
   confirmation: string;
   extraction: Extraction;
+  /** When the Mac asked for a human ticket: what happened to it. */
+  delivery?: DeliveryOutcome;
+}
+
+export interface DeliveryOutcome {
+  status: "sent" | "not_sent" | "awaiting_approval";
+  channel: Delivery["channel"];
+  summary: string;
+  approval_id?: string;
+}
+
+export interface IntakeOptions {
+  /** The Mac's one-time hand-off for a human ticket (lib/notify). Its
+   *  presence is the Mac asserting "this person is on the team" — the
+   *  Person record lives there, not here. */
+  deliver?: Delivery | null;
+  now?: Date;
 }
 
 export async function intake(
   email: string,
   text: string,
   source: "text" | "voice" | "meeting" = "text",
+  opts: IntakeOptions = {},
 ): Promise<IntakeResult> {
+  const now = opts.now ?? new Date();
   const x = await extractTask(email, text);
 
   // Not every utterance becomes a cloud task. Questions are answered from the
@@ -56,8 +83,29 @@ export async function intake(
     return { intent: x.intent, task: null, confirmation, extraction: x };
   }
 
-  const conn = await getPaperclipConnection(email);
-  const t = triage(x, conn?.agents ?? [], !!conn);
+  const [conn, settings] = await Promise.all([getPaperclipConnection(email), getSettings(email)]);
+  let t = triage(x, conn?.agents ?? [], !!conn);
+  let tier = x.blast_tier;
+
+  // The Mac named a person and gave us a one-time address: that is the
+  // human step of §5.3 (Person records live on the Mac). Messaging a human
+  // is at least tier 2 (§6), a client at least 3.
+  const deliver = opts.deliver ?? null;
+  if (deliver) {
+    tier = Math.max(tier, deliveryTierFloor(deliver)) as Tier;
+    const when = x.due_phrase ? ` ${x.due_phrase}` : "";
+    t = {
+      owner_kind: "human",
+      owner_ref: null,
+      owner_name: deliver.name,
+      confirmation: `I'll send that to ${deliver.name} by ${deliver.channel}${when} and follow up.`,
+      reason: `the Mac named ${deliver.name} on the team (${deliver.channel})`,
+    };
+  }
+
+  // Timing (§5.4): the phrase the user said, in their zone, or the defaults.
+  const due = parseWhen(x.due_phrase, { now, tz: settings.tz });
+  const clocks = schedule(due?.at ?? null, now);
   const status: TaskStatus =
     t.owner_kind === "agent" ? "dispatching" : t.owner_kind === "human" ? "assigned" : "needs_decision";
 
@@ -68,21 +116,26 @@ export async function intake(
     owner_kind: t.owner_kind,
     owner_ref: t.owner_ref,
     owner_name: t.owner_name,
-    blast_tier: x.blast_tier,
+    blast_tier: tier,
     status,
     confirmation: t.confirmation,
     source,
+    due_at: clocks.due_at,
+    check_in_at: clocks.check_in_at,
+    escalate_at: clocks.escalate_at,
+    deliver_channel: deliver?.channel ?? null,
   });
   await insertReceipt(email, {
     task_id: task.id,
     actor: "model",
     model_used: x.model_used ?? "rules",
-    summary: `Extracted from ${source}: "${x.title}" (tier ${x.blast_tier}, ${x.capability}).`,
+    summary: `Extracted from ${source}: "${x.title}" (tier ${tier}, ${x.capability}).`,
   });
   await insertReceipt(email, {
     task_id: task.id,
     actor: "system",
-    summary: `Triaged to ${t.owner_kind}${t.owner_name ? ` (${t.owner_name})` : ""}: ${t.reason}.`,
+    summary: `Triaged to ${t.owner_kind}${t.owner_name ? ` (${t.owner_name})` : ""}: ${t.reason}.`
+      + (x.due_phrase ? ` Due "${x.due_phrase}" → ${due ? `${due.at.toISOString()} (${due.rule})` : "unparsed, defaults"}.` : ""),
   });
 
   if (t.owner_kind === "user") {
@@ -93,10 +146,75 @@ export async function intake(
   // its next poll (a few seconds). Neither delays the confirmation the user
   // hears — that was decided before this point.
   let out = task;
+  let delivery: DeliveryOutcome | undefined;
   if (t.owner_kind === "agent" && conn && conn.mode === "direct") {
     out = (await dispatchDirect(conn, task)) ?? task;
+  } else if (deliver) {
+    const d = await deliverTask(email, task, deliver, "ticket", now);
+    delivery = d.outcome;
+    out = d.task ?? task;
   }
-  return { intent: x.intent, task: out, confirmation: t.confirmation, extraction: x };
+  // Phase 5: "run the ad process for X with a $N cap" gets a project with a
+  // budget and the step issues nested under the task's issue.
+  if (x.capability === "ad_process") {
+    await onAdProcessIntake(out, x).catch((e) => console.warn("[ad-process]", e instanceof Error ? e.message : e));
+  }
+  return { intent: x.intent, task: out, confirmation: t.confirmation, extraction: x, delivery };
+}
+
+// MARK: - Human tickets
+
+/**
+ * Send (or re-send) a human ticket, through the gate. A ticket at or below
+ * the account's `auto_deliver_tier` goes now; above it, an approval is
+ * requested and the Mac must call again with the address once the owner has
+ * approved (we never keep it). The address in `deliver` is used for this
+ * one send and dropped.
+ */
+export async function deliverTask(
+  email: string,
+  task: TaskRow,
+  deliver: Delivery,
+  purpose: Purpose,
+  now = new Date(),
+): Promise<{ outcome: DeliveryOutcome; task: TaskRow | null; send?: SendResult }> {
+  const settings = await getSettings(email);
+  const tier = task.blast_tier as Tier;
+  if (needsApproval(tier) && tier > settings.auto_deliver_tier) {
+    const approvals = await approvalsForTask(task.id);
+    const approved = approvals.some((a) => a.decision === "approve");
+    if (!approved) {
+      const open = approvals.find((a) => !a.decided_at);
+      if (open) {
+        return { outcome: { status: "awaiting_approval", channel: deliver.channel, summary: "Waiting on the owner.", approval_id: open.id }, task };
+      }
+      const gate = await requestApproval(task, `Send "${task.title}" to ${deliver.name} by ${deliver.channel}?`);
+      return {
+        outcome: { status: "awaiting_approval", channel: deliver.channel, summary: `Tier ${tier} — asking the owner before messaging ${deliver.name}.`, approval_id: gate.approval?.id },
+        task: await getTask(email, task.id),
+      };
+    }
+  }
+  const send = await deliverTicket(email, task, deliver, purpose, now, settings.tz);
+  const patch: Parameters<typeof updateTask>[2] = {
+    deliver_channel: deliver.channel,
+    owner_kind: "human",
+    owner_name: deliver.name,
+  };
+  if (send.sent) patch.delivered_at = now;
+  if (task.status === "awaiting_approval" || task.status === "approved" || task.status === "triaged") patch.status = "assigned";
+  const fresh = await updateTask(email, task.id, patch);
+  return {
+    outcome: { status: send.sent ? "sent" : "not_sent", channel: deliver.channel, summary: send.summary },
+    task: fresh,
+    send,
+  };
+}
+
+/** The most recent approval decision on a task, for the calls gate. */
+export async function approvedOn(taskId: string): Promise<ApprovalRow | null> {
+  const approvals = await approvalsForTask(taskId);
+  return [...approvals].reverse().find((a) => a.decision === "approve") ?? null;
 }
 
 // MARK: - Observations and the state machine
@@ -111,6 +229,8 @@ export interface Observation {
   error?: string | null;
   /** Set by the bridge after it closed the issue out. */
   closed?: boolean;
+  /** Set by the bridge after it invoked the agent's heartbeat (a nudge). */
+  nudged?: boolean;
 }
 
 /** Move one task according to what was observed. Safe to call repeatedly. */
@@ -123,6 +243,12 @@ export async function advance(email: string, obs: Observation): Promise<TaskRow 
     // A transient error on a dispatching task is retried next round; a failed
     // issue is terminal.
     return task;
+  }
+
+  if (obs.nudged && !task.nudged_at) {
+    await insertReceipt(email, { task_id: task.id, actor: "system", actor_ref: task.owner_ref, summary: `Nudged ${task.owner_name ?? "the agent"} (heartbeat invoked).` });
+    const next = await updateTask(email, task.id, { nudged_at: new Date() });
+    if (obs.issue === undefined && obs.draft === undefined && !obs.closed) return next;
   }
 
   switch (task.status) {
@@ -174,6 +300,7 @@ export async function advance(email: string, obs: Observation): Promise<TaskRow 
       if (done) {
         await gateNotify(email, `${task.id}:done`, "goal_done", task.title, (task.result ?? "").slice(0, 500), null);
       }
+      await closePromptsForTask(email, task.id);
       return updateTask(email, task.id, { status: done ? "done" : "denied", closed_at: new Date() });
     }
     default:
@@ -299,18 +426,24 @@ export interface BridgeWork {
   create: { task_id: string; title: string; description: string; assignee_agent_id: string | null; tier: number }[];
   watch: { task_id: string; issue_id: string }[];
   close: { task_id: string; issue_id: string; approved: boolean }[];
+  /** Agents past their check-in with nothing delivered: invoke a heartbeat
+   *  (follow-up engine, §5.4). The bridge reports `{ task_id, nudged: true }`. */
+  nudge: { task_id: string; agent_id: string; issue_id: string }[];
 }
 
-export async function bridgeWork(email: string): Promise<BridgeWork | null> {
+export async function bridgeWork(email: string, now = new Date()): Promise<BridgeWork | null> {
   const conn = await getPaperclipConnection(email);
   if (!conn) return null;
   await absorbPhoneVerdicts(email);
-  const work: BridgeWork = { company_id: conn.company_id, create: [], watch: [], close: [] };
+  const work: BridgeWork = { company_id: conn.company_id, create: [], watch: [], close: [], nudge: [] };
   for (const t of await openAgentTasks(email)) {
     if (t.status === "dispatching") {
       work.create.push({ task_id: t.id, title: t.title, description: issueDescription(t), assignee_agent_id: t.owner_ref, tier: t.blast_tier });
     } else if (t.status === "in_progress" && t.paperclip_issue_id) {
       work.watch.push({ task_id: t.id, issue_id: t.paperclip_issue_id });
+      if (t.owner_ref && t.check_in_at && new Date(t.check_in_at) <= now && !t.nudged_at) {
+        work.nudge.push({ task_id: t.id, agent_id: t.owner_ref, issue_id: t.paperclip_issue_id });
+      }
     } else if ((t.status === "approved" || t.status === "denied") && t.paperclip_issue_id) {
       work.close.push({ task_id: t.id, issue_id: t.paperclip_issue_id, approved: t.status === "approved" });
     }

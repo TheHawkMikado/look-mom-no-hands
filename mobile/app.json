@@ -15,7 +15,9 @@
       "infoPlist": {
         "NSMicrophoneUsageDescription": "The microphone captures your voice so you can send tasks to your Mac.",
         "NSSpeechRecognitionUsageDescription": "Speech recognition turns what you say into a task for your Mac.",
-        "UIBackgroundModes": ["audio"]
+        "UIBackgroundModes": [
+          "audio"
+        ]
       }
     },
     "android": {
@@ -23,7 +25,8 @@
       "permissions": [
         "RECORD_AUDIO",
         "FOREGROUND_SERVICE",
-        "FOREGROUND_SERVICE_MICROPHONE"
+        "FOREGROUND_SERVICE_MICROPHONE",
+        "POST_NOTIFICATIONS"
       ],
       "adaptiveIcon": {
         "backgroundColor": "#0B0A12",
@@ -37,6 +40,13 @@
       "favicon": "./assets/favicon.png"
     },
     "plugins": [
+      [
+        "expo-notifications",
+        {
+          "color": "#7C5CFF",
+          "defaultChannel": "default"
+        }
+      ],
       "expo-secure-store",
       "expo-web-browser",
       [
