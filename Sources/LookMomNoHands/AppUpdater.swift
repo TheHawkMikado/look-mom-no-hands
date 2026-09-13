@@ -68,8 +68,12 @@ final class AppUpdater: ObservableObject {
             let staged = try await Task.detached { try Self.stageApp(fromDMG: dmg) }.value
             try Self.verifySignature(at: staged)
             try? Self.clearQuarantine(at: staged)
+            let running = Bundle.main.bundlePath
+            let dest = Self.installDestination(forRunningBundle: running)
+            try Self.checkReplaceable(dest)
             phase = .relaunching
-            try Self.spawnSwapHelper(staged: staged, bundlePath: Bundle.main.bundlePath)
+            try Self.spawnSwapHelper(staged: staged, dest: dest, running: running,
+                                     dmg: dmg, log: updatesDir.appendingPathComponent("swap.log"))
             // The helper waits for this exit, swaps the bundle, and relaunches.
             NSApp.terminate(nil)
         } catch {
@@ -152,12 +156,46 @@ final class AppUpdater: ObservableObject {
         _ = try shell("/usr/bin/xattr", ["-dr", "com.apple.quarantine", app.path])
     }
 
+    /// Where the new build lands. Normally the running bundle's own path — but
+    /// two places must never be swapped in place: a Gatekeeper-translocated
+    /// copy (`…/AppTranslocation/…`, what you get when the app is launched
+    /// straight from a download without a drag to Applications) and an app run
+    /// off the mounted DMG (`/Volumes/…`). Replacing those updates a throwaway
+    /// copy and leaves the real install — or no install at all — on the old
+    /// version. Both land in /Applications instead, which is where the user
+    /// expected the app to be anyway. Pure for tests.
+    nonisolated static func installDestination(forRunningBundle path: String,
+                                               applicationsDir: String = "/Applications") -> String {
+        let name = (path as NSString).lastPathComponent
+        if path.contains("/AppTranslocation/") || path.hasPrefix("/Volumes/") {
+            return (applicationsDir as NSString).appendingPathComponent(name)
+        }
+        return path
+    }
+
+    /// Fail BEFORE quitting if the swap cannot succeed: once the app has
+    /// terminated there is nobody left to show an error. A bundle installed by
+    /// another admin account, or an Applications folder this user can't write,
+    /// gets the manual "drag from the DMG" path instead of a vanished app.
+    nonisolated private static func checkReplaceable(_ dest: String) throws {
+        let fm = FileManager.default
+        let parent = (dest as NSString).deletingLastPathComponent
+        guard fm.isWritableFile(atPath: parent) else {
+            throw UpdateError(message: "can't write to \(parent) — drag the new version in from the DMG instead")
+        }
+        if fm.fileExists(atPath: dest), !fm.isDeletableFile(atPath: dest) {
+            throw UpdateError(message: "the installed app is owned by another user — drag the new version in from the DMG instead")
+        }
+    }
+
     /// A tiny detached shell that outlives us: wait for our exit, replace the
     /// bundle, relaunch it, clean up. Detached (new session, ignored signals via
     /// nohup-like setup) so terminating the app doesn't kill the installer.
-    nonisolated private static func spawnSwapHelper(staged: URL, bundlePath: String) throws {
+    nonisolated private static func spawnSwapHelper(staged: URL, dest: String, running: String,
+                                                    dmg: URL, log: URL) throws {
         let script = swapScript(pid: ProcessInfo.processInfo.processIdentifier,
-                                staged: staged.path, app: bundlePath)
+                                staged: staged.path, app: dest, running: running,
+                                cleanup: [dmg.path], log: log.path)
         let scriptURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("lmnh-swap-\(UUID().uuidString).sh")
         try script.write(to: scriptURL, atomically: true, encoding: .utf8)
@@ -172,18 +210,41 @@ final class AppUpdater: ObservableObject {
 
     /// Pure for tests. Single-quoted paths so spaces ("Look Ma, No Hands.app")
     /// survive; the wait loop polls our pid rather than trusting timing.
-    nonisolated static func swapScript(pid: Int32, staged: String, app: String) -> String {
+    ///
+    /// `app` is the install destination, `running` the bundle that was actually
+    /// executing (the same path unless it was translocated or on the DMG). The
+    /// old version is removed before the new one is copied in. If the swap
+    /// fails part-way, the script still tries to relaunch SOMETHING — the
+    /// destination first, then the bundle we came from — so a failed update
+    /// never leaves the user with no app at all. Everything is logged so a
+    /// failure can be read afterwards.
+    nonisolated static func swapScript(pid: Int32, staged: String, app: String,
+                                       running: String? = nil, cleanup: [String] = [],
+                                       log: String? = nil) -> String {
         let q = { (s: String) in "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'" }
-        return """
-        #!/bin/sh
-        # Look Ma, No Hands self-update helper. Safe to delete.
-        while /bin/kill -0 \(pid) 2>/dev/null; do /bin/sleep 0.2; done
-        /bin/rm -rf \(q(app))
-        /usr/bin/ditto \(q(staged)) \(q(app))
-        /usr/bin/open \(q(app))
-        /bin/rm -rf \(q((staged as NSString).deletingLastPathComponent))
-        /bin/rm -f "$0"
-        """
+        let staging = (staged as NSString).deletingLastPathComponent
+        var lines = [
+            "#!/bin/sh",
+            "# Look Ma, No Hands self-update helper. Safe to delete.",
+        ]
+        if let log { lines.append("exec >>\(q(log)) 2>&1; echo \"--- $(date) update to \(q(app))\"") }
+        lines += [
+            "while /bin/kill -0 \(pid) 2>/dev/null; do /bin/sleep 0.2; done",
+            "if /bin/rm -rf \(q(app)) && /usr/bin/ditto \(q(staged)) \(q(app)); then",
+            "  echo installed",
+            "else",
+            "  echo \"install failed; relaunching what is left\"",
+            "fi",
+        ]
+        if let running, running != app {
+            lines.append("/usr/bin/open \(q(app)) || /usr/bin/open \(q(running))")
+        } else {
+            lines.append("/usr/bin/open \(q(app))")
+        }
+        lines.append("/bin/rm -rf \(q(staging))")
+        for path in cleanup { lines.append("/bin/rm -f \(q(path))") }
+        lines.append("/bin/rm -f \"$0\"")
+        return lines.joined(separator: "\n") + "\n"
     }
 
     @discardableResult

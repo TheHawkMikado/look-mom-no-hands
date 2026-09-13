@@ -2,15 +2,14 @@ import type { Metadata } from "next";
 import { redirect } from "next/navigation";
 import { getSession } from "@/lib/auth";
 import { Lockup } from "@/components/Logo";
-import { StatusFeed } from "@/components/StatusFeed";
+import { TeamBoard } from "@/components/TeamBoard";
 
-export const metadata: Metadata = { title: "Agents — Look Ma, No Hands" };
+export const metadata: Metadata = { title: "Team — Look Ma, No Hands" };
 export const dynamic = "force-dynamic";
 
-/** Live agent activity for the signed-in account, from any device — the phone
- *  page you glance at while the Mac works. The feed itself is a client component
- *  that polls every 5s; this shell just gates on the session. */
-export default async function Status() {
+/** Every team member's board — humans and bots — from any device. Read-only:
+ *  approvals happen on /status; this is where you see who is doing what. */
+export default async function Team() {
   const session = await getSession();
   if (!session) redirect("/login");
 
@@ -22,7 +21,7 @@ export default async function Status() {
             <Lockup />
           </a>
         </span>
-        <a href="/team">Team</a>
+        <a href="/status">Agents</a>
         <a href="/account">Account</a>
         {session.admin && <a href="/admin">Admin</a>}
         <span style={{ fontSize: 13, color: "var(--muted)" }}>{session.email}</span>
@@ -32,12 +31,12 @@ export default async function Status() {
       </nav>
 
       <section style={{ borderTop: 0, paddingTop: 48 }}>
-        <h2>Agents</h2>
+        <h2>Team</h2>
         <p className="dim">
-          What your agents are doing right now, refreshed every few seconds. Anything
-          that needs your say-so waits at the top until you approve or deny it.
+          Everyone on your team and what they are working on — the agents and the humans,
+          in one place. Anything marked “ready for you” is waiting on the Agents page.
         </p>
-        <StatusFeed />
+        <TeamBoard />
       </section>
     </div>
   );

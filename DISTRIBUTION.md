@@ -135,3 +135,34 @@ The app calls the Anthropic API with a key each user enters in the panel (stored
 in their Keychain). You are **not** shipping your key. If you'd rather users not
 need their own Anthropic account, you'd front the API with your own backend and
 bill/meter it — a larger change, not part of this build.
+
+## Automatic releases (every merge to main goes live)
+
+`.github/workflows/release.yml` runs on GitHub's Mac runners. On every pull
+request it builds and runs the unit tests. On every push to `main` it builds
+the universal app, signs and notarises it, packages the DMG, tags and
+publishes the GitHub release, and moves `LATEST_APP_VERSION` on Vercel — so
+every installed copy sees the new build on its next check, and installs it
+by itself if "Update automatically when idle" is on (the default).
+
+It needs these repository secrets (Settings → Secrets and variables → Actions):
+
+| Secret | What it is | Where to get it |
+|---|---|---|
+| `MAC_SIGN_ID` | `Developer ID Application: Your Name (B59AM8227J)` | `security find-identity -v -p codesigning` on a Mac that has the cert |
+| `MAC_CERT_P12_BASE64` | the Developer ID certificate + private key, base64 | Keychain Access → export the cert as .p12, then `base64 -i cert.p12 \| pbcopy` |
+| `MAC_CERT_PASSWORD` | the password you gave the .p12 export | you chose it |
+| `APPLE_ID` | your Apple ID email | — |
+| `APPLE_TEAM_ID` | `B59AM8227J` | developer.apple.com → Membership |
+| `APPLE_APP_PASSWORD` | an app-specific password for notarisation | appleid.apple.com → Sign-In and Security → App-Specific Passwords |
+| `VERCEL_TOKEN` | a Vercel API token | vercel.com → Account → Tokens |
+| `VERCEL_PROJECT_ID` | the nohandsapp.com project id | Vercel project → Settings → General |
+| `VERCEL_TEAM_ID` | only if the project is under a team | Vercel team → Settings |
+| `VERCEL_DEPLOY_HOOK_URL` | optional; a Deploy Hook for the production branch | Vercel project → Settings → Git → Deploy Hooks |
+
+Until the signing secrets exist the workflow builds, tests, and then stops
+with a warning naming what is missing. It never publishes an unsigned build:
+the updater pins the team's Developer ID and would refuse it.
+
+The team-ID requirement lives in `AppUpdater.requirement`. If the Apple team
+ever changes, that string and `APPLE_TEAM_ID` change together.

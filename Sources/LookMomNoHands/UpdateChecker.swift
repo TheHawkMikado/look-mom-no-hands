@@ -3,9 +3,11 @@ import Foundation
 /// Checks nohandsapp.com for a newer build and surfaces a nudge in the panel.
 ///
 /// The app ships direct (no Mac App Store), so there is no OS-provided update
-/// path — this is it. It only ever *notifies*; downloading and installing stays
-/// a deliberate act by the user. Silent auto-update of an app that can drive the
-/// whole machine is a trust line this deliberately doesn't cross.
+/// path — this is it. It notifies, and — since the owner asked for it — it can
+/// also *install* the update on its own when the app is idle (`autoInstall`,
+/// on by default, one switch in the panel to turn off). The download is still
+/// only ever run through AppUpdater's signature gate: automatic means "no
+/// click", never "less checking".
 ///
 /// Everything here fails open: no network, a garbled manifest, a server outage —
 /// all leave `status` at `.upToDate` (or its last good value) and never block or
@@ -53,6 +55,41 @@ final class UpdateChecker: ObservableObject {
     /// Direct DMG asset of the latest release, when the manifest carries one —
     /// what the in-app one-click updater downloads. nil = fall back to the page.
     @Published private(set) var dmgURL: URL?
+
+    // MARK: - Automatic install
+
+    nonisolated static let autoInstallKey = "lmnh.update.autoInstall"
+    private let autoAttemptedKey = "lmnh.update.autoAttemptedVersion"
+
+    /// Install updates without a click, when the app is idle. Default ON.
+    var autoInstall: Bool {
+        get { UserDefaults.standard.object(forKey: Self.autoInstallKey) as? Bool ?? true }
+        set {
+            objectWillChange.send()
+            UserDefaults.standard.set(newValue, forKey: Self.autoInstallKey)
+            if newValue { tryPendingInstall() }
+        }
+    }
+
+    /// Injected at wiring: true when nothing is in flight (no recording, no
+    /// goal running, no meeting being captured). An update swaps the bundle and
+    /// relaunches, so it must never land mid-sentence.
+    var isIdle: (() -> Bool)?
+
+    /// An update found while the app was busy; installed as soon as it idles.
+    private var pendingAutoInstall: (version: String, dmg: URL)?
+
+    /// Call whenever the app returns to idle (and after a check). Installs the
+    /// pending update once per version: a failed attempt is shown in the panel
+    /// and not retried automatically, so a bad download can't loop forever.
+    func tryPendingInstall() {
+        guard autoInstall, let pending = pendingAutoInstall, isIdle?() ?? false else { return }
+        guard UserDefaults.standard.string(forKey: autoAttemptedKey) != pending.version else { return }
+        guard !AppUpdater.shared.phase.busy else { return }
+        UserDefaults.standard.set(pending.version, forKey: autoAttemptedKey)
+        pendingAutoInstall = nil
+        AppUpdater.shared.install(fromDMG: pending.dmg)
+    }
 
     /// The running build, for display next to the check button.
     var currentVersion: String { current }
@@ -155,6 +192,16 @@ final class UpdateChecker: ObservableObject {
         } else {
             status = .upToDate
             if force { manualResult = .current(current) }
+        }
+
+        // Newer build with a direct image → queue it; it installs the moment the
+        // app is idle (right now, usually). A manual check with the switch off
+        // still only shows the banner.
+        if let dmg = dmgURL, status != .upToDate {
+            pendingAutoInstall = (manifest.version, dmg)
+            tryPendingInstall()
+        } else {
+            pendingAutoInstall = nil
         }
     }
 

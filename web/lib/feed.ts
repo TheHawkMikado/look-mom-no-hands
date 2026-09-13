@@ -1,6 +1,7 @@
 import { createHash } from "crypto";
 import { NextRequest, NextResponse } from "next/server";
 import { agentEventsFor, approvalVerdictsFor, decideApproval, ensureSchema } from "@/lib/db";
+import { maybeSync } from "@/lib/tasks";
 
 /**
  * The one place the feed and decide payloads are built. The phone
@@ -12,6 +13,8 @@ import { agentEventsFor, approvalVerdictsFor, decideApproval, ensureSchema } fro
 
 export async function feedPayload(email: string) {
   await ensureSchema();
+  // The poll is the clock for direct-mode Paperclip sync (throttled inside).
+  await maybeSync(email);
   const events = await agentEventsFor(email);
   // Verdicts only for approvals actually visible in the event window — the
   // old unbounded query shipped every verdict from 30 days of history on a
