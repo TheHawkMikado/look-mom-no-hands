@@ -133,3 +133,43 @@ spoken verdicts are step kinds the one existing planner call can emit,
 decoded into `ActionPlan.teamSteps` alongside screen steps. Reason: the hot
 path stays one model call; a separate intent classifier before the planner
 would add a network round trip to every command.
+
+## 2026-09-13 — Outbound calls go through Vapi (not Retell, not raw Twilio)
+
+SPEC §14 left the call provider open. v1 uses Vapi: `web/lib/vapi.ts` builds
+a transient assistant per call (goal, constraints, the caller's preferences
+handed over by the Mac for that call only, and the hard rule never to commit
+money above the approved tier), places it with `POST /call`, and reads the
+end-of-call report from Vapi's server-URL webhook (`/api/calls/vapi`). Reason:
+one API gives us telephony, STT, the realtime model and the post-call
+analysis (`analysis.structuredData`) we need for a structured outcome, so
+there is no audio pipeline to host and the model behind the call still comes
+from the router (`call_agent_realtime`). Retell is equivalent and could be a
+second `provider`; raw Twilio + a realtime model would mean running our own
+media server, which is the "cloud agent farm" §2 says we are not. Residency:
+`calls` stores the provider call id, status, a two-sentence summary, a few
+typed outcome fields and the cost — never the number dialled, a transcript
+or a recording (`artifactPlan.recordingEnabled: false`). The Vapi and GHL
+docs hosts were unreachable from the build box, so both clients follow the
+documented v1/v2 shapes as widely used and are unit-tested against fakes;
+the first real call will confirm the field names.
+
+## 2026-09-13 — Human tickets: the Mac hands over the address, once
+
+A task assigned to a person goes out by email or SMS, but Persons live on
+the Mac (§4.3). So `POST /api/app/tasks` and `POST /api/app/tasks/:id/deliver`
+accept `deliver: { channel, to, name }`, use `to` for that one send, and keep
+only the channel and the name on the task. A reminder later is therefore a
+`deliver_reminder` prompt the Mac fulfils with a fresh hand-off, never a blind
+send from the cloud. Messaging a teammate is tier 2 and a client tier 3 (§6);
+the account's `auto_deliver_tier` (default 1) says how far tickets go without
+a card, so by default the owner is asked once per ticket.
+
+## 2026-09-13 — Prompts are how the bot initiates; push is best-effort
+
+The follow-up engine never talks to the user directly. It writes a `prompts`
+row — one question with a default, dated `not_before` inside quiet hours —
+and the Mac speaks it when idle (`GET /api/app/prompts`), while the phone gets
+the same question as an Expo push. Push is bounded (4 s) and swallowed on
+failure: a phone that is off must never stall an approval. Expo receipts are
+collected by the cron so uninstalled apps drop their tokens.

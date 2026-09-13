@@ -8,6 +8,7 @@ import {
   type TaskRow,
 } from "@/lib/db-tasks";
 import { needsApproval, tierSpec, type Tier } from "@/lib/tiers";
+import { sendPush } from "@/lib/push";
 
 /**
  * The Approval Gate (SPEC.md §6). Every action that leaves our own database
@@ -46,6 +47,13 @@ export async function requestApproval(task: TaskRow, question: string): Promise<
     actor: "system",
     summary: `Approval requested (tier ${tier}): ${question}`,
     ref: approval.id,
+  });
+  // The phone buzzes with the same card it already renders from the feed.
+  // Best-effort and bounded (lib/push): a dead phone never stalls the gate.
+  await sendPush(task.email, {
+    title: `Approve? ${task.title}`.slice(0, 120),
+    body: question,
+    data: { approvalId: approval.id, taskId: task.id },
   });
   return { allowed: false, approval };
 }

@@ -4,6 +4,11 @@ import type { Tier } from "@/lib/tiers";
 import { ensureRoutingSchema } from "@/lib/router";
 import { ensureTeamSchemaSQL } from "@/lib/team";
 import { decryptSecret, encryptSecret } from "@/lib/crypto";
+import { ensureSettingsSchema } from "@/lib/settings";
+import { ensurePromptSchema } from "@/lib/prompts";
+import { ensureIntegrationSchema } from "@/lib/integrations";
+import { ensurePushSchema } from "@/lib/push";
+import { ensureCallSchema } from "@/lib/db-calls";
 
 /**
  * The chief-of-staff tables (SPEC.md §10): projects, tasks, approvals,
@@ -46,6 +51,13 @@ export interface TaskRow {
   paperclip_issue_key: string | null;
   result: string | null;
   closed_at: Date | null;
+  /** Follow-up engine bookkeeping (§5.4): when the owner was last nudged and
+   *  when the task was last brought to the user. Null = not yet. */
+  nudged_at: Date | null;
+  escalated_at: Date | null;
+  /** How a human ticket went out ('email' | 'sms'); never the address. */
+  deliver_channel: string | null;
+  delivered_at: Date | null;
   source: TaskSource;
   residency: Residency;
   created_at: Date;
@@ -154,6 +166,12 @@ export async function ensureTaskSchema(db = sql()) {
   // Set once the Paperclip issue has been closed out (done or denied) so the
   // sync loop and the bridge stop looking at it.
   await db`ALTER TABLE tasks ADD COLUMN IF NOT EXISTS closed_at timestamptz`;
+  // Phase 3 (follow-up engine + human tickets). Channel only, never an address.
+  await db`ALTER TABLE tasks ADD COLUMN IF NOT EXISTS nudged_at timestamptz`;
+  await db`ALTER TABLE tasks ADD COLUMN IF NOT EXISTS escalated_at timestamptz`;
+  await db`ALTER TABLE tasks ADD COLUMN IF NOT EXISTS deliver_channel text CHECK (deliver_channel IN ('email','sms'))`;
+  await db`ALTER TABLE tasks ADD COLUMN IF NOT EXISTS delivered_at timestamptz`;
+  await db`CREATE INDEX IF NOT EXISTS tasks_followup_idx ON tasks (email, check_in_at, escalate_at) WHERE closed_at IS NULL`;
 
   await db`
     CREATE TABLE IF NOT EXISTS task_approvals (
@@ -202,6 +220,12 @@ export async function ensureTaskSchema(db = sql()) {
 
   await ensureRoutingSchema(db);
   await ensureTeamSchemaSQL(db);
+  // Phase 3: settings, prompts, integrations, push tokens, calls.
+  await ensureSettingsSchema(db);
+  await ensurePromptSchema(db);
+  await ensureIntegrationSchema(db);
+  await ensurePushSchema(db);
+  await ensureCallSchema(db);
 }
 
 const norm = (email: string) => email.trim().toLowerCase();
@@ -244,6 +268,9 @@ export interface NewTask {
   source: TaskSource;
   project_id?: string | null;
   due_at?: Date | null;
+  check_in_at?: Date | null;
+  escalate_at?: Date | null;
+  deliver_channel?: "email" | "sms" | null;
 }
 
 export async function insertTask(email: string, t: NewTask): Promise<TaskRow> {
@@ -260,10 +287,11 @@ export async function insertTask(email: string, t: NewTask): Promise<TaskRow> {
   });
   const [out] = await db<TaskRow[]>`
     INSERT INTO tasks (id, email, project_id, title, detail, capability, owner_kind, owner_ref, owner_name,
-                       blast_tier, status, confirmation, due_at, source, residency)
+                       blast_tier, status, confirmation, due_at, check_in_at, escalate_at, deliver_channel, source, residency)
     VALUES (${row.id}, ${row.email}, ${row.project_id ?? null}, ${row.title}, ${row.detail}, ${row.capability},
             ${row.owner_kind}, ${row.owner_ref}, ${row.owner_name}, ${row.blast_tier}, ${row.status},
-            ${row.confirmation}, ${row.due_at ?? null}, ${row.source}, ${row.residency})
+            ${row.confirmation}, ${row.due_at ?? null}, ${row.check_in_at ?? null}, ${row.escalate_at ?? null},
+            ${row.deliver_channel ?? null}, ${row.source}, ${row.residency})
     RETURNING *`;
   return out;
 }
@@ -302,10 +330,42 @@ export async function openAgentTasks(email: string): Promise<TaskRow[]> {
      ORDER BY created_at ASC LIMIT 50`;
 }
 
+/** Statuses that still have a next step somewhere — the follow-up engine's
+ *  definition of "outstanding". */
+export const OPEN_STATUSES: readonly TaskStatus[] = [
+  "triaged", "dispatching", "in_progress", "awaiting_approval", "approved", "assigned", "needs_decision",
+];
+
+/** Open tasks whose clock has run: past check-in and not yet nudged, or past
+ *  escalation and not yet escalated. Both clocks are read here so the engine
+ *  makes one query per account. */
+export async function tasksDueForFollowup(email: string, now = new Date()): Promise<TaskRow[]> {
+  const db = sql();
+  return db<TaskRow[]>`
+    SELECT * FROM tasks
+     WHERE email = ${norm(email)} AND closed_at IS NULL AND status = ANY(${[...OPEN_STATUSES]})
+       AND ((check_in_at IS NOT NULL AND check_in_at <= ${now} AND nudged_at IS NULL)
+         OR (escalate_at IS NOT NULL AND escalate_at <= ${now} AND escalated_at IS NULL))
+     ORDER BY COALESCE(due_at, escalate_at) ASC LIMIT 100`;
+}
+
+/** Everything still open, soonest due first — the daily brief and "what's
+ *  outstanding" read this. */
+export async function outstandingTasks(email: string): Promise<TaskRow[]> {
+  const db = sql();
+  return db<TaskRow[]>`
+    SELECT * FROM tasks
+     WHERE email = ${norm(email)} AND closed_at IS NULL AND status = ANY(${[...OPEN_STATUSES]})
+     ORDER BY due_at ASC NULLS LAST, created_at ASC LIMIT 200`;
+}
+
 export async function updateTask(
   email: string,
   id: string,
-  patch: Partial<Pick<TaskRow, "status" | "paperclip_issue_id" | "paperclip_issue_key" | "result" | "owner_ref" | "owner_name" | "confirmation" | "closed_at">>,
+  patch: Partial<Pick<TaskRow,
+    | "status" | "paperclip_issue_id" | "paperclip_issue_key" | "result" | "owner_kind" | "owner_ref" | "owner_name"
+    | "blast_tier" | "confirmation" | "closed_at" | "due_at" | "check_in_at" | "escalate_at" | "nudged_at" | "escalated_at"
+    | "deliver_channel" | "delivered_at">>,
 ): Promise<TaskRow | null> {
   const db = sql();
   const clean = assertCloudWritable({

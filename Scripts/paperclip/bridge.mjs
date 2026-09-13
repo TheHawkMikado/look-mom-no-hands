@@ -82,6 +82,18 @@ async function round() {
       observations.push({ task_id: k.task_id, error: e.message });
     }
   }
+  // Follow-up engine (SPEC.md §5.4): an agent past its check-in with nothing
+  // delivered gets its heartbeat invoked. The web service decides *who*; we
+  // only make the call and say we did.
+  for (const n of work.nudge ?? []) {
+    try {
+      await pc("POST", `/api/agents/${n.agent_id}/heartbeat/invoke`, { reason: "on_demand" });
+      observations.push({ task_id: n.task_id, nudged: true });
+      console.log(`[bridge] nudged agent ${n.agent_id} for task ${n.task_id}`);
+    } catch (e) {
+      observations.push({ task_id: n.task_id, error: `nudge: ${e.message}` });
+    }
+  }
   // Refresh the agent roster every few minutes so newly hired agents become
   // eligible for triage without rerunning bootstrap.
   let agents;
