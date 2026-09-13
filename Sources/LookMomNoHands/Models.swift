@@ -221,6 +221,13 @@ struct Clarification: Decodable, Sendable {
     let question: String
     let options: [String]
 
+    /// A question the app itself poses (a team prompt spoken at a good
+    /// moment), shown in the same panel as a planner clarification.
+    init(question: String, options: [String]) {
+        self.question = question
+        self.options = options
+    }
+
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         question = try c.decode(String.self, forKey: .question)

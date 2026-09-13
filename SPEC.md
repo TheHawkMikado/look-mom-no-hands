@@ -391,9 +391,20 @@ Resolved in v0.2: desktop shell (native Swift), phone (Expo), cloud stack
 (existing Postgres + Vercel cron), Paperclip location (local by default, VPS
 by URL change).
 
+Resolved in Phase 2 (DECISIONS.md 2026-09-13, "Diarization by on-device
+embeddings"): STT for streaming meetings is on-device Apple Speech, and
+diarization is done on the Mac by embedding each turn's audio with the
+bundled speaker model and matching it against enrolled voiceprints (or an
+online clusterer for unknown voices). Cloud streaming STT with diarization
+(Deepgram/AssemblyAI) stays an option behind the `stt` route if the Phase 2
+demo's attribution falls short of the §13 target; the transcript would then
+still be the only thing sent, and only for that call.
+
 Still open, decide before the phase that needs them:
-1. STT for streaming meetings with diarization: on-device vs Deepgram/
-   AssemblyAI streaming (Phase 2).
-2. Outbound calls: Vapi/Retell vs raw Twilio + realtime model (Phase 3).
+1. ~~STT for streaming meetings with diarization~~ — resolved above.
+2. Outbound calls: Vapi/Retell vs raw Twilio + realtime model (Phase 3) —
+   resolved: Vapi (DECISIONS.md).
 3. Phone offline subset and sync channel keying (Phase 1–2).
-4. Wearable partner: Plaud vs Limitless first (Phase 6).
+4. Wearable partner: Plaud vs Limitless first (Phase 6) — resolved:
+   Limitless first (it has a pull API); Plaud is a documented stub behind
+   the same `WearableSource` protocol (DECISIONS.md).

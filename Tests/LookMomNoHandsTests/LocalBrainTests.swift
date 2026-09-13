@@ -34,6 +34,20 @@ final class LocalBrainTests: XCTestCase {
         XCTAssertEqual(md, "# Sam\n\n## Notes\n\n")
     }
 
+    func testPersonMarkdownCarriesContactFactsAndParsesBack() {
+        let md = LocalBrain.personMarkdown(name: "Amari Jones", role: "Ops", org: "Funneltopia",
+                                           email: "amari@example.com", phone: "+1 555 0100", notes: "Fridays off.")
+        XCTAssertTrue(md.contains("- Email: amari@example.com\n"))
+        XCTAssertTrue(md.contains("- Phone: +1 555 0100\n"))
+        let p = LocalBrain.parsePerson(md, slug: "amari-jones")
+        XCTAssertEqual(p, BrainPerson(slug: "amari-jones", name: "Amari Jones", role: "Ops", org: "Funneltopia",
+                                      email: "amari@example.com", phone: "+1 555 0100", notes: "Fridays off."))
+        XCTAssertNil(LocalBrain.parsePerson("no heading here", slug: "x"))
+        // Old files without contact lines still parse.
+        let old = LocalBrain.personMarkdown(name: "Sam", role: "Editor", org: "", notes: "")
+        XCTAssertEqual(LocalBrain.parsePerson(old, slug: "sam")?.email, "")
+    }
+
     func testNotesSectionRoundTrips() {
         let md = LocalBrain.personMarkdown(name: "Sam", role: "Editor", org: "", notes: "One.\nTwo.")
         XCTAssertEqual(LocalBrain.notesSection(of: md), "One.\nTwo.")
@@ -106,6 +120,46 @@ final class LocalBrainTests: XCTestCase {
         // The index survives a relaunch.
         let reopened = LocalBrain(directory: b.directory.deletingLastPathComponent())
         XCTAssertEqual(reopened.listPeople().map(\.slug), ["ana-ruiz", "sam-lee"])
+        try? FileManager.default.removeItem(at: b.directory.deletingLastPathComponent())
+    }
+
+    @MainActor func testPersonLookupByFirstNameAndContactFieldsSurviveReintroduction() throws {
+        let b = brain()
+        b.upsertPerson(name: "Amari Jones", role: "Ops", email: "amari@example.com")
+        b.upsertPerson(name: "Alex", phone: "+1 555 0100")
+        XCTAssertEqual(b.person(named: "amari")?.name, "Amari Jones", "a first name finds the full record")
+        XCTAssertEqual(b.person(named: "Amari Jones")?.email, "amari@example.com")
+        XCTAssertEqual(b.person(named: "Alex")?.phone, "+1 555 0100")
+        XCTAssertNil(b.person(named: "Zed"))
+        XCTAssertNil(b.person(named: ""))
+        // "I'm Amari" at a later meeting must not wipe the email typed in last week.
+        b.upsertPerson(name: "Amari Jones", role: "Head of ops", notes: "Prefers email.")
+        let again = try XCTUnwrap(b.person(named: "Amari Jones"))
+        XCTAssertEqual(again.email, "amari@example.com")
+        XCTAssertEqual(again.role, "Head of ops")
+        XCTAssertEqual(again.notes, "Prefers email.")
+        try? FileManager.default.removeItem(at: b.directory.deletingLastPathComponent())
+    }
+
+    @MainActor func testVoiceprintsAndMeetingsLiveNextToPeople() throws {
+        let b = brain()
+        b.upsertPerson(name: "Alex")
+        XCTAssertFalse(b.hasVoiceprint(name: "Alex"))
+        b.addVoiceprint(name: "Alex", embedding: [3, 0, 0])
+        b.addVoiceprint(name: "Alex", embedding: [0, 4, 0])
+        XCTAssertTrue(b.hasVoiceprint(name: "Alex"))
+        let prints = b.voiceprints()
+        XCTAssertEqual(prints.keys.sorted(), ["Alex"])
+        XCTAssertEqual(prints["Alex"]?.embeddings, [[1, 0, 0], [0, 1, 0]], "stored normalised, in order")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: b.directory.appendingPathComponent("voiceprints/alex.json").path))
+        b.addVoiceprint(name: "Nobody Known", embedding: [1, 0, 0])
+        XCTAssertEqual(b.voiceprints().count, 1, "a voiceprint without a person file is not listed")
+
+        b.writeMeeting(basename: "2026-09-13-weekly-sync", markdown: "# Weekly sync\n\nShip Friday.\n", title: "Weekly sync")
+        let url = b.meetingURL(basename: "2026-09-13-weekly-sync")
+        XCTAssertEqual(try String(contentsOf: url, encoding: .utf8), "# Weekly sync\n\nShip Friday.\n")
+        XCTAssertEqual(b.search("ship friday").first?.kind, "meeting")
+        XCTAssertTrue(b.listPeople().map(\.title) == ["Alex"], "meetings are not people")
         try? FileManager.default.removeItem(at: b.directory.deletingLastPathComponent())
     }
 

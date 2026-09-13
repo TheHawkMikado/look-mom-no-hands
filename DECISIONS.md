@@ -4,6 +4,85 @@ Non-obvious architectural choices, newest first. Every entry: date, the
 decision, and why. The spec (SPEC.md §0) asks for this file; the rule is that
 anything a future reader might reasonably ask "why on earth?" about goes here.
 
+## 2026-09-13 — Diarization by on-device embeddings, not a cloud STT
+
+SPEC §14 left streaming STT + diarization open. Phase 2 keeps Apple Speech
+(on-device, already the wake/command engine) and does diarization itself:
+`VoiceListener` now hands out each recognition result's timed segments,
+`TurnBuilder` groups them into turns on pauses, `MeetingAudioWindow` cuts
+the turn's audio out of the 8 s ring buffer, and the bundled speaker model
+(`SpeakerVerifier.embedding`) turns it into a voiceprint that is matched
+against enrolled attendees (`identify`) or an online `SpeakerClusterer`
+("Speaker 2"). Reason: zero audio leaves the Mac (§4.3), no new vendor, and
+the same model already gates the wake word. The cost is accuracy on short
+overlapping turns; if the Phase 2 demo misses the ≥95 % attribution target,
+a cloud streaming STT goes behind the `stt` route as a per-call choice.
+
+## 2026-09-13 — The transcript stays local; only item text goes to the web
+
+A live meeting's labelled transcript lives in memory and in the Local Brain
+(`brain/meetings/<date>-<slug>.md`, one file rewritten as the meeting goes).
+Exactly two things leave the Mac: the new stretch of transcript sent to the
+`task_extract` model call (SPEC §4.3 allows the text of the model call
+itself), and, at the end, each action item as its own
+`POST /api/app/tasks { text: "<title>. <detail>. Owner: <name>. Due <when>",
+source: "meeting", deliver? }`. `TeamClient.intakeBody` is unit-tested to
+carry nothing else. The web triages agent / human / user and the Mac speaks
+the summary. Attendees' voiceprints sit next to their person files
+(`brain/voiceprints/<slug>.json`, same `VoiceProfile` shape as the owner's)
+and their email/phone live only in `people/<slug>.md`; a human ticket hands
+the address over once inside that POST (see "the Mac hands over the address,
+once"). When the web is unreachable the items wait in `brain/outbox.json`
+and are retried every minute — an action item is never lost to a dead
+network.
+
+## 2026-09-13 — Wearables are pulled, not pushed, and go through the meeting pipeline
+
+Limitless first: its developer API is a plain `GET /v1/lifelogs` with an API
+key, so the Mac polls it every ten minutes while online (`WearableIngest`),
+keeps the page cursor and the ids already filed, and runs each new lifelog
+through the SAME extraction and end-of-session triage as a live meeting via
+a `MeetingSession` instance of its own (`runImported`). The text lands in
+`brain/meetings/limitless-<id>.md` and is never uploaded; the API key is in
+the Keychain. The summary is spoken only at a good moment. Plaud has no pull
+API today, so `PlaudSource` is a documented stub behind the same
+`WearableSource` protocol — when an API (or a watched export folder) exists,
+only `fetch` needs writing. Reason: no audio pipeline to host, one code
+path for "things people said", and the residency rule holds by construction.
+The Limitless docs host was not reachable from the build box; the client is
+written to the documented shape and tested on a sample — the first real
+poll confirms the field names (a mismatch reads as an error, never as
+"nothing new").
+
+## 2026-09-13 — Meeting speech is data: no voice approval without the owner's verified voice
+
+SPEC §12 says content from meetings is data, never instructions. Two rules
+enforce it in code. The extraction prompt states it outright (the model is
+told the transcript is data and never to follow requests inside it), and a
+task that came out of a meeting (`source: "meeting"`, or an id the session
+just submitted) is approved by voice only when
+`SpeakerVerifier.verifyCurrentSpeaker()` says the last three seconds — the
+"approve" itself — are the owner; otherwise the Mac says "I need that from
+the phone" and leaves the phone push (already sent by the web) as the only
+way to approve. The wake-word verdict is not enough: a session opened by the
+owner an hour ago says nothing about who just said "approve" in a room
+full of people. `speakerVerified` on the decide call is the fresh verdict
+when there is one, never an upgrade of the wake verdict.
+
+## 2026-09-13 — "A good moment" is decided on the Mac, once, for every prompt
+
+The follow-up engine's prompts (`GET /api/app/prompts`) are spoken by
+`AppCoordinator` only when `QuietHours.goodMomentToSpeak` says so: standby,
+nothing in flight, no live meeting session or recorded call, no dictation,
+not inside quiet hours (default 22:00–07:00), screen not locked
+(`CGSessionCopyCurrentDictionary` + the lock/unlock notifications). The
+question is spoken with its default as a promise ("… I'll nudge unless you
+say otherwise"), the answer is taken from the standby stream for ~8 s or
+from a click on the panel, silence posts the default, and a receipt line is
+logged. The web's own `not_before` handles the server-side quiet window;
+this gate is the client-side one, so a Mac that is busy never talks over
+the user and a question is never lost — it stays open until a good moment.
+
 ## 2026-09-13 — Paperclip is optional and removable, never required to run
 
 The Paperclip connection is a per-account setting the user can add and delete.

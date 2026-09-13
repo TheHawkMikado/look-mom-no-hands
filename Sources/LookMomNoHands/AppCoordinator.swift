@@ -212,6 +212,25 @@ final class AppCoordinator: ObservableObject {
     let team = TeamClient()
     /// The most recent request handed to the team, for the panel.
     @Published private(set) var lastDelegatedTask: TeamTask?
+    /// The live meeting loop (SPEC.md §5.2): consent, introductions, diarized
+    /// transcript, extraction, end-of-session triage. One session at a time.
+    let meetingSession: MeetingSession
+    /// Action items the web could not take at the end of a meeting; retried
+    /// every minute until delivered (Phase 6 offline queueing).
+    let outbox: TaskOutbox
+    /// When the bot may speak on its own (SPEC.md §5.4 "a good moment").
+    let quietHours = QuietHours()
+    /// Limitless (and later Plaud) recordings, pulled and run through the
+    /// meeting pipeline.
+    let wearables = WearableIngest()
+    /// The last wearable recording imported, for the Meetings tab.
+    @Published private(set) var lastImportedRecording: String?
+    private var housekeepingTimer: Timer?
+    private var promptInFlight = false
+    private var outboxRetrying = false
+    /// The team prompt currently being asked by voice; its answer is captured
+    /// from the standby stream for ~8 s (or a click on the panel).
+    private var awaitingPrompt: TeamPrompt?
     /// Speaker verification (SPEC.md §5.1 step 2, PLAN-SPEAKER-VERIFICATION.md).
     /// Called right after a wake-word match and before the session opens:
     /// return false to ignore the wake. Nil = no verifier wired yet — every
@@ -308,6 +327,8 @@ final class AppCoordinator: ObservableObject {
         fleet = FleetService(peers: FleetPeerStore(directory: store.directory))
         knowledge = KnowledgeStore(directory: store.directory)
         brain = LocalBrain(directory: store.directory)
+        outbox = TaskOutbox(brainDirectory: brain.directory)
+        meetingSession = MeetingSession(brain: brain, outbox: outbox)
         insertRules = InsertRulesStore(directory: store.directory)
         learnedControls = ElementMemoryStore(directory: store.directory)
         appCapabilities = AppCapabilityStore(directory: store.directory)
@@ -391,6 +412,15 @@ final class AppCoordinator: ObservableObject {
             self.store.log("meeting", "recording failed: \(message)")
             Task { await self.endMeetingRecording(reason: "recording failed: \(message)") }
         }
+        // The meeting loop: the session gets the mic's timed segments only
+        // while it is active (the listener maps them only when asked), the
+        // model client, the team client, and the speaker embedder.
+        meetingSession.services = makeMeetingServices()
+        quietHours.start()
+        wearables.log = { [weak self] msg in self?.store.log("wearable", msg) }
+        wearables.onRecording = { [weak self] recording in await self?.ingestWearable(recording) }
+        wearables.start()
+        startHousekeeping()
         // Warm configured MCP servers off the command path — an npx cold-start
         // mid-task would eat the whole 20s parse budget.
         Task { await self.mcp.connectAll() }
@@ -918,6 +948,10 @@ final class AppCoordinator: ObservableObject {
     /// The user clicked an option in the on-screen clarification panel — treat it
     /// exactly as if they'd spoken it.
     func answerClarification(_ option: String) {
+        if awaitingPrompt != nil {
+            resolvePrompt(answer: option)
+            return
+        }
         guard isRunning, mode == .command, !processing else { return }
         // A clicked answer is authoritative — discard any buffered mic audio so
         // scribeAll can't re-transcribe ambient noise over the user's choice.
@@ -926,6 +960,10 @@ final class AppCoordinator: ObservableObject {
     }
 
     func dismissClarification() {
+        if awaitingPrompt != nil {
+            resolvePrompt(answer: "")   // dismissed = the default
+            return
+        }
         pendingClarification = nil
         dialogue = []
         if mode == .command, !processing { phase = .capturingCommand }
@@ -1727,8 +1765,23 @@ final class AppCoordinator: ObservableObject {
             await speak("Nothing is waiting for your approval.", gen: gen)
             return "decide: nothing pending"
         }
-        let ok = await team.decide(taskID: task.id, verdict: verdict, speakerVerified: lastWakeVerified)
-        store.log("team", "\(verdict) \"\(task.title)\" by voice (speaker \(lastWakeVerified ? "verified" : "unverified")) → \(ok ? "ok" : "failed")")
+        // SPEC.md §12: what other people said in a meeting is data, never an
+        // instruction — an item born in a meeting session is approved by voice
+        // only on the owner's voice verified RIGHT NOW (the last three seconds,
+        // i.e. the "approve" itself), whatever the wake gate said earlier. A
+        // failed or impossible check defers to the phone push, which the web
+        // already sent. `speakerVerified` on the wire is the fresh verdict when
+        // there is one, the wake verdict otherwise — never an upgrade.
+        let verifiedNow: Bool? = await Task.detached { SpeakerVerifier.shared.verifyCurrentSpeaker() }.value
+        let speakerVerified = verifiedNow ?? lastWakeVerified
+        let meetingBorn = task.source == "meeting" || meetingSession.submittedTaskIDs.contains(task.id)
+        if allow, meetingBorn, task.blastTier != 1, verifiedNow != true {
+            store.log("team", "\"\(task.title)\" came from a meeting — voice approval needs the owner's verified voice (\(verifiedNow == nil ? "couldn't verify" : "not verified")); leaving it to the phone")
+            await speak("I need that from the phone.", gen: gen)
+            return "decide: \(task.title) needs a phone approval (meeting-born, voice not verified)"
+        }
+        let ok = await team.decide(taskID: task.id, verdict: verdict, speakerVerified: speakerVerified)
+        store.log("team", "\(verdict) \"\(task.title)\" by voice (speaker \(speakerVerified ? "verified" : "unverified")) → \(ok ? "ok" : "failed")")
         if ok {
             lastDelegatedTask = TeamTask(id: task.id, title: task.title, status: allow ? "approved" : "denied",
                                          ownerName: task.ownerName, confirmation: task.confirmation)
@@ -1744,6 +1797,9 @@ final class AppCoordinator: ObservableObject {
     /// "approve" reads as a decide step, not a click).
     private var teamPromptText: String {
         var lines: [String] = []
+        if meetingSession.isActive {
+            lines.append("A live meeting session is running (“\(meetingSession.title)”, \(meetingSession.turns.count) turns so far). “End the meeting session” / “stop taking notes” = a decide-free spoken request; the user ends it from the dashboard or by saying so.")
+        }
         if let t = lastDelegatedTask {
             lines.append("Last request handed to the team: “\(t.title)” (\(t.status.replacingOccurrences(of: "_", with: " "))).")
         }
@@ -1752,6 +1808,202 @@ final class AppCoordinator: ObservableObject {
             lines.append("Waiting for the user's approval right now: \(waiting.map(\.name).joined(separator: ", ")) — “approve” / “deny” is a decide step.")
         }
         return lines.joined(separator: "\n")
+    }
+
+    // MARK: Meeting session (SPEC §5.2), prompts (§5.4), outbox, wearables
+
+    /// The session's view of the app: the coordinator's speaker (so TTS mutes
+    /// recognition the same way), the log, the routed model call, the team
+    /// intake, the mic ring buffer and the speaker embedder.
+    private func makeMeetingServices() -> MeetingSession.Services {
+        var s = MeetingSession.Services()
+        s.speak = { [weak self] text in
+            guard let self else { return }
+            await self.speak(text, gen: self.runGeneration)
+        }
+        s.log = { [weak self] msg in self?.store.log("meeting", msg) }
+        s.extract = { [weak self] text, names in
+            guard let claude = self?.claude else { throw ClaudeError.decoding("no API key") }
+            return try await claude.extractMeetingItems(text, attendees: names)
+        }
+        s.submit = { [weak self] text, deliver in
+            await self?.team.submitMeetingItem(text: text, deliver: deliver)
+        }
+        s.recentAudio = { [weak self] seconds in self?.listener.recentAudio(seconds: seconds) ?? [] }
+        s.embed = { samples in try SpeakerVerifier.shared.embedding(for: samples) }
+        s.ownerProfile = { SpeakerVerifier.shared.usableProfile }
+        s.threshold = { SpeakerVerifier.shared.threshold }
+        return s
+    }
+
+    /// Dashboard "Start session": consent line, then the ritual. The mic is
+    /// already on (always-listening); the listener starts timing segments
+    /// only now. Recorded calls (join_meeting) are independent — a session
+    /// can run over one or over a room.
+    func startMeetingSession(title: String) {
+        guard isRunning, !meetingSession.isActive else { return }
+        SpeakerVerifier.shared.prepare()   // the embedder, warm before the first turn
+        listener.onSegments = { [weak self] id, startedAt, segments, isFinal in
+            guard let self, !self.speaking, self.meetingSession.isActive else { return }
+            self.meetingSession.ingest(requestID: id, startedAt: startedAt, segments: segments, isFinal: isFinal)
+        }
+        let name = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        events.report(kind: .goalStarted, title: "Meeting session", detail: name.isEmpty ? "meeting" : name)
+        Task {
+            await meetingSession.start(title: name.isEmpty ? (meetingRecording?.title ?? "Meeting") : name)
+            if !meetingSession.isActive { listener.onSegments = nil }   // cancelled during consent
+        }
+    }
+
+    func endMeetingSession() {
+        guard meetingSession.isActive else { return }
+        Task {
+            await meetingSession.end()
+            listener.onSegments = nil
+            let summary = meetingSession.summary
+            store.addTranscript(TranscriptRecord(kind: "command", transcript: "Meeting session: \(meetingSession.title)",
+                                                 outcome: summary))
+            events.report(kind: .goalDone, title: "Meeting session", detail: summary)
+            await retryOutbox()
+        }
+    }
+
+    func cancelMeetingSession() {
+        guard meetingSession.isActive else { return }
+        meetingSession.cancel()
+        listener.onSegments = nil
+        events.report(kind: .goalFailed, title: "Meeting session", detail: "cancelled")
+    }
+
+    /// Every minute: prompts the bot wants to ask (when it's a good moment),
+    /// and the outbox retry. One timer so a sleeping Mac wakes to one tick.
+    private func startHousekeeping() {
+        let t = Timer(timeInterval: 60, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                await self.retryOutbox()
+                await self.pollPrompts()
+            }
+        }
+        t.tolerance = 10
+        RunLoop.main.add(t, forMode: .common)
+        housekeepingTimer = t
+    }
+
+    /// Standby, nothing in flight, nothing on screen — the only state in
+    /// which the bot may start talking by itself.
+    private var isIdleForPrompts: Bool {
+        isRunning && mode == .standby && !processing && !speaking
+            && pendingClarification == nil && awaitingPrompt == nil && phase == .listeningWake
+    }
+
+    private var goodMomentToSpeak: Bool {
+        quietHours.goodMomentToSpeak(idle: isIdleForPrompts,
+                                     inMeeting: meetingSession.isActive || meetingRecording != nil,
+                                     recording: liveActive || phase == .recording)
+    }
+
+    /// `GET /api/app/prompts` → speak the oldest one with its default, listen
+    /// for the answer, post it back (SPEC.md §5.4: the bot initiates, the
+    /// human answers). Not a good moment → nothing is fetched; the web keeps
+    /// the question until it is.
+    private func pollPrompts() async {
+        guard !promptInFlight, goodMomentToSpeak else { return }
+        promptInFlight = true
+        defer { promptInFlight = false }
+        guard let prompts = await team.prompts(), let first = prompts.first else { return }
+        // The network hop took time — re-check before opening our mouth. A
+        // prompt marked spoken but never asked is still open server-side.
+        guard goodMomentToSpeak else {
+            store.log("prompt", "\(prompts.count) waiting — not a good moment (\(quietHours.reasonNotToSpeak(idle: isIdleForPrompts, inMeeting: meetingSession.isActive || meetingRecording != nil, recording: liveActive) ?? "busy"))")
+            return
+        }
+        await askPrompt(first)
+    }
+
+    /// Speaks one prompt and captures the answer: a spoken reply from the
+    /// standby stream (a 1.2 s pause ends it), a click on the panel, or ~8 s
+    /// of silence, which means the default.
+    private func askPrompt(_ p: TeamPrompt) async {
+        let gen = runGeneration
+        let spoken = TeamClient.spokenPrompt(p)
+        store.log("prompt", "\(p.kind): \(spoken)")
+        var options: [String] = []
+        if !p.defaultAnswer.isEmpty { options.append(p.defaultAnswer) }
+        if p.kind == "daily_brief" { options.append("Thanks") } else { options += ["Handle it myself", "Done", "Drop it"] }
+        awaitingPrompt = p
+        pendingClarification = Clarification(question: p.question, options: options)
+        phase = .clarifying
+        await speak(spoken, gen: gen)
+        let deadline = Date().addingTimeInterval(8)
+        while awaitingPrompt?.id == p.id, gen == runGeneration, Date() < deadline {
+            try? await Task.sleep(nanoseconds: 250_000_000)
+            if !utterance.isEmpty, Date().timeIntervalSince(lastHeardAt) > 1.2 { break }
+        }
+        guard awaitingPrompt?.id == p.id else { return }   // answered from the panel meanwhile
+        resolvePrompt(answer: gen == runGeneration ? utterance : "")
+    }
+
+    /// Posts the answer (empty = the default), clears the panel, logs a
+    /// receipt line, and acknowledges out loud.
+    private func resolvePrompt(answer: String) {
+        guard let p = awaitingPrompt else { return }
+        awaitingPrompt = nil
+        pendingClarification = nil
+        if phase == .clarifying { phase = mode == .standby ? .listeningWake : .capturingCommand }
+        let heard = Self.strippingPhrases(Self.wakePhrases, from: answer)
+        freshUtterance()
+        let gen = runGeneration
+        Task {
+            let ok = await team.answerPrompt(id: p.id, answer: heard)
+            let shown = heard.isEmpty ? "(silence → default: \(p.defaultAnswer.isEmpty ? "none" : p.defaultAnswer))" : "“\(heard)”"
+            store.log("prompt", "receipt: \(p.kind) \(p.id) answered \(shown) → \(ok ? "ok" : "failed")")
+            if p.kind != "daily_brief", isRunning {
+                await speak(heard.isEmpty ? "Okay." : "Got it.", gen: gen)
+            }
+        }
+    }
+
+    /// Items the web couldn't take at the end of a meeting. Retried every
+    /// minute; removed only after a 2xx. After three failures the address
+    /// hand-off is dropped so a rejected `deliver` block can't pin the item
+    /// forever — the web then asks the owner for the address later.
+    private func retryOutbox() async {
+        guard !outbox.isEmpty, !outboxRetrying else { return }
+        outboxRetrying = true
+        defer { outboxRetrying = false }
+        for entry in outbox.entries {
+            let deliver = entry.attempts >= 3 ? nil : entry.delivery
+            if let reply = await team.submitMeetingItem(text: entry.text, deliver: deliver) {
+                outbox.remove(id: entry.id)
+                store.log("outbox", "delivered after \(entry.attempts + 1) attempt(s): \(TeamClient.receiptLine(reply))")
+            } else {
+                outbox.recordAttempt(id: entry.id)
+                store.log("outbox", "team unreachable — \(outbox.entries.count) item(s) waiting; next try in a minute")
+                return
+            }
+        }
+    }
+
+    /// A wearable recording through the same pipeline as a live meeting: its
+    /// own MeetingSession instance (the live one may be running), extraction,
+    /// triage, `meetings/<source>-<id>.md`. The summary is spoken only at a
+    /// good moment; otherwise it waits in the log and the Meetings tab.
+    private func ingestWearable(_ r: WearableRecording) async {
+        guard claude != nil else {
+            store.log("wearable", "skipped \(r.id) — no API key to extract with")
+            return
+        }
+        let session = MeetingSession(brain: brain, outbox: outbox, services: makeMeetingServices())
+        let summary = await session.runImported(source: "limitless", id: r.id, title: r.title, text: r.text, startedAt: r.startedAt)
+        lastImportedRecording = "\(r.title): \(summary)"
+        store.addTranscript(TranscriptRecord(kind: "command", transcript: "Limitless recording: \(r.title)", outcome: summary))
+        if goodMomentToSpeak {
+            await speak("From your Limitless recording, \(r.title). \(summary)", gen: runGeneration)
+        } else {
+            store.log("wearable", "\(r.title): \(summary)")
+        }
+        await retryOutbox()
     }
 
     // MARK: Watch-me demonstration

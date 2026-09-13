@@ -16,15 +16,31 @@ struct BrainSearchHit: Equatable {
     let snippet: String
 }
 
+/// One person as `people/<slug>.md` describes them. Email and phone are the
+/// one-time hand-off for human tickets (DECISIONS.md: the Mac hands over the
+/// address, once) — they never leave the Mac except inside that one POST.
+struct BrainPerson: Equatable, Sendable {
+    var slug: String
+    var name: String
+    var role: String = ""
+    var org: String = ""
+    var email: String = ""
+    var phone: String = ""
+    var notes: String = ""
+}
+
 /// The Local Brain (SPEC.md §8.1): the private, on-device memory — people,
 /// preferences, areas of work, and an inbox of notes and decisions the intake
 /// says stay local. Plain Markdown the user can open in any editor, under
 /// `~/Library/Application Support/LookMaNoHands/brain/`:
 ///
-///     people/<slug>.md      one person: role, org, notes
+///     people/<slug>.md      one person: role, org, email, phone, notes
+///     voiceprints/<slug>.json  that person's voiceprint (VoiceProfile), if enrolled
 ///     areas/<slug>.md       one area of work
+///     meetings/<date>-<slug>.md  a meeting: labelled transcript, items, outcomes
 ///     preferences.md        how the user likes things done
 ///     inbox.md              dated notes and decisions, newest at the bottom
+///     outbox.json           action items waiting for the web (TaskOutbox)
 ///     index.json            slug → {title, updated, kind}
 ///
 /// Additive for now — nothing migrates out of the knowledge, vocabulary or
@@ -45,6 +61,8 @@ final class LocalBrain: ObservableObject {
         let fm = FileManager.default
         try? fm.createDirectory(at: self.directory.appendingPathComponent("people"), withIntermediateDirectories: true)
         try? fm.createDirectory(at: self.directory.appendingPathComponent("areas"), withIntermediateDirectories: true)
+        try? fm.createDirectory(at: self.directory.appendingPathComponent("voiceprints"), withIntermediateDirectories: true)
+        try? fm.createDirectory(at: self.directory.appendingPathComponent("meetings"), withIntermediateDirectories: true)
         if let data = try? Data(contentsOf: indexURL), let loaded = Self.decodeIndex(data) {
             index = loaded
         }
@@ -58,17 +76,29 @@ final class LocalBrain: ObservableObject {
 
     /// Creates or rewrites `people/<slug>.md`. An existing file's notes are
     /// kept and the new notes appended, so re-introducing someone adds to what
-    /// is known instead of replacing it.
-    func upsertPerson(name: String, role: String = "", org: String = "", notes: String = "") {
+    /// is known instead of replacing it. Empty role/org/email/phone keep what
+    /// the file already says — a bare "I'm Alex" at a meeting must not wipe
+    /// the email that was typed in last week.
+    func upsertPerson(name: String, role: String = "", org: String = "", email: String = "",
+                      phone: String = "", notes: String = "") {
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
         let slug = Self.slug(trimmed)
         let url = directory.appendingPathComponent("people").appendingPathComponent("\(slug).md")
         let existing = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
+        let previous = Self.parsePerson(existing, slug: slug)
         let previousNotes = Self.notesSection(of: existing)
         let mergedNotes = [previousNotes, notes.trimmingCharacters(in: .whitespacesAndNewlines)]
             .filter { !$0.isEmpty }.joined(separator: "\n")
-        let markdown = Self.personMarkdown(name: trimmed, role: role, org: org, notes: mergedNotes)
+        func pick(_ new: String, _ old: String) -> String {
+            let n = new.trimmingCharacters(in: .whitespacesAndNewlines)
+            return n.isEmpty ? old : n
+        }
+        let markdown = Self.personMarkdown(name: trimmed, role: pick(role, previous?.role ?? ""),
+                                           org: pick(org, previous?.org ?? ""),
+                                           email: pick(email, previous?.email ?? ""),
+                                           phone: pick(phone, previous?.phone ?? ""),
+                                           notes: mergedNotes)
         write(markdown, to: url)
         index[slug] = IndexEntry(title: trimmed, updated: Date(), kind: "person")
         persistIndex()
@@ -79,6 +109,78 @@ final class LocalBrain: ObservableObject {
         index.filter { $0.value.kind == "person" }
             .map { (slug: $0.key, title: $0.value.title) }
             .sorted { $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending }
+    }
+
+    /// The person whose file matches `name` (by slug, then by first name when
+    /// the slug is a single word — "Amari" finds amari-jones). Nil when unknown.
+    func person(named name: String) -> BrainPerson? {
+        let wanted = Self.slug(name)
+        guard wanted != "untitled" else { return nil }
+        let people = listPeople()
+        let slug: String
+        if people.contains(where: { $0.slug == wanted }) {
+            slug = wanted
+        } else if !wanted.contains("-"),
+                  let hit = people.first(where: { $0.slug == wanted || $0.slug.hasPrefix(wanted + "-") }) {
+            slug = hit.slug
+        } else {
+            return nil
+        }
+        let url = directory.appendingPathComponent("people").appendingPathComponent("\(slug).md")
+        guard let md = try? String(contentsOf: url, encoding: .utf8) else { return nil }
+        return Self.parsePerson(md, slug: slug)
+    }
+
+    // MARK: - Voiceprints (per person, local only)
+
+    private func voiceprintURL(slug: String) -> URL {
+        directory.appendingPathComponent("voiceprints").appendingPathComponent("\(slug).json")
+    }
+
+    /// Stores (or extends) a person's voiceprint next to their file. Same
+    /// VoiceProfile shape as the owner's, so `SpeakerVerifier.identify` reads
+    /// them all alike; a profile from an older model is replaced, not merged.
+    func addVoiceprint(name: String, embedding: [Float]) {
+        let slug = Self.slug(name)
+        guard slug != "untitled" else { return }
+        var embeddings: [[Float]] = []
+        if let existing = SpeakerVerifier.loadProfile(from: voiceprintURL(slug: slug)), existing.isCompatible {
+            embeddings = existing.embeddings
+        }
+        embeddings.append(SpeakerVerifier.normalized(embedding))
+        if embeddings.count > 8 { embeddings.removeFirst(embeddings.count - 8) }
+        guard let data = try? SpeakerVerifier.encode(VoiceProfile(embeddings: embeddings)) else { return }
+        try? data.write(to: voiceprintURL(slug: slug), options: .atomic)
+    }
+
+    /// Every usable voiceprint, keyed by the person's display name.
+    func voiceprints() -> [String: VoiceProfile] {
+        var out: [String: VoiceProfile] = [:]
+        for p in listPeople() {
+            if let profile = SpeakerVerifier.loadProfile(from: voiceprintURL(slug: p.slug)), profile.isCompatible {
+                out[p.title] = profile
+            }
+        }
+        return out
+    }
+
+    func hasVoiceprint(name: String) -> Bool {
+        SpeakerVerifier.loadProfile(from: voiceprintURL(slug: Self.slug(name)))?.isCompatible == true
+    }
+
+    // MARK: - Meetings (transcripts stay here, SPEC.md §4.3)
+
+    /// Writes `meetings/<basename>.md` wholesale. Called on every change during
+    /// a live session, so the file always holds the latest state.
+    func writeMeeting(basename: String, markdown: String, title: String) {
+        let url = directory.appendingPathComponent("meetings").appendingPathComponent("\(basename).md")
+        write(markdown, to: url)
+        index["meetings/\(basename)"] = IndexEntry(title: title, updated: Date(), kind: "meeting")
+        persistIndex()
+    }
+
+    func meetingURL(basename: String) -> URL {
+        directory.appendingPathComponent("meetings").appendingPathComponent("\(basename).md")
     }
 
     // MARK: - Notes, decisions, preferences
@@ -139,6 +241,7 @@ final class LocalBrain: ObservableObject {
         switch kind {
         case "person": return directory.appendingPathComponent("people").appendingPathComponent("\(slug).md")
         case "area": return directory.appendingPathComponent("areas").appendingPathComponent("\(slug).md")
+        case "meeting": return directory.appendingPathComponent("\(slug).md")   // slug carries "meetings/"
         case "preferences": return preferencesURL
         default: return inboxURL
         }
@@ -166,17 +269,45 @@ final class LocalBrain: ObservableObject {
     }
 
     /// `people/<slug>.md` — no frontmatter, just a heading, the facts, notes.
-    nonisolated static func personMarkdown(name: String, role: String, org: String, notes: String) -> String {
+    nonisolated static func personMarkdown(name: String, role: String, org: String,
+                                           email: String = "", phone: String = "", notes: String) -> String {
         var s = "# \(name)\n\n"
-        let role = role.trimmingCharacters(in: .whitespacesAndNewlines)
-        let org = org.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !role.isEmpty { s += "- Role: \(role)\n" }
-        if !org.isEmpty { s += "- Org: \(org)\n" }
-        if !role.isEmpty || !org.isEmpty { s += "\n" }
+        let facts: [(String, String)] = [("Role", role), ("Org", org), ("Email", email), ("Phone", phone)]
+            .map { ($0.0, $0.1.trimmingCharacters(in: .whitespacesAndNewlines)) }
+            .filter { !$0.1.isEmpty }
+        for (k, v) in facts { s += "- \(k): \(v)\n" }
+        if !facts.isEmpty { s += "\n" }
         s += "## Notes\n\n"
         let notes = notes.trimmingCharacters(in: .whitespacesAndNewlines)
         if !notes.isEmpty { s += notes + "\n" }
         return s
+    }
+
+    /// Reads a person file back: heading → name, `- Key: value` facts, notes.
+    /// Nil when there is no heading (an empty or foreign file).
+    nonisolated static func parsePerson(_ markdown: String, slug: String) -> BrainPerson? {
+        var person = BrainPerson(slug: slug, name: "")
+        for rawLine in markdown.split(whereSeparator: \.isNewline) {
+            let line = rawLine.trimmingCharacters(in: .whitespaces)
+            if line.hasPrefix("# "), person.name.isEmpty {
+                person.name = String(line.dropFirst(2)).trimmingCharacters(in: .whitespaces)
+            } else if line.hasPrefix("## ") {
+                break   // facts end at the first section heading
+            } else if line.hasPrefix("- "), let colon = line.firstIndex(of: ":") {
+                let key = line[line.index(line.startIndex, offsetBy: 2)..<colon].trimmingCharacters(in: .whitespaces).lowercased()
+                let value = line[line.index(after: colon)...].trimmingCharacters(in: .whitespaces)
+                switch key {
+                case "role": person.role = value
+                case "org": person.org = value
+                case "email": person.email = value
+                case "phone": person.phone = value
+                default: break
+                }
+            }
+        }
+        guard !person.name.isEmpty else { return nil }
+        person.notes = notesSection(of: markdown)
+        return person
     }
 
     nonisolated static func areaMarkdown(name: String, notes: String) -> String {

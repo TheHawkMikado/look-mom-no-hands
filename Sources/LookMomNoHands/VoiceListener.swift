@@ -12,6 +12,16 @@ struct AudioInputDevice: Identifiable, Hashable {
     let name: String
 }
 
+/// One word (or short run of words) as Apple Speech timed it: `timestamp` and
+/// `duration` are seconds relative to the START of the recognition request
+/// that produced it. The meeting loop turns these into speaker-labelled turns
+/// by cutting the matching audio out of the ring buffer (MeetingSession).
+struct SpeechSegment: Equatable, Sendable {
+    let text: String
+    let timestamp: TimeInterval
+    let duration: TimeInterval
+}
+
 /// Single always-on speech pipeline. The audio engine + mic tap run continuously;
 /// only the recognition request is cycled (on utterance boundaries, on errors, and
 /// at Apple's ~1-minute per-request limit). Cycling the request instead of the
@@ -34,6 +44,12 @@ final class VoiceListener {
 
     /// Main queue; the text of the current utterance so far (grows as you speak).
     var onPartial: ((String) -> Void)?
+    /// Main queue; every result's timed segments for the CURRENT recognition
+    /// request, plus the request's id and the wall-clock time it began (so a
+    /// segment's absolute time is `startedAt + timestamp`). Requests cycle on
+    /// pauses and at Apple's cap, so ids change often; consumers key on them.
+    /// Nil until the meeting loop asks — standby pays nothing for it.
+    var onSegments: ((_ requestID: Int, _ startedAt: Date, _ segments: [SpeechSegment], _ isFinal: Bool) -> Void)?
     /// Main queue; diagnostics for the activity log.
     var onInfo: ((String) -> Void)?
     /// Phrases the recognizer is biased toward (wake/stop words). Set before start().
@@ -455,6 +471,7 @@ final class VoiceListener {
     private func beginRequest() {
         generation += 1
         let gen = generation
+        let startedAt = Date()
         lastPartial = ""
         task?.cancel(); task = nil
 
@@ -470,6 +487,12 @@ final class VoiceListener {
             let text = result?.bestTranscription.formattedString
             let isFinal = result?.isFinal ?? false
             let failed = error != nil
+            // Timed segments only when someone is listening for them (the
+            // meeting loop) — mapping them on every partial in standby is waste.
+            let segments: [SpeechSegment]? = self?.onSegments == nil ? nil :
+                result?.bestTranscription.segments.map {
+                    SpeechSegment(text: $0.substring, timestamp: $0.timestamp, duration: $0.duration)
+                }
             DispatchQueue.main.async { [weak self] in
                 // Guard first: a superseded request (its generation bumped by a
                 // newer beginRequest) does nothing — no partial, no restart, and
@@ -480,6 +503,9 @@ final class VoiceListener {
                     self.restartDelay = 0.1
                     self.lastPartial = text
                     self.onPartial?(self.committed + text)
+                }
+                if let segments, !segments.isEmpty || isFinal {
+                    self.onSegments?(gen, startedAt, segments, isFinal)
                 }
 
                 // A request ends on error or when the recognizer finalizes (a pause

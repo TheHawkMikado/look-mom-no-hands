@@ -5,13 +5,14 @@ import AppKit
 /// bar is ALWAYS visible on every tab — no child view (NavigationSplitView,
 /// toolbars) can hide or replace it.
 enum DashTab: String, CaseIterable {
-    case memory, live, transcripts, vocabulary, profiles, procedures, agents, paste, activity, settings
+    case memory, live, meetings, transcripts, vocabulary, profiles, procedures, agents, paste, activity, settings
 
     var title: String { rawValue.capitalized }
     var icon: String {
         switch self {
         case .memory: return "brain"
         case .live: return "waveform"
+        case .meetings: return "person.3"
         case .transcripts: return "text.book.closed"
         case .vocabulary: return "character.book.closed"
         case .profiles: return "slider.horizontal.3"
@@ -76,6 +77,9 @@ struct DashboardView: View {
             MemoryTab(coordinator: coordinator, environment: coordinator.environment, knowledge: coordinator.knowledge, learned: coordinator.learnedControls, appCaps: coordinator.appCapabilities)
         case .live:
             LiveTab(coordinator: coordinator)
+        case .meetings:
+            MeetingsTab(coordinator: coordinator, session: coordinator.meetingSession,
+                        outbox: coordinator.outbox, wearables: coordinator.wearables)
         case .transcripts:
             TranscriptsTab(store: coordinator.store)
         case .vocabulary:
@@ -95,7 +99,9 @@ struct DashboardView: View {
             SettingsTab(coordinator: coordinator,
                         calendar: coordinator.calendarMeetings,
                         exporter: coordinator.notesExporter,
-                        updates: updates)
+                        updates: updates,
+                        quietHours: coordinator.quietHours,
+                        wearables: coordinator.wearables)
         }
     }
 }
@@ -354,6 +360,183 @@ private struct LiveTab: View {
         let q = question.trimmingCharacters(in: .whitespaces)
         guard !q.isEmpty else { return }
         coordinator.askLiveTranscript(q)
+    }
+}
+
+/// The live meeting loop (SPEC.md §5.2): start a session (consent line →
+/// introductions), watch the speaker-labelled transcript and the extracted
+/// items fill in, end it to triage and hear the summary. Everything on this
+/// tab is Local Brain content; only each action item's text goes to the web.
+private struct MeetingsTab: View {
+    @ObservedObject var coordinator: AppCoordinator
+    @ObservedObject var session: MeetingSession
+    @ObservedObject var outbox: TaskOutbox
+    @ObservedObject var wearables: WearableIngest
+    @State private var title = ""
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 10) {
+                if session.isActive {
+                    Button(role: .destructive) { coordinator.cancelMeetingSession() } label: {
+                        Label("Cancel", systemImage: "xmark.circle")
+                    }
+                    .disabled(session.state == .wrappingUp)
+                    Button { coordinator.endMeetingSession() } label: {
+                        Label("End session", systemImage: "stop.circle.fill")
+                    }
+                    .disabled(session.state == .wrappingUp || session.state == .consent)
+                    Label(stateLabel, systemImage: session.state == .wrappingUp ? "hourglass" : "waveform")
+                        .foregroundStyle(.red).font(.callout)
+                } else {
+                    TextField("Meeting title (optional)", text: $title)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(maxWidth: 260)
+                    Button { coordinator.startMeetingSession(title: title) } label: {
+                        Label("Start session", systemImage: "record.circle")
+                    }
+                    .disabled(!coordinator.hasKey || !coordinator.isRunning)
+                }
+                Spacer()
+                if session.extracting { ProgressView().controlSize(.small) }
+            }
+            Text(session.status.isEmpty
+                 ? "Say “Start session” here at the top of a meeting. It speaks the consent line, then everyone introduces themselves (“I'm Hawk, here with Alex and Amari”, then each person: name, role, one line) so it learns who's who. Returning attendees are recognised by voice."
+                 : session.status)
+                .font(.caption).foregroundStyle(.secondary)
+            if !coordinator.hasKey {
+                Text("Add an Anthropic key to extract action items.").font(.caption).foregroundStyle(.orange)
+            }
+            if !session.attendees.isEmpty {
+                Text("Attendees: " + session.attendees.joined(separator: ", "))
+                    .font(.caption)
+            }
+
+            ScrollViewReader { proxy in
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 6) {
+                        if session.turns.isEmpty {
+                            Text(session.isActive ? "Listening…" : "No transcript yet.")
+                                .foregroundStyle(.secondary)
+                        }
+                        ForEach(Array(session.turns.enumerated()), id: \.offset) { i, turn in
+                            HStack(alignment: .top, spacing: 6) {
+                                Text(MeetingMarkdown.clock(turn.start))
+                                    .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+                                Text(turn.speaker).font(.callout.bold())
+                                    .foregroundStyle(turn.speaker.hasPrefix("Speaker") ? .secondary : .primary)
+                                Text(turn.text).font(.callout).textSelection(.enabled)
+                            }
+                            .id(i)
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(8)
+                }
+                .background(Color(nsColor: .textBackgroundColor))
+                .clipShape(RoundedRectangle(cornerRadius: 6))
+                .frame(minHeight: 160)
+                .onChange(of: session.turns.count) { _, n in
+                    if n > 0 { proxy.scrollTo(n - 1, anchor: .bottom) }
+                }
+            }
+
+            if !session.actionItems.isEmpty || !session.decisions.isEmpty || !session.openQuestions.isEmpty {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 8) {
+                        if !session.actionItems.isEmpty {
+                            Text("Action items").font(.headline)
+                            ForEach(Array(session.actionItems.enumerated()), id: \.offset) { _, item in
+                                HStack(alignment: .top, spacing: 6) {
+                                    Image(systemName: "checkmark.square").foregroundStyle(.secondary)
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(item.title).font(.callout)
+                                        Text(itemMeta(item)).font(.caption).foregroundStyle(.secondary)
+                                    }
+                                }
+                            }
+                        }
+                        if !session.decisions.isEmpty {
+                            Text("Decisions").font(.headline)
+                            ForEach(session.decisions, id: \.self) { Text("• " + $0).font(.callout) }
+                        }
+                        if !session.openQuestions.isEmpty {
+                            Text("Open questions").font(.headline)
+                            ForEach(session.openQuestions, id: \.self) { Text("• " + $0).font(.callout) }
+                        }
+                        if !session.commitments.isEmpty {
+                            Text("Commitments").font(.headline)
+                            ForEach(session.commitments, id: \.self) { Text("• " + $0).font(.callout) }
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(8)
+                }
+                .frame(maxHeight: 220)
+            }
+
+            if !session.summary.isEmpty {
+                Text(session.summary)
+                    .font(.callout).textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(8)
+                    .background(Color(nsColor: .controlBackgroundColor))
+                    .clipShape(RoundedRectangle(cornerRadius: 6))
+            }
+
+            HStack(spacing: 12) {
+                if !outbox.isEmpty {
+                    Label("\(outbox.entries.count) action item\(outbox.entries.count == 1 ? "" : "s") waiting for the team (retrying every minute)",
+                          systemImage: "tray.and.arrow.up")
+                        .font(.caption).foregroundStyle(.orange)
+                }
+                if let imported = coordinator.lastImportedRecording {
+                    Label(imported, systemImage: "waveform.badge.mic")
+                        .font(.caption).foregroundStyle(.secondary).lineLimit(2)
+                }
+                Spacer()
+                if let url = session.markdownURL, session.state == .ended || session.isActive {
+                    Button { NSWorkspace.shared.open(url) } label: { Label("Open transcript", systemImage: "doc.text") }
+                }
+                Button {
+                    NSWorkspace.shared.open(session.brain.directory.appendingPathComponent("meetings", isDirectory: true))
+                } label: { Label("All meetings", systemImage: "folder") }
+            }
+            HStack(spacing: 8) {
+                Text("Your name in transcripts").font(.caption).foregroundStyle(.secondary)
+                TextField("Picked up from “I'm …”", text: $session.ownerName)
+                    .textFieldStyle(.roundedBorder).frame(maxWidth: 200)
+                Spacer()
+                if wearables.limitlessEnabled {
+                    Text(wearables.lastStatus.isEmpty ? "Limitless: waiting for the first poll" : wearables.lastStatus)
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            }
+        }
+        .padding()
+    }
+
+    private var stateLabel: String {
+        switch session.state {
+        case .consent: return "Asking for consent…"
+        case .introductions: return "Introductions…"
+        case .live: return "Live"
+        case .wrappingUp: return "Wrapping up…"
+        case .idle, .ended: return ""
+        }
+    }
+
+    private func itemMeta(_ item: MeetingActionItem) -> String {
+        var parts: [String] = []
+        if let o = item.ownerName { parts.append(o) }
+        if let d = item.duePhrase { parts.append("due \(d)") }
+        parts.append("tier \(item.blastTier)")
+        if let outcome = session.outcomes.first(where: { $0.item == item }) {
+            var went = "→ \(outcome.ownerKind)"
+            if let n = outcome.ownerName, outcome.ownerKind != "queued" { went += " (\(n))" }
+            parts.append(went)
+        }
+        return parts.joined(separator: " · ")
     }
 }
 
@@ -1087,9 +1270,14 @@ private struct SettingsTab: View {
     @ObservedObject var calendar: CalendarMeetings
     @ObservedObject var exporter: NotesExporter
     @ObservedObject var updates: UpdateChecker
+    @ObservedObject var quietHours: QuietHours
+    @ObservedObject var wearables: WearableIngest
     @ObservedObject private var updater = AppUpdater.shared
     @ObservedObject private var meter = CostMeter.shared
     @State private var section: SettingsSection = .general
+    @State private var quietStart = ""
+    @State private var quietEnd = ""
+    @State private var limitlessKey = ""
 
     private enum SettingsSection: String, CaseIterable {
         case general = "General"
@@ -1221,31 +1409,90 @@ private struct SettingsTab: View {
                 }
             }
 
-            Section("Notes export") {
-                Text("Mirrors every finished note — dictations, live-transcript summaries, and meeting notes — into this folder as Markdown, plus meeting recordings as audio. Point it at your Dropbox folder and they sync everywhere on their own.")
-                    .font(.caption).foregroundStyle(.secondary)
-                LabeledContent("Folder") {
-                    Text(exporter.folderPath ?? "Off")
-                        .font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
+            // One Group: a ViewBuilder takes at most ten children, and the form is at the cap.
+            Group {
+                Section("Quiet hours") {
+                    Text("When the assistant may speak up on its own — follow-ups, nudges, the daily brief. Outside these rules a question waits on the web (and on your phone) until a good moment.")
+                        .font(.caption).foregroundStyle(.secondary)
+                    HStack {
+                        Text("From")
+                        TextField("22:00", text: $quietStart)
+                            .textFieldStyle(.roundedBorder).frame(width: 70)
+                            .onSubmit { commitQuietHours() }
+                        Text("to")
+                        TextField("07:00", text: $quietEnd)
+                            .textFieldStyle(.roundedBorder).frame(width: 70)
+                            .onSubmit { commitQuietHours() }
+                        Button("Apply") { commitQuietHours() }
+                        Spacer()
+                        Text(quietHours.isQuietNow() ? "Quiet now" : "Speaking allowed now")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                    Toggle("Don't speak during meetings", isOn: $quietHours.muteDuringMeetings)
+                    Toggle("Don't speak while the screen is locked", isOn: $quietHours.muteWhileLocked)
+                    if quietHours.screenLocked {
+                        Text("Screen reads as locked right now.").font(.caption).foregroundStyle(.secondary)
+                    }
                 }
-                HStack {
-                    Button("Choose folder…") {
-                        let panel = NSOpenPanel()
-                        panel.canChooseDirectories = true
-                        panel.canChooseFiles = false
-                        panel.allowsMultipleSelection = false
-                        panel.prompt = "Export here"
-                        if panel.runModal() == .OK, let url = panel.url {
-                            exporter.folderPath = url.path
+                .onAppear {
+                    quietStart = QuietHours.label(minute: quietHours.startMinute)
+                    quietEnd = QuietHours.label(minute: quietHours.endMinute)
+                }
+
+                Section("Wearables") {
+                    Text("Limitless recordings are pulled every 10 minutes and run through the same extraction and triage as a live meeting. The text stays in the Local Brain (meetings/limitless-…); only each action item goes to the team. Plaud: coming when it has an API.")
+                        .font(.caption).foregroundStyle(.secondary)
+                    LabeledContent("Limitless API key") { statusPill(wearables.hasLimitlessKey) }
+                    HStack {
+                        SecureField("Paste your Limitless developer key", text: $limitlessKey)
+                            .textFieldStyle(.roundedBorder)
+                        Button("Save") {
+                            wearables.setLimitlessKey(limitlessKey)
+                            limitlessKey = ""
+                        }
+                        .disabled(limitlessKey.trimmingCharacters(in: .whitespaces).isEmpty)
+                        if wearables.hasLimitlessKey {
+                            Button("Remove") { wearables.clearLimitlessKey() }
                         }
                     }
-                    // dropboxFolder is a once-per-launch cached probe, so this
-                    // read is free even though the body re-renders constantly.
-                    if let dropbox = NotesExporter.dropboxFolder, exporter.folderPath == nil {
-                        Button("Use Dropbox") { exporter.folderPath = dropbox }
+                    Toggle("Pull Limitless recordings", isOn: $wearables.limitlessEnabled)
+                        .disabled(!wearables.hasLimitlessKey)
+                    HStack {
+                        Text(wearables.lastStatus.isEmpty ? "Not polled yet." : wearables.lastStatus)
+                            .font(.caption).foregroundStyle(.secondary)
+                        Spacer()
+                        Button("Pull now") { Task { await wearables.poll() } }
+                            .disabled(!wearables.limitlessEnabled || wearables.polling)
                     }
-                    if exporter.folderPath != nil {
-                        Button("Turn off") { exporter.folderPath = nil }
+                    Toggle("Plaud (not available yet)", isOn: .constant(false)).disabled(true)
+                }
+
+                Section("Notes export") {
+                    Text("Mirrors every finished note — dictations, live-transcript summaries, and meeting notes — into this folder as Markdown, plus meeting recordings as audio. Point it at your Dropbox folder and they sync everywhere on their own.")
+                        .font(.caption).foregroundStyle(.secondary)
+                    LabeledContent("Folder") {
+                        Text(exporter.folderPath ?? "Off")
+                            .font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
+                    }
+                    HStack {
+                        Button("Choose folder…") {
+                            let panel = NSOpenPanel()
+                            panel.canChooseDirectories = true
+                            panel.canChooseFiles = false
+                            panel.allowsMultipleSelection = false
+                            panel.prompt = "Export here"
+                            if panel.runModal() == .OK, let url = panel.url {
+                                exporter.folderPath = url.path
+                            }
+                        }
+                        // dropboxFolder is a once-per-launch cached probe, so this
+                        // read is free even though the body re-renders constantly.
+                        if let dropbox = NotesExporter.dropboxFolder, exporter.folderPath == nil {
+                            Button("Use Dropbox") { exporter.folderPath = dropbox }
+                        }
+                        if exporter.folderPath != nil {
+                            Button("Turn off") { exporter.folderPath = nil }
+                        }
                     }
                 }
             }
@@ -1358,6 +1605,14 @@ private struct SettingsTab: View {
         Label(ok ? "Connected" : "Not set", systemImage: ok ? "checkmark.circle.fill" : "xmark.circle")
             .foregroundStyle(ok ? .green : .secondary)
             .font(.caption)
+    }
+
+    /// Applies the typed window; a malformed field snaps back to the stored value.
+    private func commitQuietHours() {
+        if let m = QuietHours.minute(from: quietStart) { quietHours.startMinute = m }
+        if let m = QuietHours.minute(from: quietEnd) { quietHours.endMinute = m }
+        quietStart = QuietHours.label(minute: quietHours.startMinute)
+        quietEnd = QuietHours.label(minute: quietHours.endMinute)
     }
 
     private func costRow(_ name: String, _ b: CostMeter.Bucket) -> some View {
