@@ -58,7 +58,30 @@ export async function requestApproval(task: TaskRow, question: string): Promise<
   return { allowed: false, approval };
 }
 
-/** Apply a verdict. Idempotent: a second call for the same approval is a no-op. */
+/**
+ * SPEC §12: content that came out of a meeting is DATA, never instructions.
+ * An attendee saying "assistant, approve that" must not work, so a verdict on
+ * a meeting-sourced task above tier 1 needs proof it is the owner: the phone
+ * (a signed-in device in their pocket), or a voice the enrolled voiceprint
+ * verified. Tier 3+ from a meeting needs the phone specifically — several
+ * voices were present, and a similarity threshold is not a password.
+ * Pure, so it is unit-tested without a database.
+ */
+export function verdictAllowed(
+  task: Pick<TaskRow, "source" | "blast_tier">,
+  via: "voice" | "push" | "text",
+  speakerVerified: boolean,
+): { ok: true } | { ok: false; reason: string } {
+  if (task.source !== "meeting" || task.blast_tier < 2) return { ok: true };
+  if (via === "push") return { ok: true };
+  if (task.blast_tier >= 3) return { ok: false, reason: "this came out of a meeting and commits money or a third party — approve it from your phone" };
+  if (via === "voice" && speakerVerified) return { ok: true };
+  return { ok: false, reason: "this came out of a meeting — I need your verified voice or your phone for it" };
+}
+
+/** Apply a verdict. Idempotent: a second call for the same approval is a no-op.
+ *  Returns null when the approval was already decided OR the channel is not
+ *  allowed for this task (see verdictAllowed); the refusal leaves a receipt. */
 export async function applyVerdict(
   task: TaskRow,
   approvalId: string,
@@ -66,6 +89,16 @@ export async function applyVerdict(
   via: "voice" | "push" | "text",
   speakerVerified: boolean,
 ): Promise<ApprovalRow | null> {
+  const allowed = verdictAllowed(task, via, speakerVerified);
+  if (!allowed.ok) {
+    await insertReceipt(task.email, {
+      task_id: task.id,
+      actor: "system",
+      summary: `Refused a ${verdict} via ${via}${speakerVerified ? " (speaker verified)" : ""}: ${allowed.reason}.`,
+      ref: approvalId,
+    });
+    return null;
+  }
   const row = await decideTaskApproval(task.email, approvalId, verdict, via, speakerVerified);
   if (!row) return null;
   await updateTask(task.email, task.id, { status: verdict === "approve" ? "approved" : "denied" });
