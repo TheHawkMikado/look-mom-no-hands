@@ -205,6 +205,21 @@ final class AppCoordinator: ObservableObject {
     private var scheduledTask: Task<Void, Never>?
     private var fleetSync: Set<AnyCancellable> = []
     let knowledge: KnowledgeStore
+    /// The Local Brain (SPEC.md §8.1): people, preferences, areas, and the inbox
+    /// of notes and decisions that never leave the Mac.
+    let brain: LocalBrain
+    /// The team behind the app: task intake, outstanding work, voice approvals.
+    let team = TeamClient()
+    /// The most recent request handed to the team, for the panel.
+    @Published private(set) var lastDelegatedTask: TeamTask?
+    /// Speaker verification (SPEC.md §5.1 step 2, PLAN-SPEAKER-VERIFICATION.md).
+    /// Called right after a wake-word match and before the session opens:
+    /// return false to ignore the wake. Nil = no verifier wired yet — every
+    /// wake opens a session, but counts as UNVERIFIED for approvals.
+    var wakeGate: (() -> Bool)?
+    /// What the gate said for the session in progress. Rides on voice verdicts
+    /// as `speakerVerified` (the web's gate applies its tier policy to it).
+    @Published private(set) var lastWakeVerified = false
     let notesExporter = NotesExporter()
     let calendarMeetings = CalendarMeetings()
     /// The meeting currently being recorded (drives the dashboard row + guards
@@ -292,6 +307,7 @@ final class AppCoordinator: ObservableObject {
         mcp = MCPManager(store: MCPStore(directory: store.directory))
         fleet = FleetService(peers: FleetPeerStore(directory: store.directory))
         knowledge = KnowledgeStore(directory: store.directory)
+        brain = LocalBrain(directory: store.directory)
         insertRules = InsertRulesStore(directory: store.directory)
         learnedControls = ElementMemoryStore(directory: store.directory)
         appCapabilities = AppCapabilityStore(directory: store.directory)
@@ -356,6 +372,9 @@ final class AppCoordinator: ObservableObject {
             Task { @MainActor in self?.lastExternalApp = app }
         }
         store.log("app", "launched")
+        // The routing table: cached copy now, fresh copy when the network allows,
+        // seed until then. Nothing on the command path waits for it.
+        ModelRouter.shared.start(directory: store.directory) { [weak self] msg in self?.store.log("router", msg) }
         environment.start()   // track open apps/windows/tabs continuously, even before listening
         scheduler = ProcedureScheduler(procedures: procedures, coordinator: self)
         scheduler?.start()
@@ -770,7 +789,17 @@ final class AppCoordinator: ObservableObject {
         let tail = Self.normalizedForMatching(String(text.suffix(64)))
         switch mode {
         case .standby:
-            if Self.wakePhrases.contains(where: tail.contains) { beginSession() }
+            if Self.wakePhrases.contains(where: tail.contains) {
+                // Speaker verification sits between the wake word and the session.
+                // A rejected wake is dropped from the stream so the same phrase
+                // isn't re-judged on every partial that still contains it.
+                if let gate = wakeGate, !gate() {
+                    store.log("wake", "wake word heard, speaker not verified — ignored")
+                    freshUtterance()
+                } else {
+                    beginSession(verified: wakeGate != nil)
+                }
+            }
             else if Self.liveStartPhrases.contains(where: tail.contains) { startRecording(output: .note) }
             else if Self.dictateStartPhrases.contains(where: tail.contains) { startInsertByVoice() }
         case .command:
@@ -860,8 +889,12 @@ final class AppCoordinator: ObservableObject {
 
     // MARK: Session
 
-    private func beginSession() {
-        store.log("wake", "\"Hey Mama\" — session active")
+    /// `verified` = the speaker gate passed for this wake. A hotkey or an
+    /// unguarded wake is unverified: it opens the session but voice approvals
+    /// go out flagged as such.
+    private func beginSession(verified: Bool = false) {
+        lastWakeVerified = verified
+        store.log("wake", "\"Hey Mama\" — session active\(verified ? " (speaker verified)" : "")")
         mode = .command
         phase = .capturingCommand
         freshUtterance()
@@ -1485,6 +1518,26 @@ final class AppCoordinator: ObservableObject {
             }
 
             dialogue = []                        // request resolved; next utterance is fresh
+
+            // Team steps (delegate / status / decide) run first and never touch
+            // the screen; each speaks its own confirmation. A plan that is ONLY
+            // team work ends here — no observe round, no "did what I could".
+            if !plan.teamSteps.isEmpty {
+                var lines: [String] = []
+                for step in plan.teamSteps {
+                    try Task.checkCancellation()
+                    lines.append(await runTeamStep(step, goal: text, gen: gen))
+                }
+                guard gen == runGeneration, !Task.isCancelled else { return }
+                performedAll += lines
+                if plan.steps.isEmpty {
+                    let outcome = lines.joined(separator: " → ")
+                    store.addTranscript(TranscriptRecord(kind: "command", transcript: text, outcome: outcome))
+                    recordRecentAction("\(contextTag())\"\(text)\" → \(outcome)")
+                    return
+                }
+            }
+
             // Intermediate turns keep `say` empty (per the prompt), so awaiting here
             // costs nothing on multi-step tasks and avoids concurrent TTS.
             if !plan.say.isEmpty { await speak(plan.say, gen: gen) }
@@ -1593,6 +1646,112 @@ final class AppCoordinator: ObservableObject {
             store.log("command", "stopped after \(round) rounds without goal_complete")
             await speak("I did what I could — it may not be fully finished.", gen: gen)
         }
+    }
+
+    // MARK: Team — delegation, outstanding work, voice approvals (SPEC §5.1, §6)
+
+    /// Runs one team-facing step and returns a one-line outcome for the
+    /// transcript. Every branch speaks exactly once.
+    private func runTeamStep(_ step: TeamStep, goal: String, gen: Int) async -> String {
+        switch step.kind {
+        case .delegate:
+            return await delegateToTeam(step.text.isEmpty ? goal : step.text, hint: step.capability, gen: gen)
+        case .teamStatus:
+            return await speakOutstanding(gen: gen)
+        case .decide:
+            return await decidePending(step, gen: gen)
+        }
+    }
+
+    /// Hands a request to the web's intake. The confirmation is spoken the
+    /// moment the server replies — SPEC §1: request → spoken confirmation in
+    /// under five seconds; delegation, drafting and follow-up happen after it,
+    /// never before. Signed out or unreachable: the request is filed in the
+    /// Local Brain inbox rather than lost.
+    private func delegateToTeam(_ request: String, hint: String, gen: Int) async -> String {
+        let text = request.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return "nothing to delegate" }
+        store.log("team", "delegating\(hint.isEmpty ? "" : " (\(hint))"): \(text.prefix(160))")
+        guard let reply = await team.delegate(text: text) else {
+            await speak("I couldn't reach your team — noted it locally.", gen: gen)
+            brain.appendNote(kind: "inbox", text: text)
+            store.log("team", "unreachable — saved to the Local Brain inbox")
+            return "team unreachable; noted in the local inbox"
+        }
+        // Speak FIRST. Everything after this line is bookkeeping.
+        await speak(reply.confirmation.isEmpty ? "On it." : reply.confirmation, gen: gen)
+        if let task = reply.task { lastDelegatedTask = task }
+        store.log("team", TeamClient.receiptLine(reply))
+        // Notes and decisions are Local Brain content (SPEC §4.3): the web only
+        // classified them and holds nothing; the words live here.
+        if reply.intent == "note" || reply.intent == "decision" {
+            brain.appendNote(kind: reply.intent, text: text)
+            store.log("brain", "\(reply.intent) filed in inbox.md")
+        }
+        if let task = reply.task { return "delegated to the team: \(task.title)" }
+        return "team intake: \(reply.intent)"
+    }
+
+    /// "What's outstanding" — one sentence: the count and the top two titles.
+    private func speakOutstanding(gen: Int) async -> String {
+        guard let tasks = await team.tasks(status: TeamClient.outstandingStatuses) else {
+            await speak("I couldn't reach your team right now.", gen: gen)
+            return "team unreachable"
+        }
+        store.log("team", "outstanding: \(tasks.count)\(tasks.isEmpty ? "" : " — " + tasks.prefix(3).map(\.title).joined(separator: "; "))")
+        await speak(TeamClient.outstandingSummary(tasks), gen: gen)
+        return "outstanding: \(tasks.count)"
+    }
+
+    /// A spoken "approve" / "deny". A background agent on THIS Mac waiting for
+    /// its OK (what the panel shows) is answered first; otherwise the newest
+    /// team task awaiting approval gets the verdict, tagged with whether the
+    /// speaker was verified — the web's gate applies the tier policy to that.
+    private func decidePending(_ step: TeamStep, gen: Int) async -> String {
+        guard let verdict = step.verdict else {
+            await speak("Say approve or deny.", gen: gen)
+            return "decide: unclear verdict"
+        }
+        let allow = verdict == "approve"
+        if let agent = BackgroundAgentManager.shared.awaitingApproval.first {
+            BackgroundAgentManager.shared.resolveApproval(agent.id, allow: allow)
+            store.log("agent", "voice verdict for \(agent.name): \(verdict) (speaker \(lastWakeVerified ? "verified" : "unverified"))")
+            await speak(allow ? "Approved." : "Denied.", gen: gen)
+            return "\(verdict): \(agent.name)"
+        }
+        guard let pending = await team.tasks(status: ["awaiting_approval"]) else {
+            await speak("I couldn't reach your team right now.", gen: gen)
+            return "team unreachable"
+        }
+        guard let task = pending.first else {
+            await speak("Nothing is waiting for your approval.", gen: gen)
+            return "decide: nothing pending"
+        }
+        let ok = await team.decide(taskID: task.id, verdict: verdict, speakerVerified: lastWakeVerified)
+        store.log("team", "\(verdict) \"\(task.title)\" by voice (speaker \(lastWakeVerified ? "verified" : "unverified")) → \(ok ? "ok" : "failed")")
+        if ok {
+            lastDelegatedTask = TeamTask(id: task.id, title: task.title, status: allow ? "approved" : "denied",
+                                         ownerName: task.ownerName, confirmation: task.confirmation)
+            await speak(allow ? "Approved \(task.title)." : "Denied \(task.title).", gen: gen)
+            return "\(verdict): \(task.title)"
+        }
+        await speak("That didn't go through.", gen: gen)
+        return "decide failed: \(task.title)"
+    }
+
+    /// What the planner needs to know about the team this turn: the last
+    /// request handed over, and anything waiting on the user right now (so
+    /// "approve" reads as a decide step, not a click).
+    private var teamPromptText: String {
+        var lines: [String] = []
+        if let t = lastDelegatedTask {
+            lines.append("Last request handed to the team: “\(t.title)” (\(t.status.replacingOccurrences(of: "_", with: " "))).")
+        }
+        let waiting = BackgroundAgentManager.shared.awaitingApproval
+        if !waiting.isEmpty {
+            lines.append("Waiting for the user's approval right now: \(waiting.map(\.name).joined(separator: ", ")) — “approve” / “deny” is a decide step.")
+        }
+        return lines.joined(separator: "\n")
     }
 
     // MARK: Watch-me demonstration
@@ -2536,6 +2695,7 @@ final class AppCoordinator: ObservableObject {
                      capabilities,
                      calendarMeetings.promptText,
                      meetingStatusPromptText,
+                     teamPromptText,
                      environment.snapshot.promptText,
                      recentActionsBlock()]
         if !taskProgress.isEmpty {

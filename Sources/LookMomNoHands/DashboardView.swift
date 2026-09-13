@@ -28,6 +28,9 @@ enum DashTab: String, CaseIterable {
 /// the window content; the selected section renders below it.
 struct DashboardView: View {
     @ObservedObject var coordinator: AppCoordinator
+    /// The app-level update checker (the App struct owns it; the panel and the
+    /// Settings tab's Version section both read it).
+    @ObservedObject var updates: UpdateChecker
     @AppStorage("dashboardTab") private var selected: DashTab = .memory
 
     var body: some View {
@@ -91,7 +94,8 @@ struct DashboardView: View {
         case .settings:
             SettingsTab(coordinator: coordinator,
                         calendar: coordinator.calendarMeetings,
-                        exporter: coordinator.notesExporter)
+                        exporter: coordinator.notesExporter,
+                        updates: updates)
         }
     }
 }
@@ -1082,6 +1086,8 @@ private struct SettingsTab: View {
     // and folder label stale.
     @ObservedObject var calendar: CalendarMeetings
     @ObservedObject var exporter: NotesExporter
+    @ObservedObject var updates: UpdateChecker
+    @ObservedObject private var updater = AppUpdater.shared
     @ObservedObject private var meter = CostMeter.shared
     @State private var section: SettingsSection = .general
 
@@ -1243,8 +1249,73 @@ private struct SettingsTab: View {
                     }
                 }
             }
+
+            versionSection
         }
         .formStyle(.grouped)
+    }
+
+    /// "Version": what's running, the idle auto-installer switch, a manual
+    /// check, and the way back — "Revert to v<previous>" reinstalls the bundle
+    /// the last update replaced (kept under updates/previous/), through the
+    /// same signature gate. Disabled, with the reason, until an update has
+    /// actually kept one.
+    private var versionSection: some View {
+        Section("Version") {
+            LabeledContent("Current") {
+                Text("v\(updates.currentVersion)").monospacedDigit()
+            }
+            Toggle("Update automatically when idle",
+                   isOn: Binding(get: { updates.autoInstall }, set: { updates.autoInstall = $0 }))
+            Text("Installs a newer build on its own as soon as nothing is in flight — never mid-dictation or mid-task. Every build still has to be signed by us before it runs.")
+                .font(.caption).foregroundStyle(.secondary)
+            HStack(spacing: 10) {
+                Button("Check for updates") { updates.checkInBackground(force: true) }
+                    .disabled(updates.isChecking || updater.phase.busy)
+                if updates.isChecking {
+                    ProgressView().controlSize(.small)
+                } else if case .upToDate = updates.status {
+                    switch updates.manualResult {
+                    case .current: Text("Up to date").font(.caption).foregroundStyle(.secondary)
+                    case .unreachable: Text("Couldn't reach the server").font(.caption).foregroundStyle(.orange)
+                    case .none: EmptyView()
+                    }
+                } else if let dmg = updates.dmgURL, let url = updates.status.updateURL {
+                    Button("Update now") { updater.install(fromDMG: dmg) }
+                        .disabled(updater.phase.busy)
+                    Link("Notes", destination: url).font(.caption)
+                }
+            }
+            if let previous = updater.previousVersion {
+                Button("Revert to v\(previous.version)") { updater.revertToPrevious() }
+                    .disabled(updater.phase.busy)
+                Text("Puts back the build the last update replaced and relaunches. The version you leave won't reinstall itself; a newer release still will.")
+                    .font(.caption).foregroundStyle(.secondary)
+            } else {
+                Button("Revert to previous version") {}
+                    .disabled(true)
+                Text("No previous build is kept yet — the next update that installs saves the one it replaces, and this button brings it back.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            if let skipped = updates.skippedVersion {
+                Text("Not auto-installing v\(skipped) (you reverted from it). “Update now” still installs it on purpose.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            if updater.phase != .idle {
+                HStack(spacing: 8) {
+                    Text(updater.phase.label).font(.caption)
+                        .foregroundStyle(updaterFailed ? Color.red : Color.secondary)
+                    if updaterFailed {
+                        Button("Dismiss") { updater.dismissFailure() }.font(.caption)
+                    }
+                }
+            }
+        }
+    }
+
+    private var updaterFailed: Bool {
+        if case .failed = updater.phase { return true }
+        return false
     }
 
     private var hotkeysForm: some View {

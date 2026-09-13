@@ -13,6 +13,12 @@ import Security
 /// protects against everything else (a hijacked release asset, a wrong URL, a
 /// poisoned mirror). Quarantine is cleared only AFTER verification passes —
 /// Gatekeeper would otherwise translocate the copy we just proved is ours.
+///
+/// Every install keeps the bundle it replaced (one generation, under
+/// `updates/previous/`) so "revert to the last working version" is a click,
+/// not a hunt through old DMGs. The revert goes through the SAME signature
+/// gate as an update — a bundle that sat on disk for a week is still code we
+/// are about to run.
 @MainActor
 final class AppUpdater: ObservableObject {
     static let shared = AppUpdater()   // survives the panel closing mid-download
@@ -44,6 +50,23 @@ final class AppUpdater: ObservableObject {
 
     @Published private(set) var phase: Phase = .idle
 
+    /// The build the last update replaced, if it is still on disk. Read from
+    /// `updates/previous/previous.json`; nil until the first self-update lands
+    /// (or after a revert, which consumes it).
+    @Published private(set) var previousBuild: PreviousBuild?
+
+    /// `(version, path)` of the bundle a revert would reinstall — nil when
+    /// there is nothing to go back to. Same information as `previousBuild`,
+    /// in the shape the settings UI reads.
+    var previousVersion: (version: String, path: String)? {
+        guard let p = previousBuild else { return nil }
+        return (p.version, p.path)
+    }
+
+    init() {
+        previousBuild = Self.loadPrevious(from: previousRecordURL)
+    }
+
     /// Pin the TEAM, not a certificate: rotation of the signing cert must not
     /// brick updates, but no requirement weaker than "Apple-anchored Developer
     /// ID for exactly this team" is acceptable for code we're about to run.
@@ -72,9 +95,57 @@ final class AppUpdater: ObservableObject {
             let dest = Self.installDestination(forRunningBundle: running)
             try Self.checkReplaceable(dest)
             phase = .relaunching
+            // Keep what we are replacing: the helper moves it aside and writes
+            // the record only once the move succeeded, so previous.json never
+            // names a bundle that isn't there.
+            let keep = PreviousBuild(version: Self.currentVersion,
+                                     path: previousBundleURL(forInstall: dest).path,
+                                     replacedAt: PreviousBuild.stamp(Date()))
             try Self.spawnSwapHelper(staged: staged, dest: dest, running: running,
-                                     dmg: dmg, log: updatesDir.appendingPathComponent("swap.log"))
+                                     cleanup: [dmg.path], log: updatesDir.appendingPathComponent("swap.log"),
+                                     keep: keep, record: previousRecordURL)
             // The helper waits for this exit, swaps the bundle, and relaunches.
+            NSApp.terminate(nil)
+        } catch {
+            phase = .failed(error.localizedDescription)
+        }
+    }
+
+    // MARK: - Revert
+
+    /// Puts the previous build back. Same gate, same swap, same relaunch as an
+    /// update — only the source differs (the kept bundle instead of a fresh
+    /// download). The version we are leaving is recorded so the auto-installer
+    /// doesn't put it straight back the moment the app is idle again; the
+    /// banner still shows it and a manual "Update now" still works.
+    func revertToPrevious() {
+        guard !phase.busy, let previous = previousBuild else { return }
+        Task { await runRevert(previous) }
+    }
+
+    private func runRevert(_ previous: PreviousBuild) async {
+        phase = .verifying
+        do {
+            let staged = URL(fileURLWithPath: previous.path)
+            guard FileManager.default.fileExists(atPath: previous.path) else {
+                previousBuild = nil
+                try? FileManager.default.removeItem(at: previousRecordURL)
+                throw UpdateError(message: "the previous build is no longer on disk")
+            }
+            try Self.verifySignature(at: staged)
+            try? Self.clearQuarantine(at: staged)
+            let running = Bundle.main.bundlePath
+            let dest = Self.installDestination(forRunningBundle: running)
+            try Self.checkReplaceable(dest)
+            UserDefaults.standard.set(Self.currentVersion, forKey: UpdateChecker.skipAutoInstallKey)
+            phase = .relaunching
+            // No `keep`: the build being reverted FROM is the one that didn't
+            // work, and keeping it would make the next revert flip-flop. The
+            // staging folder the helper removes afterwards IS `updates/previous`.
+            try Self.spawnSwapHelper(staged: staged, dest: dest, running: running,
+                                     cleanup: [previousRecordURL.path],
+                                     log: updatesDir.appendingPathComponent("swap.log"),
+                                     keep: nil, record: nil)
             NSApp.terminate(nil)
         } catch {
             phase = .failed(error.localizedDescription)
@@ -92,6 +163,27 @@ final class AppUpdater: ObservableObject {
             .appendingPathComponent(AppIdentity.storageFolder).appendingPathComponent("updates")
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         return dir
+    }
+
+    /// `updates/previous/` — one kept generation, replaced on every install.
+    private var previousDir: URL { updatesDir.appendingPathComponent("previous", isDirectory: true) }
+    private var previousRecordURL: URL { previousDir.appendingPathComponent("previous.json") }
+    private func previousBundleURL(forInstall dest: String) -> URL {
+        previousDir.appendingPathComponent((dest as NSString).lastPathComponent)
+    }
+
+    /// The running build's marketing version — what previous.json records.
+    nonisolated static var currentVersion: String {
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0"
+    }
+
+    /// nil unless the record decodes AND the bundle it names still exists — a
+    /// record pointing at nothing is worse than none (a revert button that
+    /// fails on click).
+    nonisolated private static func loadPrevious(from url: URL) -> PreviousBuild? {
+        guard let data = try? Data(contentsOf: url), let p = PreviousBuild.decode(data),
+              FileManager.default.fileExists(atPath: p.path) else { return nil }
+        return p
     }
 
     private func download(_ url: URL) async throws -> URL {
@@ -192,10 +284,13 @@ final class AppUpdater: ObservableObject {
     /// bundle, relaunch it, clean up. Detached (new session, ignored signals via
     /// nohup-like setup) so terminating the app doesn't kill the installer.
     nonisolated private static func spawnSwapHelper(staged: URL, dest: String, running: String,
-                                                    dmg: URL, log: URL) throws {
+                                                    cleanup: [String], log: URL,
+                                                    keep: PreviousBuild?, record: URL?) throws {
         let script = swapScript(pid: ProcessInfo.processInfo.processIdentifier,
                                 staged: staged.path, app: dest, running: running,
-                                cleanup: [dmg.path], log: log.path)
+                                cleanup: cleanup, log: log.path,
+                                previous: keep?.path, record: record?.path,
+                                recordJSON: keep.flatMap { $0.encodedString() })
         let scriptURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("lmnh-swap-\(UUID().uuidString).sh")
         try script.write(to: scriptURL, atomically: true, encoding: .utf8)
@@ -213,14 +308,21 @@ final class AppUpdater: ObservableObject {
     ///
     /// `app` is the install destination, `running` the bundle that was actually
     /// executing (the same path unless it was translocated or on the DMG). The
-    /// old version is removed before the new one is copied in. If the swap
-    /// fails part-way, the script still tries to relaunch SOMETHING — the
-    /// destination first, then the bundle we came from — so a failed update
-    /// never leaves the user with no app at all. Everything is logged so a
-    /// failure can be read afterwards.
+    /// old version is moved to `previous` (when given — any older kept bundle
+    /// there is replaced first) or removed, then the new one is copied in.
+    /// `record` + `recordJSON` name the previous.json to write — and it is
+    /// written ONLY after the move succeeded, so it can never describe a
+    /// bundle that isn't there. If the copy fails the moved-aside bundle is
+    /// put back and the record removed, so a failed update leaves the user on
+    /// the version they had; the script still tries to relaunch SOMETHING —
+    /// the destination first, then the bundle we came from — so a failed
+    /// update never leaves the user with no app at all. Everything is logged
+    /// so a failure can be read afterwards.
     nonisolated static func swapScript(pid: Int32, staged: String, app: String,
                                        running: String? = nil, cleanup: [String] = [],
-                                       log: String? = nil) -> String {
+                                       log: String? = nil,
+                                       previous: String? = nil, record: String? = nil,
+                                       recordJSON: String? = nil) -> String {
         let q = { (s: String) in "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'" }
         let staging = (staged as NSString).deletingLastPathComponent
         var lines = [
@@ -228,14 +330,38 @@ final class AppUpdater: ObservableObject {
             "# Look Ma, No Hands self-update helper. Safe to delete.",
         ]
         if let log { lines.append("exec >>\(q(log)) 2>&1; echo \"--- $(date) update to \(q(app))\"") }
-        lines += [
-            "while /bin/kill -0 \(pid) 2>/dev/null; do /bin/sleep 0.2; done",
-            "if /bin/rm -rf \(q(app)) && /usr/bin/ditto \(q(staged)) \(q(app)); then",
-            "  echo installed",
-            "else",
-            "  echo \"install failed; relaunching what is left\"",
-            "fi",
-        ]
+        lines.append("while /bin/kill -0 \(pid) 2>/dev/null; do /bin/sleep 0.2; done")
+        if let previous {
+            let previousDir = (previous as NSString).deletingLastPathComponent
+            lines += [
+                "/bin/rm -rf \(q(previous))",
+                "/bin/mkdir -p \(q(previousDir))",
+                "kept=0",
+                "if [ -e \(q(app)) ]; then",
+                "  if /bin/mv \(q(app)) \(q(previous)); then kept=1; else /bin/rm -rf \(q(app)); fi",
+                "fi",
+                "if /usr/bin/ditto \(q(staged)) \(q(app)); then",
+                "  echo installed",
+            ]
+            if let record, let recordJSON {
+                lines.append("  if [ \"$kept\" = 1 ]; then printf '%s' \(q(recordJSON)) > \(q(record)); fi")
+            }
+            lines += [
+                "else",
+                "  echo \"install failed; restoring the previous bundle\"",
+                "  if [ \"$kept\" = 1 ] && [ ! -e \(q(app)) ]; then /bin/mv \(q(previous)) \(q(app)); fi",
+            ]
+            if let record { lines.append("  /bin/rm -f \(q(record))") }
+            lines.append("fi")
+        } else {
+            lines += [
+                "if /bin/rm -rf \(q(app)) && /usr/bin/ditto \(q(staged)) \(q(app)); then",
+                "  echo installed",
+                "else",
+                "  echo \"install failed; relaunching what is left\"",
+                "fi",
+            ]
+        }
         if let running, running != app {
             lines.append("/usr/bin/open \(q(app)) || /usr/bin/open \(q(running))")
         } else {
@@ -262,5 +388,42 @@ final class AppUpdater: ObservableObject {
             throw UpdateError(message: "\((launchPath as NSString).lastPathComponent) failed (\(p.terminationStatus))")
         }
         return String(decoding: data, as: UTF8.self)
+    }
+}
+
+/// What `updates/previous/previous.json` holds: the build the last update
+/// replaced. `replaced_at` is an ISO-8601 stamp (a string, not a Date, so the
+/// file stays readable by hand and by the shell helper that writes it). A
+/// plain top-level type — not nested in the main-actor updater — so the pure
+/// encode/decode can be exercised from tests without an actor hop.
+struct PreviousBuild: Codable, Equatable {
+    let version: String
+    let path: String
+    let replacedAt: String
+
+    enum CodingKeys: String, CodingKey {
+        case version, path
+        case replacedAt = "replaced_at"
+    }
+
+    /// Single-line JSON, sorted keys: goes through `printf '%s'` inside a
+    /// single-quoted shell argument, so no newlines and a stable shape.
+    func encodedString() -> String? {
+        let e = JSONEncoder()
+        e.outputFormatting = [.sortedKeys]
+        guard let data = try? e.encode(self) else { return nil }
+        return String(decoding: data, as: UTF8.self)
+    }
+
+    /// nil for anything that isn't a complete record — a half-written file
+    /// must read as "no previous build", never as a bundle to reinstall.
+    static func decode(_ data: Data) -> PreviousBuild? {
+        guard let p = try? JSONDecoder().decode(PreviousBuild.self, from: data),
+              !p.version.isEmpty, !p.path.isEmpty else { return nil }
+        return p
+    }
+
+    static func stamp(_ date: Date) -> String {
+        ISO8601DateFormatter().string(from: date)
     }
 }

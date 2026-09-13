@@ -60,6 +60,11 @@ final class UpdateChecker: ObservableObject {
 
     nonisolated static let autoInstallKey = "lmnh.update.autoInstall"
     private let autoAttemptedKey = "lmnh.update.autoAttemptedVersion"
+    /// The version the user reverted FROM (AppUpdater writes it). Exactly that
+    /// version is never auto-installed again — the banner still shows it and a
+    /// manual "Update now" still works; only the silent path is closed, or the
+    /// idle-installer would undo the revert within the hour.
+    nonisolated static let skipAutoInstallKey = "lmnh.update.skipAutoInstallVersion"
 
     /// Install updates without a click, when the app is idle. Default ON.
     var autoInstall: Bool {
@@ -84,12 +89,30 @@ final class UpdateChecker: ObservableObject {
     /// and not retried automatically, so a bad download can't loop forever.
     func tryPendingInstall() {
         guard autoInstall, let pending = pendingAutoInstall, isIdle?() ?? false else { return }
-        guard UserDefaults.standard.string(forKey: autoAttemptedKey) != pending.version else { return }
+        guard Self.autoInstallAllowed(version: pending.version,
+                                      attempted: UserDefaults.standard.string(forKey: autoAttemptedKey),
+                                      skipped: UserDefaults.standard.string(forKey: Self.skipAutoInstallKey))
+        else { return }
         guard !AppUpdater.shared.phase.busy else { return }
         UserDefaults.standard.set(pending.version, forKey: autoAttemptedKey)
         pendingAutoInstall = nil
         AppUpdater.shared.install(fromDMG: pending.dmg)
     }
+
+    /// Whether the silent installer may install `version`: once per version
+    /// (`attempted`), and never the exact version the user reverted away from
+    /// (`skipped`). Any other version — including a newer one after a revert —
+    /// is fair game, so a bad release is skipped, not the whole update channel.
+    /// Pure for tests.
+    nonisolated static func autoInstallAllowed(version: String, attempted: String?, skipped: String?) -> Bool {
+        if let attempted, attempted == version { return false }
+        if let skipped, skipped == version { return false }
+        return true
+    }
+
+    /// The version auto-install is currently skipping (after a revert), for the
+    /// settings UI. nil = nothing skipped.
+    var skippedVersion: String? { UserDefaults.standard.string(forKey: Self.skipAutoInstallKey) }
 
     /// The running build, for display next to the check button.
     var currentVersion: String { current }

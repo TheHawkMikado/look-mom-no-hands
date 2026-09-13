@@ -47,7 +47,7 @@ struct LookMomNoHandsApp: App {
         .menuBarExtraStyle(.window)
 
         Window(Self.dashboardTitle, id: "dashboard") {
-            DashboardView(coordinator: coordinator)
+            DashboardView(coordinator: coordinator, updates: updates)
                 .onAppear { DockPresence.dashboardOpened() }
         }
     }
@@ -243,6 +243,11 @@ struct PanelView: View {
                 Divider()
             }
 
+            if let task = coordinator.lastDelegatedTask {
+                teamRow(task)
+                Divider()
+            }
+
             if !agentManager.agents.isEmpty {
                 agentsSection
                 Divider()
@@ -267,6 +272,21 @@ struct PanelView: View {
         }
         .padding(14)
         .frame(width: 380)
+    }
+
+    /// The last request handed to the team (SPEC §5.1): title and where it is.
+    /// One line — the receipt itself is in the activity log and on the web.
+    private func teamRow(_ task: TeamTask) -> some View {
+        HStack(spacing: 6) {
+            Image(systemName: "person.3.fill").foregroundStyle(Color.accentColor)
+            VStack(alignment: .leading, spacing: 1) {
+                Text("Sent to your team").font(.caption2).foregroundStyle(.secondary)
+                Text(task.title).font(.caption).lineLimit(1)
+            }
+            Spacer()
+            Text(task.status.replacingOccurrences(of: "_", with: " "))
+                .font(.caption2).foregroundStyle(.secondary)
+        }
     }
 
     private var agentsSection: some View {
