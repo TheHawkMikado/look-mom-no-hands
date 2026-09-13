@@ -22,6 +22,18 @@ assemble_app() {
     else
         echo "  ! Assets/AppIcon.icns missing — run Scripts/render_icon.sh" >&2
     fi
+    # SwiftPM resources (the speaker-verification Core ML model) land in
+    # <NAME>_<NAME>.bundle next to the build product. Copy it into
+    # Contents/Resources so the app finds it at Bundle.main.resourceURL, the
+    # same way `swift test` finds it next to the binary. Missing bundle = the
+    # model wasn't built; the app still runs (verification disables itself).
+    local res_bundle
+    res_bundle="$(dirname "${bin}")/${NAME}_${NAME}.bundle"
+    if [ -d "${res_bundle}" ]; then
+        cp -R "${res_bundle}" "${app}/Contents/Resources/"
+    else
+        echo "  ! ${res_bundle} missing — speaker model not bundled, voice verification will be off" >&2
+    fi
 }
 
 # sign_app <app-path> <identity> [extra codesign flags...] — identity "-" = ad-hoc.
