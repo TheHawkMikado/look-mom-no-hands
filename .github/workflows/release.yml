@@ -113,6 +113,30 @@ jobs:
           echo "VERSION=$(/usr/libexec/PlistBuddy -c 'Print CFBundleShortVersionString' App/Info.plist)" >> "$GITHUB_ENV"
           echo "NOTES=$NOTES" >> "$GITHUB_ENV"
 
+      # No signing secrets yet: still get the code onto the owner's Macs. An
+      # unsigned build cannot go through the in-app updater (it pins the
+      # Developer ID), so it is published as a PRE-release the owner installs
+      # by hand once (right-click → Open). The version manifest is untouched.
+      - name: Package an unsigned build
+        if: steps.secrets.outputs.ready != 'true'
+        run: |
+          set -euo pipefail
+          ./Scripts/package_release.sh
+          VERSION="$(/usr/libexec/PlistBuddy -c 'Print CFBundleShortVersionString' App/Info.plist)"
+          SHORT="$(git rev-parse --short HEAD)"
+          DMG="$(ls build/*.dmg | head -1)"
+          UNSIGNED="build/LookMaNoHands-unsigned-${SHORT}.dmg"
+          mv "$DMG" "$UNSIGNED"
+          TAG="unsigned-$(date +%y%m%d)-${SHORT}"
+          NOTES="${{ github.event.inputs.notes }}"
+          [ -n "$NOTES" ] || NOTES="$(git log -1 --pretty=%s)"
+          gh release create "$TAG" "$UNSIGNED" --prerelease \
+            --title "Unsigned build ${SHORT} (based on v${VERSION})" \
+            --notes "$NOTES
+
+**Unsigned build** — made without the Developer ID certificate, so the app's own updater will not install it. To use it: download, drag to Applications, right-click the app → Open → Open (once). macOS may ask again for Microphone, Speech Recognition and Accessibility. Add the signing secrets (DISTRIBUTION.md → Automatic releases) and the next merge produces a normal signed release instead."
+          echo "::notice::Published unsigned pre-release $TAG"
+
       - name: Tell every installed app (Vercel LATEST_APP_VERSION)
         if: steps.secrets.outputs.ready == 'true'
         run: |

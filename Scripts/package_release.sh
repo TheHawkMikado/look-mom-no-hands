@@ -40,6 +40,12 @@ DMG="${WORK}/${DMG_NAME}"
 echo "▸ assembling universal app in ${WORK} (outside iCloud)"
 UNIBIN="${WORK}/${NAME}"
 lipo -create "${ARM}" "${X86}" -output "${UNIBIN}"
+# assemble_app looks for the SwiftPM resource bundle (the speaker model) next
+# to the binary it is given; the lipo'd binary lives in ${WORK}, so bring the
+# bundle along from the arm64 build (its contents are architecture-neutral).
+if [ -d "$(dirname "${ARM}")/${NAME}_${NAME}.bundle" ]; then
+    cp -R "$(dirname "${ARM}")/${NAME}_${NAME}.bundle" "${WORK}/"
+fi
 assemble_app "${UNIBIN}" "${APP}"
 echo "  archs: $(lipo -archs "${APP}/Contents/MacOS/${NAME}")"
 
