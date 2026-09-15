@@ -1,0 +1,23 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Runner Fixture</title></head>
+<body>
+<h1>Welcome to the fixture</h1>
+<nav><a href="/docs">Docs</a> <a href="https://elsewhere.test/x">Elsewhere</a></nav>
+<form id="search"><label>Search<input name="q" type="text"></label><button type="submit">Go</button></form>
+<p id="searched"></p>
+<label>Colour<select id="colour"><option value="r">Red</option><option value="g">Green</option></select></label>
+<label><input type="checkbox" id="agree"> I agree</label>
+<input type="password" value="hunter2" aria-label="Password">
+<button id="more">Load more</button>
+<ul id="items"></ul>
+<div contenteditable="true" id="note" aria-label="Note"></div>
+<div style="display:none"><button>Hidden button</button></div>
+<div style="height:3000px"></div>
+<a href="/bottom" id="bottom">Bottom link</a>
+<script>
+  window.__events = [];
+  document.addEventListener('input', e => window.__events.push(['input', e.target.name || e.target.id, e.target.value]), true);
+  document.getElementById('search').addEventListener('submit', e => { e.preventDefault(); document.getElementById('searched').textContent = 'Searched: ' + e.target.q.value; document.title = 'Results for ' + e.target.q.value; });
+  document.getElementById('more').addEventListener('click', () => setTimeout(() => { for (let i = 1; i <= 3; i++) { const li = document.createElement('li'); li.textContent = 'Loaded item ' + i; document.getElementById('items').appendChild(li); } }, 300));
+</script>
+</body></html>

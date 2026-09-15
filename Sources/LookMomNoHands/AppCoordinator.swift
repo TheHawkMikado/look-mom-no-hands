@@ -199,6 +199,10 @@ final class AppCoordinator: ObservableObject {
     let procedures: ProcedureStore
     let agentRoles: AgentRoleStore
     let mcp: MCPManager
+    /// The browser runner: a paired Chrome-family extension that reads and acts
+    /// on the live page by ref. Used for web steps whenever it's connected and a
+    /// Chromium browser is in front; the Accessibility path stays the fallback.
+    let browser: BrowserBridge
     let events = EventReporter()
     let fleet: FleetService
     private var scheduler: ProcedureScheduler?
@@ -324,6 +328,7 @@ final class AppCoordinator: ObservableObject {
         procedures = ProcedureStore(directory: store.directory)
         agentRoles = AgentRoleStore(directory: store.directory)
         mcp = MCPManager(store: MCPStore(directory: store.directory))
+        browser = BrowserBridge()
         fleet = FleetService(peers: FleetPeerStore(directory: store.directory))
         knowledge = KnowledgeStore(directory: store.directory)
         brain = LocalBrain(directory: store.directory)
@@ -420,6 +425,8 @@ final class AppCoordinator: ObservableObject {
         wearables.log = { [weak self] msg in self?.store.log("wearable", msg) }
         wearables.onRecording = { [weak self] recording in await self?.ingestWearable(recording) }
         wearables.start()
+        browser.log = { [weak self] msg in self?.store.log("browser", msg) }
+        browser.start()
         startHousekeeping()
         // Warm configured MCP servers off the command path — an npx cold-start
         // mid-task would eat the whole 20s parse budget.
@@ -2790,6 +2797,11 @@ final class AppCoordinator: ObservableObject {
                 }
                 if step.kind == .click {
                     try await self.performClick(target: step.target, gen: gen)
+                } else if step.kind == .type, self.browserRunnerAvailable(),
+                          (try? await self.browser.type(text: step.text)) != nil {
+                    // Set the field's value the way the page's own framework
+                    // expects (input/change events) — no key events, no focus race.
+                    self.store.log("browser", "typed \(step.text.count) chars via the extension")
                 } else {
                     // Off the main actor + cancellable: perform() checks cancellation
                     // before every irreversible event, so Stop halts mid-walk/typing.
@@ -2826,6 +2838,11 @@ final class AppCoordinator: ObservableObject {
     /// looked stable. For a plain UI update it just waits for stability. Bounded,
     /// cancellable, off the main actor.
     private func waitForPage(toHost host: String?, requireChange: Bool, gen: Int, maxWait: TimeInterval) async {
+        if browserRunnerAvailable() {
+            // The tab knows when it has loaded and when its DOM went quiet.
+            await browser.waitSettled(urlContains: host, timeout: maxWait)
+            return
+        }
         let start = Date()
         var initial: String? = nil
         var last = ""
@@ -2848,6 +2865,14 @@ final class AppCoordinator: ObservableObject {
             if stable, (!requireChange || sig != initial) { return }
             last = sig
         }
+    }
+
+    /// True when a paired extension can act on the page in front: the bridge is
+    /// connected and the frontmost app is a Chromium-family browser. Safari and
+    /// native apps keep the Accessibility path.
+    private func browserRunnerAvailable() -> Bool {
+        browser.isConnected
+            && BrowserProtocol.isChromiumBrowser(bundleID: NSWorkspace.shared.frontmostApplication?.bundleIdentifier)
     }
 
     /// The frontmost window's current URL, lowercased ("" if none / not a browser).
@@ -2919,6 +2944,13 @@ final class AppCoordinator: ObservableObject {
             } else {
                 workingContext.window = nil   // stale — the window is gone
             }
+        }
+        // A Chromium tab with the extension paired: read the page itself (refs,
+        // values, hrefs, offscreen content) instead of walking its AX tree. Any
+        // failure falls through to the AX read below.
+        if browserRunnerAvailable(), let page = try? await browser.snapshot(maxElements: 120) {
+            store.log("screen", "round \(round): read \(page.elements.count) of \(page.total) elements via the browser extension (\(page.url))")
+            return page.promptText
         }
         let snap = try await withThrowingTaskGroup(of: ScreenController.Snapshot?.self) { group in
             // Higher cap so content-heavy pages (a YouTube results grid) surface real
@@ -3050,6 +3082,17 @@ final class AppCoordinator: ObservableObject {
     /// for callers (the meeting join flow) where a 20s teaching pause is worse
     /// than a clean failure.
     private func performClick(target: String, gen: Int, teachOnMiss: Bool = true) async throws {
+        // 0. A ref from a browser snapshot ("e7"): the page resolves it exactly.
+        //    A stale or unknown ref falls through to the label-based paths.
+        if browser.isConnected, let ref = BrowserProtocol.ref(in: target) {
+            do {
+                try await browser.click(ref: ref)
+                store.log("browser", "clicked \(ref) via the extension")
+                return
+            } catch {
+                store.log("browser", "click \(ref) failed (\(error)) — trying the screen")
+            }
+        }
         guard ScreenController.isTrusted else { throw ScreenController.ControlError.notTrusted }
         let app = NSWorkspace.shared.frontmostApplication
 

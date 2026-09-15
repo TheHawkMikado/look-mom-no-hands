@@ -4,6 +4,46 @@ Non-obvious architectural choices, newest first. Every entry: date, the
 decision, and why. The spec (SPEC.md §0) asks for this file; the rule is that
 anything a future reader might reasonably ask "why on earth?" about goes here.
 
+## 2026-09-15 — Web steps run through a browser extension, by ref
+
+The Local Runner finds a web element by walking the browser's Accessibility
+tree for a label and clicking a screen coordinate. Chrome builds that tree
+lazily and huge, offscreen and virtualised content is missing from it, hrefs
+and field values are not in it, and nothing says when a click has finished
+loading the next page. So the runner now has a second backend for the web:
+`browser-extension/` (Manifest V3, Chrome-family) reads the live DOM into a
+compact snapshot where every interactive element carries a ref (`e7`, with
+role, accessible name, value, href, checked/disabled/offscreen) and acts on
+refs — click, type with the page's own input/change events, select, scroll,
+press, extract, and a `wait` that resolves on tab load plus a quiet DOM.
+`BrowserBridge.swift` is the Mac side; `AppCoordinator` uses it for the
+observe read, click, type and page-wait whenever a paired extension is
+connected and a Chromium browser is frontmost. Anything else — Safari, native
+apps, a stale ref, the extension being down — takes the Accessibility path
+exactly as before, so the extension is an accelerator, never a dependency.
+Reason: the planner picks from what is actually on the page and the page
+resolves the choice itself; that removes the two failure modes ("couldn't
+find X on screen", clicking the wrong pixel) that dominate web tasks, and a
+snapshot is tens of milliseconds instead of an AX walk. What did NOT move:
+planning and the Approval Gate. The extension executes one step at a time
+and decides nothing; a page's text reaches the model as data (SPEC §12) and
+the prompt says so.
+
+## 2026-09-15 — The browser runner is a paired loopback WebSocket, not native messaging
+
+The obvious transport is Chrome native messaging, but it needs a host
+manifest installed per browser (Chrome, Brave, Arc and Edge each in their
+own directory) plus a relay executable, and it is one browser at a time. The
+Mac app instead listens on `127.0.0.1:47831` with Network.framework's
+WebSocket server and the extension dials it. Two checks stand in for native
+messaging's identity: the handshake is refused unless the `Origin` is a
+browser-extension scheme (a web page's WebSocket can never reach it), and the
+first frame must carry the six-digit pairing code the dashboard shows (kept in
+the Keychain; compared in constant time). A wrong code gets a `bye` and the
+extension stops retrying until the user saves a new one. Every Chromium
+browser on the Mac can pair with the same code, and a ping every 20 s keeps
+the extension's service worker alive across Chrome's idle unload.
+
 ## 2026-09-13 — Diarization by on-device embeddings, not a cloud STT
 
 SPEC §14 left streaming STT + diarization open. Phase 2 keeps Apple Speech

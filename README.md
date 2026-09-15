@@ -53,6 +53,8 @@ Set up the team with three commands — see
 | [VoiceListener.swift](Sources/LookMomNoHands/VoiceListener.swift) | Single always-on speech pipeline (wake word + transcription) |
 | [ClaudeClient.swift](Sources/LookMomNoHands/ClaudeClient.swift) | Messages API: forced-tool plan routing + json_schema report |
 | [ScreenController.swift](Sources/LookMomNoHands/ScreenController.swift) | Accessibility search + CGEvent click/type/scroll/keystroke, open app/URL |
+| [BrowserBridge.swift](Sources/LookMomNoHands/BrowserBridge.swift) | Loopback WebSocket + pairing for the browser extension; ref-based page snapshots and actions |
+| [browser-extension/](browser-extension/) | Chrome-family extension: reads the live page by ref and clicks/types exactly what the planner picked |
 | [Speaker.swift](Sources/LookMomNoHands/Speaker.swift) | Spoken replies: ElevenLabs TTS with system-voice fallback |
 | [AppStore.swift](Sources/LookMomNoHands/AppStore.swift) | Disk-backed transcript store + activity log |
 | [DashboardView.swift](Sources/LookMomNoHands/DashboardView.swift) | Dashboard window: transcripts + activity tabs |
@@ -64,6 +66,27 @@ Logo, app icon and brand rules live in [Assets/](Assets/README.md);
 `./Scripts/render_icon.sh` regenerates every raster from the SVG masters.
 | [LicenseStore.swift](Sources/LookMomNoHands/LicenseStore.swift) | Trial clock + offline Ed25519 licence verification |
 | [web/](web/) | nohandsapp.com — marketing site, Stripe checkout, licence API |
+
+## Browser runner (the extension)
+
+Web pages are read through a small Chrome-family extension instead of the
+Accessibility tree whenever it's paired: the planner sees every interactive
+element with a ref (`e7 link "Docs" → /docs`), clicks by ref, types with the
+page's own input events, and waits for the tab to load and settle. Safari,
+native apps and any failure fall back to the Accessibility path.
+
+1. `chrome://extensions` → Developer mode → **Load unpacked** → pick
+   `browser-extension/`. Works in Chrome, Brave, Arc, Edge, Vivaldi.
+2. In the app: **Dashboard › Agents › Browser** shows a six-digit pairing code.
+   Enter it in the extension's popup and click **Save & connect**. The dot
+   turns green on both sides.
+3. That's it. Say "search this page for…" or "open the second result" with a
+   Chromium browser in front and the steps run through the page.
+
+The extension only executes; it never plans and never approves anything. It
+connects to `127.0.0.1:47831` only, from a browser-extension origin only, with
+the pairing code. Tests: `cd browser-extension && npm test` (Playwright loads
+the unpacked extension into Chromium against offline fixture pages).
 
 ## Data & dashboard
 

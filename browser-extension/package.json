@@ -1,0 +1,8 @@
+{
+  "name": "nohands-browser-runner",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": { "test": "node --test test/e2e.test.mjs" },
+  "devDependencies": { "playwright": "^1.56.1" }
+}

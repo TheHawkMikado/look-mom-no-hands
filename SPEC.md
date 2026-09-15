@@ -133,6 +133,8 @@ CORE (web/ on Vercel + Mac-resident pieces)
 EXECUTION LAYER (delegated)
 ├─ Paperclip (optional, self-hosted or VPS): agent org, tasks, budgets, gates
 ├─ Local Runner (Mac): apps, URLs, clicks, keystrokes, files, AppleScript
+│   └─ Browser Runner (Chrome-family extension): ref-based page snapshot,
+│      click/type/select/wait by ref; paired over loopback (DECISIONS 2026-09-15)
 ├─ Outbound voice (Phase 3): calls to humans
 ├─ Cloud sandbox agents (via Paperclip adapters): long unattended jobs
 └─ Human tickets: tasks assigned to team members (email/SMS/GHL)
@@ -374,6 +376,12 @@ Mac and never get a cloud table. The residency test asserts that.
 - **Plaud / Limitless** (Phase 6).
 - **Local Runner** (Mac, shipped): apps, URLs, click/type/scroll, keystrokes,
   files, with tier gating from Phase 1.
+- **Browser Runner** (shipped, `browser-extension/`): the Local Runner's web
+  backend. A paired Chrome/Brave/Arc/Edge extension reads the open tab as a
+  ref-based snapshot and performs click/type/select/scroll/wait/navigate by
+  ref; the coordinator prefers it whenever a Chromium browser is frontmost
+  and falls back to Accessibility otherwise. Executes only — plans and tiers
+  stay in the app; page content is data.
 
 -----
 

@@ -90,7 +90,8 @@ struct DashboardView: View {
         case .procedures:
             ProceduresTab(procedures: coordinator.procedures)
         case .agents:
-            AgentsTab(roles: coordinator.agentRoles, mcp: coordinator.mcp, fleet: coordinator.fleet)
+            AgentsTab(roles: coordinator.agentRoles, mcp: coordinator.mcp, fleet: coordinator.fleet,
+                      browser: coordinator.browser)
         case .paste:
             PasteRulesTab(rules: coordinator.insertRules)
         case .activity:
@@ -622,6 +623,7 @@ private struct AgentsTab: View {
     @ObservedObject var roles: AgentRoleStore
     let mcp: MCPManager
     @ObservedObject var fleet: FleetService
+    @ObservedObject var browser: BrowserBridge
     @ObservedObject private var manager = BackgroundAgentManager.shared
     @ObservedObject private var meter = CostMeter.shared
     @State private var editingRole: AgentRole?
@@ -638,6 +640,8 @@ private struct AgentsTab: View {
                 rolesColumn
                 Divider().padding(.vertical, 8)
                 ConnectionsSection(mcp: mcp)
+                Divider().padding(.vertical, 8)
+                BrowserSection(browser: browser)
             }
             .frame(minWidth: 280)
         }
@@ -827,6 +831,41 @@ private struct ConnectionsSection: View {
         .sheet(isPresented: $adding) {
             AddConnectionSheet(mcp: mcp)
         }
+    }
+}
+
+/// The browser runner: pairing state for the Chrome-family extension that
+/// reads and acts on the live page by ref (BrowserBridge.swift).
+private struct BrowserSection: View {
+    @ObservedObject var browser: BrowserBridge
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("Browser").font(.headline)
+                Spacer()
+                Circle()
+                    .fill(browser.isConnected ? Color.green : browser.listening ? Color.secondary : Color.red)
+                    .frame(width: 7, height: 7)
+                Text(browser.isConnected ? "extension paired"
+                     : browser.listening ? "waiting for the extension" : "not listening")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            Text("With the No Hands extension in Chrome, Brave, Arc or Edge she reads the page itself and clicks exactly what she means, instead of guessing from window labels. Load browser-extension/ unpacked, then enter this code in its popup:")
+                .font(.caption).foregroundStyle(.secondary)
+            HStack {
+                Text(browser.pairingCode).font(.title3.monospaced().bold()).textSelection(.enabled)
+                Spacer()
+                Text("port \(browser.port)").font(.caption2.monospaced()).foregroundStyle(.secondary)
+            }
+            if browser.isConnected, !browser.extensionID.isEmpty {
+                Text("\(browser.extensionID) v\(browser.extensionVersion)").font(.caption2.monospaced()).foregroundStyle(.secondary).lineLimit(1)
+            }
+            if let error = browser.lastError {
+                Text(error).font(.caption2).foregroundStyle(.red).lineLimit(2)
+            }
+        }
+        .padding(.leading, 10)
     }
 }
 

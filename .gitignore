@@ -9,3 +9,6 @@ AuthKey_*.p8
 Scripts/paperclip/.env
 Scripts/paperclip/data/
 Scripts/paperclip/.connection.json
+
+# browser-extension tests link the global Playwright; never commit it
+browser-extension/node_modules/
