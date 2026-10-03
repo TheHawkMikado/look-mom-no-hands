@@ -1,14 +1,13 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import {
   PanResponder,
-  Pressable,
   ScrollView,
   StyleSheet,
   Text,
   View,
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
-import { ApiError, GoalKind } from "../lib/api";
+import { ApiError } from "../lib/api";
 import {
   PttEffect,
   PttEvent,
@@ -36,9 +35,6 @@ export function TalkScreen() {
 
   const [pttState, setPttState] = useState<PttState>("idle");
   const pttRef = useRef<PttState>("idle");
-  const [mode, setMode] = useState<GoalKind>("goal");
-  const modeRef = useRef<GoalKind>("goal");
-  modeRef.current = mode;
   const [partial, setPartial] = useState("");
   const [status, setStatus] = useState<string | null>(null);
 
@@ -48,7 +44,6 @@ export function TalkScreen() {
 
   const sendGoal = useCallback(async (text: string) => {
     const trimmed = text.trim();
-    const kind = modeRef.current;
     if (!trimmed) {
       setStatus("Didn't catch that — try again.");
       return;
@@ -56,14 +51,10 @@ export function TalkScreen() {
     try {
       // Offline (or a server hiccup) never loses a goal: the queue holds it
       // and delivers in order once a request gets through.
-      const outcome = await submit(trimmed, kind);
-      if (outcome === "queued") {
-        setStatus("Queued — will send when online.");
-        return;
-      }
+      const outcome = await submit(trimmed, "goal");
       setStatus(
-        kind === "dictation"
-          ? "Sent — pasting at your Mac's cursor."
+        outcome === "queued"
+          ? "Queued — will send when online."
           : "Sent — your Mac is on it.",
       );
     } catch (e) {
@@ -80,24 +71,11 @@ export function TalkScreen() {
       lastTranscriptRef.current = text;
       setPartial(text);
     },
+    // Hold-to-talk only: locked mode never sees finals on iOS (continuous
+    // transcripts stay interim), so the segment channel below carries it.
     onFinal: (text) => {
       lastTranscriptRef.current = text;
-      if (pttRef.current === "locked") {
-        setPartial("");
-        // "Adios Mama" ends the session on the phone exactly like on the Mac;
-        // whatever was said before it still counts.
-        const beforeStop = splitStopPhrase(text);
-        const content = beforeStop ?? text;
-        if (modeRef.current === "dictation") {
-          if (content.trim()) void sendGoal(content);
-        } else {
-          // Task mode: only utterances carrying the wake phrase become goals.
-          const command = extractCommand(content);
-          if (command) void sendGoal(command);
-        }
-        if (beforeStop !== null) dispatchRef.current("tapStop");
-        return;
-      }
+      if (pttRef.current === "locked") return;
       if (awaitingFinalRef.current) {
         awaitingFinalRef.current = false;
         if (finalTimerRef.current) clearTimeout(finalTimerRef.current);
@@ -105,6 +83,18 @@ export function TalkScreen() {
         return;
       }
       setPartial(text);
+    },
+    onSegment: (segment) => {
+      if (pttRef.current !== "locked") return;
+      setPartial("");
+      // "Adios Mama" ends the session on the phone exactly like on the Mac;
+      // whatever was said before it still counts.
+      const beforeStop = splitStopPhrase(segment);
+      const content = beforeStop ?? segment;
+      // Only utterances carrying the wake phrase become goals.
+      const command = extractCommand(content);
+      if (command) void sendGoal(command);
+      if (beforeStop !== null) dispatchRef.current("tapStop");
     },
   });
 
@@ -235,30 +225,6 @@ export function TalkScreen() {
       </View>
 
       <View style={styles.micZone}>
-        <View style={styles.modeRow}>
-          {(
-            [
-              ["goal", "Task"],
-              ["dictation", "Dictate"],
-            ] as const
-          ).map(([value, label]) => (
-            <Pressable
-              key={value}
-              onPress={() => setMode(value)}
-              style={[styles.modePill, mode === value && styles.modePillOn]}
-            >
-              <Text
-                style={[
-                  styles.modeLabel,
-                  mode === value && styles.modeLabelOn,
-                ]}
-              >
-                {label}
-              </Text>
-            </Pressable>
-          ))}
-        </View>
-
         {holding ? (
           <View style={styles.lockTarget}>
             <Text style={styles.lockGlyph}>{"▲"}</Text>
@@ -286,16 +252,10 @@ export function TalkScreen() {
 
         <Text style={styles.hint}>
           {locked
-            ? mode === "dictation"
-              ? "Dictating — 'Adios Mama' or tap to stop"
-              : "Say 'Hey Mama…' — 'Adios Mama' or tap to stop"
+            ? "Say 'Hey Mama…' — 'Adios Mama' or tap to stop"
             : holding
-              ? mode === "dictation"
-                ? "Release to paste on your Mac"
-                : "Release to send"
-              : mode === "dictation"
-                ? "Hold to dictate to your Mac"
-                : "Hold to talk"}
+              ? "Release to send"
+              : "Hold to talk · slide up for hands-free"}
         </Text>
       </View>
     </View>
@@ -348,30 +308,6 @@ const styles = StyleSheet.create({
   micZone: {
     alignItems: "center",
     paddingBottom: spacing.xl + spacing.md,
-  },
-  modeRow: {
-    flexDirection: "row",
-    gap: spacing.sm,
-    marginBottom: spacing.md,
-  },
-  modePill: {
-    paddingVertical: 8,
-    paddingHorizontal: spacing.lg,
-    borderRadius: 20,
-    borderWidth: 1,
-    borderColor: colors.accent,
-    backgroundColor: colors.surface,
-  },
-  modePillOn: {
-    backgroundColor: colors.accent,
-  },
-  modeLabel: {
-    color: colors.muted,
-    fontSize: 15,
-    fontWeight: "600",
-  },
-  modeLabelOn: {
-    color: colors.text,
   },
   lockTarget: {
     height: 64,

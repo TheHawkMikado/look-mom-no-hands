@@ -3,10 +3,23 @@ import {
   ExpoSpeechRecognitionModule,
   useSpeechRecognitionEvent,
 } from "expo-speech-recognition";
+import { takeSegment } from "../lib/segments";
+
+/** Silence that ends an utterance in continuous mode. Short enough that a
+ * command feels acted-on, long enough that a mid-sentence breath doesn't cut
+ * "open… youtube" into two segments. */
+const SEGMENT_SILENCE_MS = 1200;
 
 interface SpeechCallbacks {
   onPartial: (text: string) => void;
   onFinal: (text: string) => void;
+  /**
+   * Continuous mode only: one spoken utterance, cut on a silence gap. This is
+   * the channel locked mode and note-taking must consume — iOS delivers
+   * continuous results as one cumulative transcript whose isFinal essentially
+   * never fires mid-session, so `onFinal` cannot be relied on there.
+   */
+  onSegment?: (text: string) => void;
 }
 
 /**
@@ -40,6 +53,28 @@ export function useSpeechRecognition(callbacks: SpeechCallbacks) {
   const restartingRef = useRef(false);
   const [error, setError] = useState<string | null>(null);
 
+  // Segmentation state: how much of the cumulative transcript has already been
+  // handed out as segments, plus the silence timer that cuts the next one.
+  const processedRef = useRef(0);
+  const transcriptRef = useRef("");
+  const silenceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const clearSilenceTimer = useCallback(() => {
+    if (silenceTimerRef.current) {
+      clearTimeout(silenceTimerRef.current);
+      silenceTimerRef.current = null;
+    }
+  }, []);
+
+  const cutSegment = useCallback(() => {
+    const { segment, processed } = takeSegment(
+      processedRef.current,
+      transcriptRef.current,
+    );
+    processedRef.current = processed;
+    if (segment) callbacksRef.current.onSegment?.(segment);
+  }, []);
+
   const startEngine = useCallback(async () => {
     restartingRef.current = true;
     engineOwner = instanceIdRef.current;
@@ -49,6 +84,10 @@ export function useSpeechRecognition(callbacks: SpeechCallbacks) {
         setError("Microphone or speech permission denied — enable both in Settings.");
         return;
       }
+      // A restart begins a fresh native transcript; the segment counter must
+      // follow it or the first words after a restart would be sliced away.
+      transcriptRef.current = "";
+      processedRef.current = 0;
       ExpoSpeechRecognitionModule.start({
         lang: "en-US",
         interimResults: true,
@@ -66,12 +105,31 @@ export function useSpeechRecognition(callbacks: SpeechCallbacks) {
     if (engineOwner !== instanceIdRef.current) return;
     const text = event.results?.[0]?.transcript;
     if (!text) return;
-    if (event.isFinal) callbacksRef.current.onFinal(text);
-    else callbacksRef.current.onPartial(text);
+    transcriptRef.current = text;
+    if (event.isFinal) {
+      callbacksRef.current.onFinal(text);
+      // A real final is a hard utterance boundary — cut immediately rather
+      // than waiting out the silence window.
+      if (continuousRef.current) {
+        clearSilenceTimer();
+        cutSegment();
+      }
+      return;
+    }
+    callbacksRef.current.onPartial(text);
+    if (continuousRef.current) {
+      clearSilenceTimer();
+      silenceTimerRef.current = setTimeout(cutSegment, SEGMENT_SILENCE_MS);
+    }
   });
 
   useSpeechRecognitionEvent("end", () => {
     if (engineOwner !== instanceIdRef.current) return;
+    // Whatever was said just before the engine ended must not evaporate.
+    if (continuousRef.current) {
+      clearSilenceTimer();
+      cutSegment();
+    }
     if (!continuousRef.current || restartingRef.current) return;
     if (restartTimerRef.current) clearTimeout(restartTimerRef.current);
     // Small delay: restarting the instant the engine ends races native teardown.
@@ -96,13 +154,14 @@ export function useSpeechRecognition(callbacks: SpeechCallbacks) {
 
   const stop = useCallback(async () => {
     continuousRef.current = false;
+    clearSilenceTimer();
     if (restartTimerRef.current) clearTimeout(restartTimerRef.current);
     try {
       ExpoSpeechRecognitionModule.stop();
     } catch {
       // Already stopped — nothing to unwind.
     }
-  }, []);
+  }, [clearSilenceTimer]);
 
   // Stable identity: consumers put this in dep arrays, and a fresh object per
   // render would silently defeat every useCallback built on top of it.

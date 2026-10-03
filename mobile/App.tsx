@@ -17,8 +17,10 @@ import { FeedProvider } from "./src/state/FeedContext";
 import { GoalQueueProvider } from "./src/state/GoalQueueContext";
 import { TasksProvider, useTasks } from "./src/state/TasksContext";
 import { PushBridge } from "./src/components/PushBridge";
+import { NotesProvider } from "./src/state/NotesContext";
 import { SignInScreen } from "./src/screens/SignInScreen";
 import { TalkScreen } from "./src/screens/TalkScreen";
+import { NotesScreen } from "./src/screens/NotesScreen";
 import { TasksScreen } from "./src/screens/TasksScreen";
 import { TeamScreen } from "./src/screens/TeamScreen";
 import { ActivityScreen } from "./src/screens/ActivityScreen";
@@ -65,6 +67,13 @@ function Tabs() {
         component={TalkScreen}
         options={{
           tabBarIcon: ({ color }) => <TabIcon glyph={"◉"} color={color} />,
+        }}
+      />
+      <Tab.Screen
+        name="Notes"
+        component={NotesScreen}
+        options={{
+          tabBarIcon: ({ color }) => <TabIcon glyph={"✎"} color={color} />,
         }}
       />
       <Tab.Screen
@@ -155,6 +164,7 @@ export default function App() {
     <SafeAreaProvider>
       <AuthContext.Provider value={{ signOut: () => void applyToken(null) }}>
         <GoalQueueProvider>
+          <NotesProvider>
           <FeedProvider>
             <TasksProvider>
               <NavigationContainer ref={navigationRef} theme={navTheme}>
@@ -164,6 +174,7 @@ export default function App() {
               </NavigationContainer>
             </TasksProvider>
           </FeedProvider>
+          </NotesProvider>
         </GoalQueueProvider>
       </AuthContext.Provider>
     </SafeAreaProvider>

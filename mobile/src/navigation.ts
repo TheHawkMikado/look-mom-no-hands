@@ -3,6 +3,7 @@ import { createNavigationContainerRef } from "@react-navigation/native";
 /** Tab routes and their params — the only navigator in the app. */
 export type RootTabParamList = {
   Talk: undefined;
+  Notes: undefined;
   Tasks: { promptId?: string; taskId?: string } | undefined;
   Team: undefined;
   Activity: undefined;
