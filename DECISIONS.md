@@ -299,3 +299,14 @@ asks the owner once at 80% via the same goal_progress event the phone
 already renders, and is refused (409) when it would cross the cap. Reason:
 §6 — money is tier 3 and a false low tier costs money; the cap is enforced
 where the spend is recorded, not where the agent promises to behave.
+
+
+## 2026-10-03 — No two builds ever share a version number
+
+The first unsigned pre-release reused the plist version of the last signed
+release, so the old app and the new one both said 0.04.260905.c13ad41 and
+the owner could not tell them apart. Every build the pipeline packages now
+stamps its own milestone.update.YYMMDD.commit version (the release.sh
+scheme) into the plist for that build, plus `LMNHBuildFlavor = unsigned`,
+which the app shows next to the version. The stamp is not committed for
+unsigned builds; signed releases keep committing theirs through release.sh.

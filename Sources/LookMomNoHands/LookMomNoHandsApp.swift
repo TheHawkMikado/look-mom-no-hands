@@ -717,7 +717,7 @@ struct PanelView: View {
 
     private var versionLine: some View {
         HStack(spacing: 6) {
-            Text("v\(updates.currentVersion)").font(.caption2).foregroundStyle(.secondary)
+            Text("v\(updates.currentVersionLabel)").font(.caption2).foregroundStyle(.secondary)
             Spacer()
             if updates.isChecking {
                 ProgressView().controlSize(.small)
