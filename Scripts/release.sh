@@ -28,6 +28,9 @@
 #   SIGN_ID="Developer ID Application: … (TEAMID)" NOTARY_PROFILE=LookMaNotary \
 #     ./Scripts/release.sh 0.02 --notes "See every window on every Space."
 #
+# Instead of NOTARY_PROFILE, APPLE_ID + APPLE_TEAM_ID + APPLE_APP_PASSWORD work
+# too (that is what CI passes — see .github/workflows/release.yml).
+#
 # Flags:
 #   --notes "…"        what's-new text, shown under the update nudge
 #   --date YYMMDD      override the date component (default: today)
@@ -143,7 +146,7 @@ fi
 
 if [ -z "${SIGN_ID:-}" ] && [ "${ALLOW_UNSIGNED}" = 0 ]; then
     die "SIGN_ID unset — an unsigned DMG makes every downloader clear a Gatekeeper block.
-    Set SIGN_ID + NOTARY_PROFILE (see DISTRIBUTION.md), or pass --allow-unsigned if that's intended."
+    Set SIGN_ID + NOTARY_PROFILE or APPLE_ID/APPLE_TEAM_ID/APPLE_APP_PASSWORD (see DISTRIBUTION.md), or pass --allow-unsigned if that's intended."
 fi
 
 SUFFIX=""
@@ -174,7 +177,7 @@ trap restore_plist EXIT
 DMG="build/${DMG_BASENAME}-${VERSION}.dmg"
 [ -f "${DMG}" ] || die "expected ${DMG} — package_release.sh did not produce it"
 
-if [ -n "${SIGN_ID:-}" ] && [ -n "${NOTARY_PROFILE:-}" ]; then
+if [ -n "${SIGN_ID:-}" ] && notary_configured; then
     xcrun stapler validate "${DMG}" >/dev/null \
         || die "${DMG} has no stapled notarisation ticket — do not publish it"
 fi

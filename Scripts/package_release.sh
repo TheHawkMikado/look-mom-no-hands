@@ -16,6 +16,9 @@
 # Environment variables:
 #   SIGN_ID          "Developer ID Application: Your Name (TEAMID)"  — enables real signing
 #   NOTARY_PROFILE   name of a stored notarytool keychain profile     — enables notarization
+#   or APPLE_ID + APPLE_TEAM_ID + APPLE_APP_PASSWORD                  — same, no stored profile
+#                    (CI uses these: notarytool store-credentials crashes on a
+#                    fresh runner keychain, and the profile buys nothing there)
 set -euo pipefail
 cd "$(dirname "$0")/.."
 source Scripts/common.sh
@@ -71,9 +74,9 @@ if [ -n "${SIGN_ID:-}" ]; then
     codesign --force --timestamp --sign "${SIGN_ID}" "${DMG}"
 fi
 
-if [ -n "${SIGN_ID:-}" ] && [ -n "${NOTARY_PROFILE:-}" ]; then
+if [ -n "${SIGN_ID:-}" ] && notary_configured; then
     echo "▸ notarizing (this can take a few minutes)"
-    xcrun notarytool submit "${DMG}" --keychain-profile "${NOTARY_PROFILE}" --wait
+    xcrun notarytool submit "${DMG}" "${NOTARY_ARGS[@]}" --wait
     echo "▸ stapling ticket"
     xcrun stapler staple "${DMG}"
     xcrun stapler validate "${DMG}"
