@@ -105,15 +105,20 @@ ok "notarisation credentials accepted"
 
 # ------------------------------------------------------------ Vercel ----------
 say "Vercel (so /api/version tells every installed app)"
-echo "  Create a token at https://vercel.com/account/tokens (scope: the team that owns nohandsapp, no expiry)."
+echo "  Create a token at https://vercel.com/account/tokens — Scope: the Hawk Mikado TEAM (not your personal account), Expiration: never."
 read -r -s -p "  Vercel token: " VERCEL_TOKEN; echo
 [ -n "$VERCEL_TOKEN" ] || fail "A Vercel token is required."
 export VERCEL_TOKEN
-# Find the nohandsapp project in the personal scope or any team, then make a
-# production Deploy Hook so the release run can redeploy without guessing.
+# The project and team this repo deploys to. A token scoped to the team can
+# read the project directly; try that first, then fall back to searching the
+# personal scope and every team the token can list. Override with env vars
+# if hosting ever moves: VERCEL_PROJECT_ID=… VERCEL_TEAM_ID=… ./Scripts/setup_release_secrets.sh
+export KNOWN_PROJECT="${VERCEL_PROJECT_ID:-prj_mrbMglraX4HPoWCvoNHzdgb4EAak}"
+export KNOWN_TEAM="${VERCEL_TEAM_ID:-team_hC1FjY3iSUAUNoW5jIPkNzcK}"
 VERCEL_JSON="$(python3 - <<'PY'
-import json, os, sys, urllib.request, urllib.parse
+import json, os, sys, urllib.request, urllib.error
 tok = os.environ["VERCEL_TOKEN"]
+errors = []
 def api(method, path, body=None):
     req = urllib.request.Request("https://api.vercel.com" + path, method=method,
         headers={"authorization": f"Bearer {tok}", "content-type": "application/json"},
@@ -121,17 +126,26 @@ def api(method, path, body=None):
     try:
         with urllib.request.urlopen(req) as r: return json.load(r)
     except urllib.error.HTTPError as e:
-        return {"_error": e.code, "_body": e.read().decode()[:300]}
-teams = [None] + [t["id"] for t in api("GET", "/v2/teams").get("teams", [])]
+        errors.append(f"{method} {path.split('?')[0]} -> {e.code} {e.read().decode()[:160]}")
+        return {}
 found = None
-for team in teams:
-    q = "?search=nohandsapp" + (f"&teamId={team}" if team else "")
-    for p in api("GET", "/v9/projects" + q).get("projects", []):
-        if "nohands" in p["name"]:
-            found = (team, p); break
-    if found: break
+# 1. The known project, with and without the known team.
+for team in (os.environ["KNOWN_TEAM"], None):
+    tq = f"?teamId={team}" if team else ""
+    p = api("GET", f"/v9/projects/{os.environ['KNOWN_PROJECT']}{tq}")
+    if p.get("id"):
+        found = (team, p); break
+# 2. Search by name across whatever scopes the token can see.
 if not found:
-    print(json.dumps({"error": "no project with 'nohands' in its name is visible to this token"})); sys.exit(0)
+    teams = [None] + [t["id"] for t in api("GET", "/v2/teams").get("teams", [])]
+    for team in teams:
+        q = "?search=nohands" + (f"&teamId={team}" if team else "")
+        for p in api("GET", "/v9/projects" + q).get("projects", []):
+            if "nohands" in p["name"]:
+                found = (team, p); break
+        if found: break
+if not found:
+    print(json.dumps({"error": "this token can't see the nohandsapp project. Vercel said: " + ("; ".join(errors) or "nothing visible") + ". Make the token again with Scope = the Hawk Mikado team and paste it exactly."})); sys.exit(0)
 team, proj = found
 tq = f"?teamId={team}" if team else ""
 hook = ""
@@ -139,8 +153,7 @@ res = api("POST", f"/v1/projects/{proj['id']}/deploy-hooks{tq}", {"name": "relea
 for h in (res.get("link") or {}).get("deployHooks", []):
     if h.get("name") == "release.yml" and h.get("url"): hook = h["url"]
 if not hook:
-    cur = api("GET", f"/v9/projects/{proj['id']}{tq}")
-    for h in (cur.get("link") or {}).get("deployHooks", []):
+    for h in (proj.get("link") or {}).get("deployHooks", []):
         if h.get("url"): hook = h["url"]; break
 print(json.dumps({"project_id": proj["id"], "project_name": proj["name"], "team_id": team or "", "hook": hook}))
 PY
