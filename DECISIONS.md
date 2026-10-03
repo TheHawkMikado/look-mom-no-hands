@@ -310,3 +310,21 @@ stamps its own milestone.update.YYMMDD.commit version (the release.sh
 scheme) into the plist for that build, plus `LMNHBuildFlavor = unsigned`,
 which the app shows next to the version. The stamp is not committed for
 unsigned builds; signed releases keep committing theirs through release.sh.
+
+## 2026-10-03 — Secret beta: $99 for life, BETA## codes
+
+- **Offer.** One plan, `beta`: $99 one-time, BYOK, unlimited devices, no
+  sub-users, never expires. Sold only from `/beta`, which is unlinked, carries
+  `robots: noindex` in its metadata and is disallowed in `/robots.txt`
+  (along with /admin, /account, /status, /team and /api).
+- **Codes are a formula, not a list.** `BETA##` means `##` dollars off, 1–99.
+  `BETA99` makes the seat free. Nothing is created in Stripe for a code; the
+  server computes the price (`lib/beta.ts`) and charges that exact amount via
+  `price_data`. Stripe promotion codes are disabled on that checkout so the
+  two cannot stack.
+- **Free seats need a sign-in.** A $0 price never reaches Stripe; the licence
+  is minted for the signed-in account in `/api/checkout/beta`. That also stops
+  anonymous minting with a leaked BETA99.
+- **Every redemption is logged** in `beta_redemptions` (email, code, discount,
+  paid, licence key) and shown on `/admin › Beta`, where the whole programme
+  can be closed and reopened (setting `beta_enabled`).
