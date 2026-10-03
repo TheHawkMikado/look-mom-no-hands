@@ -1512,7 +1512,7 @@ private struct SettingsTab: View {
     private var versionSection: some View {
         Section("Version") {
             LabeledContent("Current") {
-                Text("v\(updates.currentVersion)").monospacedDigit()
+                Text("v\(updates.currentVersionLabel)").monospacedDigit()
             }
             Toggle("Update automatically when idle",
                    isOn: Binding(get: { updates.autoInstall }, set: { updates.autoInstall = $0 }))

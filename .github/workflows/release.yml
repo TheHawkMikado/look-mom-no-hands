@@ -121,17 +121,26 @@ jobs:
         if: steps.secrets.outputs.ready != 'true'
         run: |
           set -euo pipefail
-          ./Scripts/package_release.sh
-          VERSION="$(/usr/libexec/PlistBuddy -c 'Print CFBundleShortVersionString' App/Info.plist)"
+          # No two builds ever share a version. Same scheme as release.sh
+          # (milestone.update.YYMMDD.commit) stamped into the plist for THIS
+          # build only (not committed), plus a flavour the app shows next to it.
           SHORT="$(git rev-parse --short HEAD)"
+          MARKETING="$(/usr/libexec/PlistBuddy -c 'Print CFBundleShortVersionString' App/Info.plist | cut -d. -f1-2)"
+          BUILD="$(/usr/libexec/PlistBuddy -c 'Print CFBundleVersion' App/Info.plist)"
+          VERSION="${MARKETING}.$(date +%y%m%d).${SHORT}"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString ${VERSION}" App/Info.plist
+          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $((BUILD + 1))" App/Info.plist
+          /usr/libexec/PlistBuddy -c "Add :LMNHBuildFlavor string unsigned" App/Info.plist \
+            || /usr/libexec/PlistBuddy -c "Set :LMNHBuildFlavor unsigned" App/Info.plist
+          ./Scripts/package_release.sh
           DMG="$(ls build/*.dmg | head -1)"
-          UNSIGNED="build/LookMaNoHands-unsigned-${SHORT}.dmg"
+          UNSIGNED="build/LookMaNoHands-${VERSION}-unsigned.dmg"
           mv "$DMG" "$UNSIGNED"
-          TAG="unsigned-$(date +%y%m%d)-${SHORT}"
+          TAG="unsigned-${VERSION}"
           NOTES="${{ github.event.inputs.notes }}"
           [ -n "$NOTES" ] || NOTES="$(git log -1 --pretty=%s)"
           printf '%s\n\n%s\n' "$NOTES" "**Unsigned build** — made without the Developer ID certificate, so the app's own updater will not install it. To use it: download, drag to Applications, right-click the app → Open → Open (once). macOS may ask again for Microphone, Speech Recognition and Accessibility. Add the signing secrets (DISTRIBUTION.md → Automatic releases) and the next merge produces a normal signed release instead." > "$RUNNER_TEMP/notes.md"
-          gh release create "$TAG" "$UNSIGNED" --prerelease --title "Unsigned build ${SHORT} (based on v${VERSION})" --notes-file "$RUNNER_TEMP/notes.md"
+          gh release create "$TAG" "$UNSIGNED" --prerelease --title "Unsigned build v${VERSION}" --notes-file "$RUNNER_TEMP/notes.md"
           echo "::notice::Published unsigned pre-release $TAG"
 
       - name: Tell every installed app (Vercel LATEST_APP_VERSION)

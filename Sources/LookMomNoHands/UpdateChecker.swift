@@ -117,6 +117,19 @@ final class UpdateChecker: ObservableObject {
     /// The running build, for display next to the check button.
     var currentVersion: String { current }
 
+    /// "unsigned" on a build the release pipeline packaged without the
+    /// Developer ID (Info.plist `LMNHBuildFlavor`), nil on a signed release.
+    /// Every build carries its own version; this only says which kind it is.
+    nonisolated static var buildFlavor: String? {
+        (Bundle.main.infoDictionary?["LMNHBuildFlavor"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+    }
+
+    /// The version as shown to the user: "0.04.260915.2f0f1c5 · unsigned".
+    var currentVersionLabel: String {
+        if let flavor = Self.buildFlavor { return "\(current) · \(flavor)" }
+        return current
+    }
+
     private let manifestURL = URL(string: "https://nohandsapp.com/api/version")!
     private let lastCheckKey = "lmnh.update.lastCheck"
 
