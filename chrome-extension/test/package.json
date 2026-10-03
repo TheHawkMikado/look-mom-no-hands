@@ -1,0 +1,8 @@
+{
+  "name": "lmnh-chrome-hand-test",
+  "private": true,
+  "type": "module",
+  "description": "End-to-end smoke test: loads the extension into Chromium, plays the Mac app over a local WebSocket, and drives a test page by ref.",
+  "scripts": { "test": "node smoke.mjs" },
+  "devDependencies": { "playwright": "1.63.0", "ws": "^8.18.0" }
+}

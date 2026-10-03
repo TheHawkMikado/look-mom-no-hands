@@ -13,10 +13,10 @@ name: release
 
 on:
   pull_request:
-    paths: ["Sources/**", "Tests/**", "App/**", "Package.swift", "Scripts/**", ".github/workflows/release.yml"]
+    paths: ["Sources/**", "Tests/**", "App/**", "Package.swift", "Scripts/**", "chrome-extension/**", ".github/workflows/release.yml"]
   push:
     branches: [main]
-    paths: ["Sources/**", "Tests/**", "App/**", "Package.swift", "Scripts/**", ".github/workflows/release.yml"]
+    paths: ["Sources/**", "Tests/**", "App/**", "Package.swift", "Scripts/**", "chrome-extension/**", ".github/workflows/release.yml"]
   workflow_dispatch:
     inputs:
       notes:
@@ -44,9 +44,27 @@ jobs:
       - name: Unit tests
         run: swift test
 
+  extension:
+    name: Chrome extension smoke test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install
+        working-directory: chrome-extension/test
+        run: npm ci
+      - name: Chromium
+        working-directory: chrome-extension/test
+        run: npx playwright install --with-deps chromium
+      - name: Drive the fixture page by ref
+        working-directory: chrome-extension/test
+        run: npm test
+
   release:
     name: Sign, notarise, publish
-    needs: build
+    needs: [build, extension]
     if: github.event_name != 'pull_request'
     runs-on: macos-15
     env:

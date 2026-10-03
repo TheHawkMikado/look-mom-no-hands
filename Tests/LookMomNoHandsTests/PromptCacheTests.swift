@@ -80,26 +80,16 @@ final class PromptCacheTests: XCTestCase {
         return prefix / 4
     }
 
-    /// The tool alone does **not** clear Haiku's minimum — measured at ~3.3k
-    /// against a 4096 floor. This is recorded rather than asserted away because
-    /// it is the live state of the app: a brand-new user, with no vocabulary or
-    /// remembered facts yet, caches nothing and pays full input price.
-    ///
-    /// The test exists to catch the prompt shrinking *further* and to keep the
-    /// real number visible. Closing the gap means adding genuinely useful
-    /// content to the tool description — worked examples of the failure modes
-    /// already fixed in prose — not filler to game a threshold.
-    func testBareToolFallsShortOfTheCacheMinimum_knownGap() throws {
+    /// The bare tool clears Haiku's cache minimum on its own: a brand-new user,
+    /// with no vocabulary or remembered facts yet, already gets the cached
+    /// prefix. (It sat ~760 tokens short until the Chrome-extension guidance —
+    /// genuinely load-bearing prose, not filler — pushed it over.) The lower
+    /// bound catches the prompt being trimmed back under the floor.
+    func testBareToolClearsTheCacheMinimum() throws {
         let tokens = try approxTokens(body())
-        XCTAssertGreaterThan(tokens, 3_000,
-                             "the tool description has been trimmed substantially; "
-                               + "that widens an already-open caching gap")
-        XCTAssertLessThan(tokens, haikuCacheMinimumTokens,
-                          """
-                          The bare tool now clears \(haikuCacheMinimumTokens) tokens — \
-                          caching engages for every user, including new ones. That's \
-                          the goal: delete this test and keep only the one below.
-                          """)
+        XCTAssertGreaterThan(tokens, haikuCacheMinimumTokens,
+                             "the tool description has shrunk below Haiku's cache minimum; "
+                               + "new users would pay full input price again")
     }
 
     /// Once a user has accumulated vocabulary and remembered facts, the stable
@@ -107,7 +97,7 @@ final class PromptCacheTests: XCTestCase {
     /// asserts the wiring actually delivers that — the breakpoint has to sit on
     /// the stable block for its bytes to count toward the prefix at all.
     func testPrefixClearsTheMinimumOnceStableContentAccumulates() throws {
-        // ~1k tokens: the bare tool is ~760 short of the minimum, so this is the
+        // ~1k tokens: well past the minimum even on its own, so this is the
         // rough volume of vocabulary and remembered facts an established user
         // needs before caching starts paying.
         let stable = String(repeating: "Say 'lmnh' as look-mom-no-hands. ", count: 120)
