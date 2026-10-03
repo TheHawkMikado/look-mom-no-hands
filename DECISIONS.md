@@ -328,3 +328,15 @@ unsigned builds; signed releases keep committing theirs through release.sh.
 - **Every redemption is logged** in `beta_redemptions` (email, code, discount,
   paid, licence key) and shown on `/admin › Beta`, where the whole programme
   can be closed and reopened (setting `beta_enabled`).
+
+## 2026-10-03 — Signed releases over self-installing unsigned builds
+
+The owner's Mac did not see the unsigned pre-releases, and that is by design:
+the version manifest only moves on a signed release, and the updater pins the
+Developer ID. Offered two ways out (teach unsigned apps to accept unsigned
+updates, or add the signing secrets) and the owner chose signing as the more
+secure path. `Scripts/setup_release_secrets.sh` makes that one command on the
+Mac holding the certificate: it exports the identity, verifies the notary
+login with Apple, finds the Vercel project, stores the ten secrets with `gh`,
+and dispatches the first signed release. The unsigned path stays as the
+fallback for a repo without secrets, never as something the app installs.
