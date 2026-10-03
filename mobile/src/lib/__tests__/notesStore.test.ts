@@ -43,6 +43,14 @@ describe("parseNotes", () => {
     expect(parseNotes(raw).map((n) => n.id)).toEqual(["good"]);
   });
 
+  it("keeps a note's report through a round-trip", () => {
+    const note = {
+      id: "a", title: "Roof plan", text: "x", createdAt: "2026-10-01T00:00:00Z", updatedAt: "", sentToMac: false,
+      report: { title: "Roof plan", summary: "Fix it.", keyPoints: ["leak"], actionItems: ["call Bob"] },
+    };
+    expect(parseNotes(JSON.stringify([note]))[0].report).toEqual(note.report);
+  });
+
   it("survives corrupt JSON and wrong shapes", () => {
     expect(parseNotes("{not json")).toEqual([]);
     expect(parseNotes('{"a":1}')).toEqual([]);

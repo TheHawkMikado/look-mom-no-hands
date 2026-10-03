@@ -9,6 +9,14 @@
  * so they run under jest without native modules.
  */
 
+/** What the server's summarizer returns — same shape as the Mac's reports. */
+export interface NoteReport {
+  title: string;
+  summary: string;
+  keyPoints: string[];
+  actionItems: string[];
+}
+
 export interface Note {
   id: string;
   title: string;
@@ -18,13 +26,16 @@ export interface Note {
   updatedAt: string;
   /** Whether this note was also delivered to the Mac's cursor. */
   sentToMac: boolean;
+  /** Summary / key points / action items, once generated. */
+  report?: NoteReport | null;
 }
 
 export function newNoteId(now: number = Date.now()): string {
   return `${now.toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
-/** First few words of the text, cleaned up — the list row's one-liner. */
+/** First few words of the text, cleaned up — the list row's one-liner until
+ *  a report supplies a real title. */
 export function deriveTitle(text: string, maxWords = 6): string {
   const words = text.trim().split(/\s+/).filter(Boolean);
   if (words.length === 0) return "Untitled note";
@@ -57,7 +68,10 @@ export function parseNotes(raw: string): Note[] {
 }
 
 export interface NoteFileStore {
+  /** null when no notebook has been written yet. Throws on a real read error. */
   read(): Promise<string | null>;
+  /** Throws when the save fails — the caller surfaces it rather than letting
+   *  notes silently evaporate between launches. */
   write(raw: string): Promise<void>;
 }
 
@@ -68,19 +82,14 @@ export function createNoteFileStore(): NoteFileStore {
   const file = new File(Paths.document, "notes.json");
   return {
     async read() {
-      try {
-        if (!file.exists) return null;
-        return file.textSync();
-      } catch {
-        return null;
-      }
+      if (!file.exists) return null;
+      return file.textSync();
     },
     async write(raw: string) {
-      try {
-        file.write(raw);
-      } catch {
-        // A failed save keeps the in-memory notes; the next save retries.
-      }
+      // write() does not promise to create a missing file; the first save
+      // after install must create it or every note is lost on relaunch.
+      if (!file.exists) file.create();
+      file.write(raw);
     },
   };
 }

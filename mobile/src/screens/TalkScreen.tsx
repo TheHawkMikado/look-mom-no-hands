@@ -91,9 +91,15 @@ export function TalkScreen() {
       // whatever was said before it still counts.
       const beforeStop = splitStopPhrase(segment);
       const content = beforeStop ?? segment;
-      // Only utterances carrying the wake phrase become goals.
+      // Only utterances carrying the wake phrase become goals — and when one
+      // doesn't, say so: a silently dropped "go open YouTube" reads as the
+      // whole app being broken.
       const command = extractCommand(content);
       if (command) void sendGoal(command);
+      else if (beforeStop === null && content.trim()) {
+        const heard = content.length > 40 ? `${content.slice(0, 40)}…` : content;
+        setStatus(`Heard "${heard}" — start with "Hey Mama" to send it as a task.`);
+      }
       if (beforeStop !== null) dispatchRef.current("tapStop");
     },
   });

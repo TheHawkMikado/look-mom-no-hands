@@ -10,6 +10,7 @@ import {
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import * as Clipboard from "expo-clipboard";
+import { reportNote } from "../lib/api";
 import { splitStopPhrase } from "../lib/wake";
 import { useSpeechRecognition } from "../hooks/useSpeechRecognition";
 import { useNotes } from "../state/NotesContext";
@@ -21,12 +22,13 @@ import { colors, spacing } from "../theme";
 /**
  * Otter-style dictation: tap record, watch the live transcript build, tap stop
  * (or say "Adios Mama") and the note is saved ON THE PHONE — readable,
- * copyable, shareable, deletable. Delivery to the Mac's cursor is a bonus that
- * rides the goal queue when online; the note never depends on it.
+ * copyable, shareable, deletable — then summarized in the background into a
+ * title, TLDR, key points and action items. Delivery to the Mac's cursor is a
+ * bonus that rides the goal queue when online; the note never depends on it.
  */
 export function NotesScreen() {
   const insets = useSafeAreaInsets();
-  const { notes, addNote, markSentToMac, deleteNote } = useNotes();
+  const { notes, storageError, addNote, attachReport, markSentToMac, deleteNote } = useNotes();
   const { submit } = useGoalQueue();
 
   const [recording, setRecording] = useState(false);
@@ -38,6 +40,26 @@ export function NotesScreen() {
   const [livePartial, setLivePartial] = useState("");
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [status, setStatus] = useState<string | null>(null);
+  const [summarizing, setSummarizing] = useState<ReadonlySet<string>>(new Set());
+
+  const summarize = useCallback(
+    async (note: Note) => {
+      setSummarizing((s) => new Set(s).add(note.id));
+      try {
+        attachReport(note.id, await reportNote(note.text));
+      } catch {
+        // The note is safe; the summary is a retryable extra.
+        setStatus("Couldn't summarize — open the note and tap Summarize to retry.");
+      } finally {
+        setSummarizing((s) => {
+          const next = new Set(s);
+          next.delete(note.id);
+          return next;
+        });
+      }
+    },
+    [attachReport],
+  );
 
   const finishNote = useCallback(
     async (finalText?: string) => {
@@ -55,7 +77,8 @@ export function NotesScreen() {
         return;
       }
       const note = addNote(text, false);
-      setStatus("Saved on this phone.");
+      setStatus("Saved on this phone — summarizing…");
+      void summarize(note);
       try {
         const outcome = await submit(text, "dictation");
         if (outcome === "sent") {
@@ -69,7 +92,7 @@ export function NotesScreen() {
         setStatus("Saved on this phone (couldn't reach your Mac).");
       }
     },
-    [addNote, markSentToMac, submit],
+    [addNote, markSentToMac, submit, summarize],
   );
 
   const finishRef = useRef(finishNote);
@@ -157,6 +180,7 @@ export function NotesScreen() {
             : "Tap to start a note"}
         </Text>
         {status && !recording ? <Text style={styles.status}>{status}</Text> : null}
+        {storageError ? <Text style={styles.storageError}>{storageError}</Text> : null}
       </View>
 
       {recording ? (
@@ -170,11 +194,12 @@ export function NotesScreen() {
           {notes.length === 0 ? (
             <Text style={styles.empty}>
               No notes yet. Tap the button and start talking — everything you
-              say is saved here, and lands at your Mac's cursor too.
+              say is saved here, summarized, and lands at your Mac's cursor too.
             </Text>
           ) : (
             notes.map((note) => {
               const expanded = expandedId === note.id;
+              const busy = summarizing.has(note.id);
               return (
                 <Pressable
                   key={note.id}
@@ -189,6 +214,14 @@ export function NotesScreen() {
                   </View>
                   {expanded ? (
                     <>
+                      {note.report ? (
+                        <NoteReportView report={note.report} />
+                      ) : (
+                        <Text style={styles.summarizingHint}>
+                          {busy ? "Summarizing…" : "No summary yet."}
+                        </Text>
+                      )}
+                      <Text style={styles.sectionLabel}>Transcript</Text>
                       <Text style={styles.noteBody} selectable>
                         {note.text}
                       </Text>
@@ -202,6 +235,15 @@ export function NotesScreen() {
                         >
                           <Text style={styles.actionLabel}>Share</Text>
                         </Pressable>
+                        <Pressable
+                          style={[styles.action, busy && styles.actionDisabled]}
+                          disabled={busy}
+                          onPress={() => void summarize(note)}
+                        >
+                          <Text style={styles.actionLabel}>
+                            {busy ? "Summarizing…" : note.report ? "Re-summarize" : "Summarize"}
+                          </Text>
+                        </Pressable>
                         <Pressable style={styles.action} onPress={() => void sendNoteToMac(note)}>
                           <Text style={styles.actionLabel}>
                             {note.sentToMac ? "Send again" : "Send to Mac"}
@@ -214,7 +256,7 @@ export function NotesScreen() {
                     </>
                   ) : (
                     <Text style={styles.notePreview} numberOfLines={2}>
-                      {note.text}
+                      {note.report?.summary || note.text}
                     </Text>
                   )}
                 </Pressable>
@@ -223,6 +265,43 @@ export function NotesScreen() {
           )}
         </ScrollView>
       )}
+    </View>
+  );
+}
+
+function NoteReportView({ report }: { report: NonNullable<Note["report"]> }) {
+  return (
+    <View>
+      {report.summary ? (
+        <>
+          <Text style={styles.sectionLabel}>Summary</Text>
+          <Text style={styles.noteBody} selectable>
+            {report.summary}
+          </Text>
+        </>
+      ) : null}
+      {report.keyPoints.length > 0 ? (
+        <>
+          <Text style={styles.sectionLabel}>Key points</Text>
+          {report.keyPoints.map((p, i) => (
+            <Text key={i} style={styles.bullet} selectable>
+              {"•  "}
+              {p}
+            </Text>
+          ))}
+        </>
+      ) : null}
+      {report.actionItems.length > 0 ? (
+        <>
+          <Text style={styles.sectionLabel}>Action items</Text>
+          {report.actionItems.map((a, i) => (
+            <Text key={i} style={styles.bullet} selectable>
+              {"☐  "}
+              {a}
+            </Text>
+          ))}
+        </>
+      ) : null}
     </View>
   );
 }
@@ -271,6 +350,13 @@ const styles = StyleSheet.create({
     color: colors.success,
     fontSize: 13,
     marginTop: spacing.xs,
+    textAlign: "center",
+  },
+  storageError: {
+    color: colors.danger,
+    fontSize: 13,
+    marginTop: spacing.xs,
+    textAlign: "center",
   },
   liveTranscript: {
     flex: 1,
@@ -321,11 +407,31 @@ const styles = StyleSheet.create({
     fontSize: 14,
     marginTop: 4,
   },
+  sectionLabel: {
+    color: colors.muted,
+    fontSize: 12,
+    fontWeight: "700",
+    letterSpacing: 0.6,
+    textTransform: "uppercase",
+    marginTop: spacing.md,
+    marginBottom: 4,
+  },
+  summarizingHint: {
+    color: colors.muted,
+    fontSize: 13,
+    marginTop: spacing.sm,
+    fontStyle: "italic",
+  },
   noteBody: {
     color: colors.text,
     fontSize: 15,
     lineHeight: 22,
-    marginTop: spacing.sm,
+  },
+  bullet: {
+    color: colors.text,
+    fontSize: 15,
+    lineHeight: 22,
+    paddingLeft: 4,
   },
   actions: {
     flexDirection: "row",
@@ -339,6 +445,9 @@ const styles = StyleSheet.create({
     borderRadius: 16,
     borderWidth: 1,
     borderColor: colors.border,
+  },
+  actionDisabled: {
+    opacity: 0.5,
   },
   actionLabel: {
     color: colors.accent,

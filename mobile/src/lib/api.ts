@@ -4,6 +4,8 @@
  * to the signed-out state via the registered handler.
  */
 
+import type { NoteReport } from "./notesStore";
+
 export const SERVER_URL = "https://nohandsapp.com";
 
 export type FeedEventKind =
@@ -86,6 +88,15 @@ export function submitGoal(
   return request("/api/app/goals", {
     method: "POST",
     body: JSON.stringify({ text, kind }),
+  });
+}
+
+/** Contract: POST /api/app/notes/report { text } → { title, summary,
+ *  keyPoints, actionItems }. 503 when the account has no Anthropic key. */
+export function reportNote(text: string): Promise<NoteReport> {
+  return request("/api/app/notes/report", {
+    method: "POST",
+    body: JSON.stringify({ text }),
   });
 }
 
