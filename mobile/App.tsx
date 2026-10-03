@@ -1,8 +1,12 @@
 import React, { useCallback, useEffect, useState } from "react";
-import { Text } from "react-native";
+import { Text, useColorScheme } from "react-native";
 import { StatusBar } from "expo-status-bar";
 import * as Linking from "expo-linking";
-import { DarkTheme, NavigationContainer } from "@react-navigation/native";
+import {
+  DarkTheme,
+  DefaultTheme,
+  NavigationContainer,
+} from "@react-navigation/native";
 import { createBottomTabNavigator } from "@react-navigation/bottom-tabs";
 import { SafeAreaProvider } from "react-native-safe-area-context";
 import * as api from "./src/lib/api";
@@ -26,21 +30,27 @@ import { TeamScreen } from "./src/screens/TeamScreen";
 import { ActivityScreen } from "./src/screens/ActivityScreen";
 import { SettingsScreen } from "./src/screens/SettingsScreen";
 import { navigationRef, RootTabParamList } from "./src/navigation";
-import { colors } from "./src/theme";
+import { colors, palettes } from "./src/theme";
 
 const Tab = createBottomTabNavigator<RootTabParamList>();
 
-const navTheme = {
-  ...DarkTheme,
-  colors: {
-    ...DarkTheme.colors,
-    primary: colors.accent,
-    background: colors.bg,
-    card: colors.surface,
-    text: colors.text,
-    border: colors.border,
-  },
-};
+/** React Navigation wants plain strings, so it gets per-scheme palettes
+ *  rather than the dynamic tokens the rest of the app uses. */
+function navTheme(scheme: "light" | "dark") {
+  const base = scheme === "dark" ? DarkTheme : DefaultTheme;
+  const p = palettes[scheme];
+  return {
+    ...base,
+    colors: {
+      ...base.colors,
+      primary: colors.accent,
+      background: p.bg,
+      card: p.surface,
+      text: p.text,
+      border: p.border,
+    },
+  };
+}
 
 function TabIcon({ glyph, color }: { glyph: string; color: string }) {
   return <Text style={{ color, fontSize: 17 }}>{glyph}</Text>;
@@ -110,6 +120,7 @@ function Tabs() {
 }
 
 export default function App() {
+  const scheme = useColorScheme() === "light" ? "light" : "dark";
   const [token, setTokenState] = useState<string | null>(null);
   const [booted, setBooted] = useState(false);
 
@@ -154,7 +165,7 @@ export default function App() {
   if (!token) {
     return (
       <SafeAreaProvider>
-        <StatusBar style="light" />
+        <StatusBar style="auto" />
         <SignInScreen onSignedIn={(t) => void applyToken(t)} />
       </SafeAreaProvider>
     );
@@ -167,8 +178,8 @@ export default function App() {
           <NotesProvider>
           <FeedProvider>
             <TasksProvider>
-              <NavigationContainer ref={navigationRef} theme={navTheme}>
-                <StatusBar style="light" />
+              <NavigationContainer ref={navigationRef} theme={navTheme(scheme)}>
+                <StatusBar style="auto" />
                 <PushBridge />
                 <Tabs />
               </NavigationContainer>
