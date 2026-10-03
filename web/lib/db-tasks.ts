@@ -4,7 +4,7 @@ import type { Tier } from "@/lib/tiers";
 import { ensureRoutingSchema } from "@/lib/router";
 import { ensureTeamSchemaSQL } from "@/lib/team";
 import { ensureBrainSchema } from "@/lib/db-brain";
-import { ensureBetaSchema } from "@/lib/db-beta";
+import { ensureBetaSchema, ensureBetaTesterSchema } from "@/lib/db-beta";
 import { decryptSecret, encryptSecret } from "@/lib/crypto";
 import { ensureSettingsSchema } from "@/lib/settings";
 import { ensurePromptSchema } from "@/lib/prompts";
@@ -231,6 +231,7 @@ export async function ensureTaskSchema(db = sql()) {
   // Phase 4–5: eval runs, shared brain, promotion queue, ad-process steps.
   await ensureBrainSchema(db);
   await ensureBetaSchema(db);
+  await ensureBetaTesterSchema(db);
 }
 
 const norm = (email: string) => email.trim().toLowerCase();

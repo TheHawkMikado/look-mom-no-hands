@@ -51,9 +51,11 @@ export function BetaBuy({ initialCode = "" }: { initialCode?: string }) {
         )}
       </div>
       <p className="dim small" style={{ margin: "4px 0 14px" }}>One payment. Yours for life. No subscription.</p>
-      <label className="field">
-        <span>Invite code</span>
+      <label className="dim small" style={{ display: "block", textAlign: "left" }}>
+        Invite code
         <input
+          className="field"
+          style={{ marginTop: 6 }}
           value={code}
           onChange={(e) => setCode(e.target.value.toUpperCase())}
           placeholder="BETA50"
