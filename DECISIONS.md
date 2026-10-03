@@ -374,3 +374,22 @@ assistant knows exactly where to click instead of guessing from screenshots.
   Chromium under Playwright, plays the Mac app over the socket, and drives a
   fixture page: map, find, click (incl. shadow DOM), type, select, Enter
   submits, scroll, html, text, tabs, screenshot. Runs on every PR (Linux job).
+
+## 2026-10-03 — "Open ChatGPT": the app, or Chrome? Ask once, remember
+
+Owner's call after the first real session: when something is both an
+installed app and a website, the assistant should ask which one they want
+and save the answer. Implemented in `OpenPreferenceStore.swift` and the
+coordinator's `openWithPreference`:
+
+- An open step is a candidate when the thing has a Mac app installed AND a
+  web twin — from the planner (`url` on `open_app` for web apps) or a
+  built-in table (ChatGPT, Slack, Notion, Spotify, Zoom, Gmail…). Native-only
+  apps and plain websites never trigger the question.
+- Order of precedence: the command's own words ("…in Chrome", "the app") →
+  the remembered choice → ask. The question is spoken and shown on the
+  panel with two buttons; a spoken or clicked answer within ten seconds is
+  remembered per thing. No answer opens the installed app and remembers
+  nothing, so a missed question never locks in a guess.
+- "Chrome" means Google Chrome when installed, else the default browser.
+- Memory › Where things open lists the choices; removing one re-asks.

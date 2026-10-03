@@ -74,7 +74,7 @@ struct DashboardView: View {
     @ViewBuilder private var content: some View {
         switch selected {
         case .memory:
-            MemoryTab(coordinator: coordinator, environment: coordinator.environment, knowledge: coordinator.knowledge, learned: coordinator.learnedControls, appCaps: coordinator.appCapabilities)
+            MemoryTab(coordinator: coordinator, environment: coordinator.environment, knowledge: coordinator.knowledge, learned: coordinator.learnedControls, appCaps: coordinator.appCapabilities, openPrefs: coordinator.openPreferences)
         case .live:
             LiveTab(coordinator: coordinator)
         case .meetings:
@@ -115,6 +115,7 @@ private struct MemoryTab: View {
     @ObservedObject var knowledge: KnowledgeStore
     @ObservedObject var learned: ElementMemoryStore
     @ObservedObject var appCaps: AppCapabilityStore
+    @ObservedObject var openPrefs: OpenPreferenceStore
     @State private var newFact = ""
 
     var body: some View {
@@ -225,6 +226,24 @@ private struct MemoryTab: View {
                             }
                             Spacer()
                             Button { learned.remove(el.id) } label: { Image(systemName: "trash").foregroundStyle(.red) }
+                                .buttonStyle(.plain)
+                        }
+                    }
+                }
+
+                Section("Where things open (the app, or Chrome)") {
+                    if openPrefs.preferences.isEmpty {
+                        Text("None yet. The first time you say “open ChatGPT” for something that is both an installed app and a website, it asks which you want and remembers. Remove one here to be asked again.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                    ForEach(openPrefs.preferences) { pref in
+                        HStack {
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text("\(pref.displayName) → \(pref.choice == .browser ? "Chrome" : "the app")").font(.callout)
+                                if pref.choice == .browser { Text(pref.url).font(.caption2).foregroundStyle(.secondary) }
+                            }
+                            Spacer()
+                            Button { openPrefs.remove(pref.id) } label: { Image(systemName: "trash").foregroundStyle(.red) }
                                 .buttonStyle(.plain)
                         }
                     }

@@ -257,6 +257,13 @@ final class AppCoordinator: ObservableObject {
     }
     let insertRules: InsertRulesStore
     let learnedControls: ElementMemoryStore
+    /// Per-thing memory of "the app, or Chrome?" (OpenPreferenceStore.swift).
+    let openPreferences: OpenPreferenceStore
+    /// The command being executed, so an open step can honour "…in Chrome".
+    private var lastCommandText = ""
+    /// A pending "the app, or Chrome?" question; the panel buttons answer it.
+    private var awaitingOpenChoice: String?
+    private var panelOpenAnswer: String?
     let appCapabilities: AppCapabilityStore
     private var capabilityFetches: Set<String> = []   // bundleIDs with a fetch in flight
 
@@ -334,6 +341,7 @@ final class AppCoordinator: ObservableObject {
         meetingSession = MeetingSession(brain: brain, outbox: outbox)
         insertRules = InsertRulesStore(directory: store.directory)
         learnedControls = ElementMemoryStore(directory: store.directory)
+        openPreferences = OpenPreferenceStore(directory: store.directory)
         appCapabilities = AppCapabilityStore(directory: store.directory)
         if UserDefaults.standard.object(forKey: Self.silenceKey) != nil {
             recorderEndPause = UserDefaults.standard.double(forKey: Self.silenceKey)
@@ -956,6 +964,12 @@ final class AppCoordinator: ObservableObject {
     /// The user clicked an option in the on-screen clarification panel — treat it
     /// exactly as if they'd spoken it.
     func answerClarification(_ option: String) {
+        if awaitingOpenChoice != nil {
+            panelOpenAnswer = option
+            awaitingOpenChoice = nil
+            pendingClarification = nil
+            return
+        }
         if awaitingPrompt != nil {
             resolvePrompt(answer: option)
             return
@@ -968,6 +982,12 @@ final class AppCoordinator: ObservableObject {
     }
 
     func dismissClarification() {
+        if awaitingOpenChoice != nil {
+            panelOpenAnswer = ""
+            awaitingOpenChoice = nil
+            pendingClarification = nil
+            return
+        }
         if awaitingPrompt != nil {
             resolvePrompt(answer: "")   // dismissed = the default
             return
@@ -1614,6 +1634,7 @@ final class AppCoordinator: ObservableObject {
             var navigated = false
             var didAct = false
             do {
+                lastCommandText = text
                 let result = try await executeSteps(plan, gen: gen)
                 performedAll += result.performed
                 navigated = result.navigated
@@ -2798,6 +2819,15 @@ final class AppCoordinator: ObservableObject {
                     self.store.log("action", "already on \(host) — skipping open (would duplicate the tab)")
                     continue
                 }
+                if step.kind == .openApp || step.kind == .openURL,
+                   let opened = try await self.openWithPreference(step, gen: gen) {
+                    // Opened as the app or in Chrome per the remembered (or just
+                    // asked) choice. Same async-navigation handling as below.
+                    performed.append(opened)
+                    self.store.log("action", "performed: \(opened)")
+                    if i < plan.steps.count - 1 { self.store.log("action", "navigated — deferring \(plan.steps.count - 1 - i) step(s) until the page loads") }
+                    return (performed, false, true)
+                }
                 if step.kind == .click {
                     try await self.performClick(target: step.target, gen: gen)
                 } else if step.kind == .type, await self.typeViaChrome(step.text, target: step.target) {
@@ -3114,6 +3144,87 @@ final class AppCoordinator: ObservableObject {
         guard gen == runGeneration, !Task.isCancelled else { throw CancellationError() }
         guard teachOnMiss else { throw ScreenController.ControlError.elementNotFound(target) }
         beginTeaching(target: target, app: app, gen: gen)
+    }
+
+    // MARK: - "The app, or Chrome?"
+
+    /// Handles an open step for something that is BOTH an installed app and a
+    /// website (ChatGPT, Slack, Notion…). The command's own words win ("…in
+    /// Chrome"); then the remembered choice; otherwise the user is asked once
+    /// and the answer is remembered. Returns the performed-line, or nil when
+    /// the step is unambiguous and the normal open should run.
+    private func openWithPreference(_ step: ScreenAction, gen: Int) async throws -> String? {
+        guard let cand = OpenPreferenceStore.candidate(name: step.target, url: step.url, kind: step.kind),
+              ScreenController.resolveAppPath(cand.name) != nil else { return nil }
+        var choice = OpenPreferenceStore.explicitChoice(in: lastCommandText)
+        var remember = false
+        if choice == nil, let pref = openPreferences.lookup(cand.name) {
+            choice = pref.choice
+            store.log("open", "\(cand.name): remembered → \(pref.choice.rawValue)")
+        }
+        if choice == nil {
+            choice = await askOpenChoice(for: cand.name, gen: gen)
+            remember = choice != nil
+        }
+        guard gen == runGeneration, !Task.isCancelled else { throw CancellationError() }
+        // No usable answer: the installed app, and don't remember a guess.
+        let final = choice ?? .app
+        if remember { openPreferences.set(name: cand.name, choice: final, url: cand.url) }
+        let browser = ScreenController.resolveAppPath("Google Chrome") != nil ? "Google Chrome" : ""
+        try await withThrowingTaskGroup(of: Void.self) { group in
+            group.addTask {
+                switch final {
+                case .app: try ScreenController.openApp(named: cand.name)
+                case .browser: try ScreenController.openURL(cand.url, inApp: browser)
+                }
+            }
+            try await group.waitForAll()
+        }
+        switch final {
+        case .app:
+            workingContext = WorkingContext(app: cand.name)
+            lastNavHost = nil
+        case .browser:
+            workingContext = WorkingContext(app: browser.isEmpty ? workingContext.app : browser)
+            lastNavHost = Self.domainLabel(cand.url)
+        }
+        let how = final == .browser ? "in \(browser.isEmpty ? "the browser" : browser)" : "as the app"
+        store.log("open", "\(cand.name) \(how)\(remember ? " — remembered" : "")")
+        return "opened \(cand.name) \(how)"
+    }
+
+    /// Asks "the app, or Chrome?" out loud and on the panel, waits up to ten
+    /// seconds for a spoken or clicked answer, and parses it. nil = no answer.
+    private func askOpenChoice(for name: String, gen: Int) async -> OpenChoice? {
+        let id = UUID().uuidString
+        awaitingOpenChoice = id
+        panelOpenAnswer = nil
+        pendingClarification = Clarification(
+            question: "\(name) is installed on this Mac and also runs in Chrome. Which do you want? I'll remember.",
+            options: ["The app", "Chrome"])
+        phase = .clarifying
+        freshUtterance()
+        store.log("open", "asking: \(name) — the app, or Chrome?")
+        await speak("\(name) is installed here and also runs in Chrome. Which do you want? I'll remember.", gen: gen)
+        let deadline = Date().addingTimeInterval(10)
+        var answer = ""
+        while awaitingOpenChoice == id, gen == runGeneration, Date() < deadline {
+            try? await Task.sleep(nanoseconds: 250_000_000)
+            if !utterance.isEmpty, Date().timeIntervalSince(lastHeardAt) > 1.0 { answer = utterance; break }
+        }
+        if awaitingOpenChoice == id {
+            awaitingOpenChoice = nil
+            pendingClarification = nil
+        } else {
+            answer = panelOpenAnswer ?? ""   // answered from the panel
+        }
+        panelOpenAnswer = nil
+        phase = .acting
+        let heard = Self.strippingPhrases(Self.wakePhrases, from: answer)
+        freshUtterance()
+        let choice = OpenPreferenceStore.parseAnswer(heard)
+        store.log("open", "answer: \"\(heard)\" → \(choice?.rawValue ?? "unclear")")
+        return choice
     }
 
     /// Clicks through the Chrome extension when a Chromium browser is in front
