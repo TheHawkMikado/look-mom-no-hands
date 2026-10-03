@@ -199,6 +199,8 @@ final class AppCoordinator: ObservableObject {
     let procedures: ProcedureStore
     let agentRoles: AgentRoleStore
     let mcp: MCPManager
+    /// The Chrome extension's end: exact page maps and clicks by ref.
+    let chromeHand: ChromeHand
     let events = EventReporter()
     let fleet: FleetService
     private var scheduler: ProcedureScheduler?
@@ -324,6 +326,7 @@ final class AppCoordinator: ObservableObject {
         procedures = ProcedureStore(directory: store.directory)
         agentRoles = AgentRoleStore(directory: store.directory)
         mcp = MCPManager(store: MCPStore(directory: store.directory))
+        chromeHand = ChromeHand()
         fleet = FleetService(peers: FleetPeerStore(directory: store.directory))
         knowledge = KnowledgeStore(directory: store.directory)
         brain = LocalBrain(directory: store.directory)
@@ -424,6 +427,11 @@ final class AppCoordinator: ObservableObject {
         // Warm configured MCP servers off the command path — an npx cold-start
         // mid-task would eat the whole 20s parse budget.
         Task { await self.mcp.connectAll() }
+        // The browser hand: listen for the Chrome extension and keep the unpacked
+        // copy Chrome loads in step with the bundled one.
+        chromeHand.log = { [weak self] msg in self?.store.log("chrome", msg) }
+        chromeHand.start()
+        ChromeHand.installExtensionCopy()
         // Remote approvals land exactly where the panel buttons do.
         events.onVerdict = { [weak self] approvalId, approve in
             BackgroundAgentManager.shared.resolveApproval(approvalID: approvalId, allow: approve)
@@ -2790,6 +2798,9 @@ final class AppCoordinator: ObservableObject {
                 }
                 if step.kind == .click {
                     try await self.performClick(target: step.target, gen: gen)
+                } else if step.kind == .type, await self.typeViaChrome(step.text, target: step.target) {
+                    // The extension set the field's value directly (framework-safe),
+                    // so no synthetic keystrokes are needed.
                 } else {
                     // Off the main actor + cancellable: perform() checks cancellation
                     // before every irreversible event, so Stop halts mid-walk/typing.
@@ -2918,6 +2929,18 @@ final class AppCoordinator: ObservableObject {
                 }
             } else {
                 workingContext.window = nil   // stale — the window is gone
+            }
+        }
+        // A Chromium browser in front with the extension connected: read the real
+        // DOM (content included, refs exact) instead of the Accessibility tree,
+        // which for web pages is mostly the site's chrome.
+        if chromeHand.isConnected, ChromeHand.frontIsChromium {
+            do {
+                let page = try await chromeHand.pageMap(maxElements: 120)
+                store.log("screen", "round \(round): read \(page.elements.count) page elements via the Chrome extension")
+                return page.promptText
+            } catch {
+                store.log("chrome", "page map failed (\(error.localizedDescription)) — using Accessibility")
             }
         }
         let snap = try await withThrowingTaskGroup(of: ScreenController.Snapshot?.self) { group in
@@ -3050,6 +3073,11 @@ final class AppCoordinator: ObservableObject {
     /// for callers (the meeting join flow) where a 20s teaching pause is worse
     /// than a clean failure.
     private func performClick(target: String, gen: Int, teachOnMiss: Bool = true) async throws {
+        // 0. The Chrome extension, when the page was read through it: an exact ref
+        //    clicks exactly; a description is matched against the page's real
+        //    elements. A miss falls through to the Accessibility/vision ladder.
+        if await clickViaChrome(target) { return }
+        guard gen == runGeneration, !Task.isCancelled else { throw CancellationError() }
         guard ScreenController.isTrusted else { throw ScreenController.ControlError.notTrusted }
         let app = NSWorkspace.shared.frontmostApplication
 
@@ -3084,6 +3112,50 @@ final class AppCoordinator: ObservableObject {
         guard gen == runGeneration, !Task.isCancelled else { throw CancellationError() }
         guard teachOnMiss else { throw ScreenController.ControlError.elementNotFound(target) }
         beginTeaching(target: target, app: app, gen: gen)
+    }
+
+    /// Clicks through the Chrome extension when a Chromium browser is in front
+    /// and the extension is connected. Returns false on any miss or error so the
+    /// caller continues down the ladder; never throws.
+    private func clickViaChrome(_ target: String) async -> Bool {
+        guard chromeHand.isConnected, ChromeHand.frontIsChromium else { return false }
+        if let ref = ChromeHand.ref(in: target) {
+            do {
+                try await chromeHand.click(ref: ref)
+                store.log("chrome", "clicked \(ref)")
+                return true
+            } catch {
+                store.log("chrome", "click \(ref) failed: \(error.localizedDescription) — falling back")
+                return false
+            }
+        }
+        do {
+            if let hit = try await chromeHand.bestMatch(for: target) {
+                try await chromeHand.click(ref: hit.ref)
+                store.log("chrome", "clicked \"\(target)\" via \(hit.ref) \(hit.role) \"\(hit.name)\"")
+                return true
+            }
+            store.log("chrome", "no page element matched \"\(target)\" — trying Accessibility/vision")
+        } catch {
+            store.log("chrome", "page lookup failed: \(error.localizedDescription) — trying Accessibility/vision")
+        }
+        return false
+    }
+
+    /// Types through the Chrome extension: into the field named by ref in
+    /// `target`, or into whatever is focused when there is no ref. Returns false
+    /// (so the caller falls back to keystrokes) when the extension can't.
+    private func typeViaChrome(_ text: String, target: String) async -> Bool {
+        guard chromeHand.isConnected, ChromeHand.frontIsChromium else { return false }
+        let ref = ChromeHand.ref(in: target)
+        do {
+            try await chromeHand.type(text, ref: ref)
+            store.log("chrome", "typed \(text.count) chars\(ref.map { " into \($0)" } ?? " into the focused field") via the extension")
+            return true
+        } catch {
+            store.log("chrome", "type via extension failed: \(error.localizedDescription) — using keystrokes")
+            return false
+        }
     }
 
     /// Runs `ScreenController.click` off the main actor. Returns true on a click,

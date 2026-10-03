@@ -340,3 +340,37 @@ Mac holding the certificate: it exports the identity, verifies the notary
 login with Apple, finds the Vercel project, stores the ten secrets with `gh`,
 and dispatches the first signed release. The unsigned path stays as the
 fallback for a repo without secrets, never as something the app installs.
+
+## 2026-10-03 — The Chrome extension is a browser-side hand, not a screenshot
+
+The owner's ask: read "every element and piece of code on the page" so the
+assistant knows exactly where to click instead of guessing from screenshots.
+
+- **Shape.** A Manifest V3 extension (`chrome-extension/`) with a content
+  script that walks the live DOM — open shadow roots and same-origin frames
+  included — and returns a numbered map: `[e12] button "Send"`, every link
+  with its destination, every field with its value and placeholder, headings,
+  a text excerpt. Actions (click, type, select, scroll, hover, press, tabs)
+  take the ref. Refs are re-numbered on every read, so a stale ref is an
+  error, never a guess.
+- **Transport.** One WebSocket from the extension to the Mac app on
+  `127.0.0.1:47831` (`ChromeHand.swift`, Network.framework). Loopback only,
+  paired with a six-character code shown in Settings. No cloud hop: page
+  content goes where the Accessibility snapshot already goes (the planner
+  prompt for that command) and nowhere else.
+- **Where it plugs in.** When a Chromium browser is in front and the extension
+  is connected, the planner's screen block is the page map instead of the
+  Accessibility tree, and `performClick` tries the extension first (exact ref,
+  else a clear best match against real elements) before the AX → learned →
+  vision → teach ladder. Typing goes through the extension too (native value
+  setter + input/change events, so React-style forms notice). Everything else
+  is unchanged, and Safari/Firefox keep the old path.
+- **Distribution.** Unpacked, not the Web Store: the app bundles the extension,
+  copies it to Application Support on launch (so an app update doesn't move it
+  from under Chrome), and Settings shows the folder plus the pairing code.
+  Every release also attaches `chrome-extension-<version>.zip`. A Web Store
+  listing is an owner decision later; nothing here depends on it.
+- **Proof.** `chrome-extension/test/smoke.mjs` loads the real extension into
+  Chromium under Playwright, plays the Mac app over the socket, and drives a
+  fixture page: map, find, click (incl. shadow DOM), type, select, Enter
+  submits, scroll, html, text, tabs, screenshot. Runs on every PR (Linux job).

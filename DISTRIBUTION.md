@@ -183,3 +183,12 @@ installed by hand (right-click → Open) and only ever by the owner.
 
 The team-ID requirement lives in `AppUpdater.requirement`. If the Apple team
 ever changes, that string and `APPLE_TEAM_ID` change together.
+
+## Chrome extension
+
+`Scripts/common.sh` copies `chrome-extension/` (minus its tests) into
+`Contents/Resources/chrome-extension`, and `release.sh` attaches
+`chrome-extension-<version>.zip` to the GitHub release. On launch the app
+mirrors the bundled copy to `~/Library/Application Support/LookMomNoHands/chrome-extension`
+and Settings points Chrome at that path, so an app update never moves the
+unpacked extension out from under the browser.

@@ -34,6 +34,12 @@ assemble_app() {
     else
         echo "  ! ${res_bundle} missing — speaker model not bundled, voice verification will be off" >&2
     fi
+    # The Chrome extension rides along unpacked; the app copies it to
+    # Application Support on launch and Settings points Chrome at that copy.
+    if [ -d chrome-extension ]; then
+        rm -rf "${app}/Contents/Resources/chrome-extension"
+        rsync -a --exclude test --exclude '.*' chrome-extension/ "${app}/Contents/Resources/chrome-extension/"
+    fi
 }
 
 # sign_app <app-path> <identity> [extra codesign flags...] — identity "-" = ad-hoc.

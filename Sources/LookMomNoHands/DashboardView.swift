@@ -1387,6 +1387,8 @@ private struct SettingsTab: View {
                     .font(.caption).foregroundStyle(.secondary)
             }
 
+            ChromeExtensionSection(hand: coordinator.chromeHand)
+
             Section("Meetings") {
                 Text("Say “Hey Mama, join my meeting” (or name it: “join the standup”) — it finds the Google Meet, Zoom, or Teams link on your calendar or in your words, clicks through the join screens, and records the audio. “Mama, leave the meeting” hangs up and saves the file.")
                     .font(.caption).foregroundStyle(.secondary)
@@ -1796,6 +1798,57 @@ private struct ActivityTab: View {
                 }
                 .padding(8)
             }
+        }
+    }
+}
+
+/// Settings › Chrome extension: pairing code, connection state, and where the
+/// unpacked extension lives so Chrome can load it.
+private struct ChromeExtensionSection: View {
+    @ObservedObject var hand: ChromeHand
+    @State private var copied = false
+
+    var body: some View {
+        Section("Chrome extension") {
+            Toggle("Read web pages through the Chrome extension", isOn: $hand.enabled)
+            LabeledContent("Extension") {
+                HStack(spacing: 6) {
+                    Circle().fill(hand.isConnected ? Color.green : Color.secondary).frame(width: 8, height: 8)
+                    Text(hand.isConnected ? "Connected (v\(hand.extensionVersion))" : (hand.enabled ? "Not connected" : "Off"))
+                        .font(.callout)
+                }
+            }
+            LabeledContent("Pairing code") {
+                HStack(spacing: 8) {
+                    Text(hand.token).font(.title3.monospaced().bold()).textSelection(.enabled)
+                    Button(copied ? "Copied" : "Copy") {
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(hand.token, forType: .string)
+                        copied = true
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { copied = false }
+                    }
+                    .buttonStyle(.bordered).controlSize(.small)
+                }
+            }
+            if !hand.lastError.isEmpty {
+                Text(hand.lastError).font(.caption).foregroundStyle(.red)
+            }
+            Text("With the extension installed, every web page is read as a numbered map of its real elements — links, buttons, fields, results — and clicks land on the exact element instead of a screenshot guess. Works in Chrome, Brave, Edge, Arc and other Chromium browsers.")
+                .font(.caption).foregroundStyle(.secondary)
+            HStack {
+                Button("Show extension folder…") {
+                    if let url = ChromeHand.installExtensionCopy() {
+                        NSWorkspace.shared.activateFileViewerSelecting([url])
+                    }
+                }
+                Button("Setup guide") {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString("chrome://extensions", forType: .string)
+                    if let url = URL(string: "https://nohandsapp.com/chrome-extension") { NSWorkspace.shared.open(url) }
+                }
+            }
+            Text("Install once: in Chrome open chrome://extensions, turn on Developer mode (top right), click Load unpacked, and choose the folder above. Then click the extension's icon in the toolbar and enter the pairing code. Chrome blocks apps from opening chrome:// pages, so that address is copied to your clipboard — paste it into the address bar.")
+                .font(.caption).foregroundStyle(.secondary)
         }
     }
 }

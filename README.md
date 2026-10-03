@@ -121,3 +121,15 @@ Working skeleton, compiles and bundles clean. Natural extensions:
   permission — deliberately not shipped until it's wired up).
 - Streaming transcription display in the panel.
 - Custom/trainable wake word (Porcupine) if the Apple phrase match is too loose.
+
+## Chrome extension (exact clicks on web pages)
+
+`chrome-extension/` is a small Manifest V3 extension that lets the app read a
+web page as a numbered map of its real elements and click or type by ref,
+instead of locating things on a screenshot. Install once: Settings › Chrome
+extension › **Show extension folder**, then in Chrome `chrome://extensions` →
+Developer mode → Load unpacked → that folder → click the icon → enter the
+pairing code from Settings. Works in Chrome, Brave, Edge, Arc and Vivaldi.
+Guide: https://nohandsapp.com/chrome-extension. Test it end to end with
+`cd chrome-extension/test && npm ci && npm test` (loads the extension into
+Chromium and drives a fixture page).

@@ -273,6 +273,16 @@ final class ClaudeClient: @unchecked Sendable {
             located visually on the screenshot. Clicking "Home" is NEVER how you play a
             search result.
 
+            CHROME EXTENSION MAP. When the screen block says it was "Read by the Chrome \
+            extension", every element carries an exact ref like [e12] — page CONTENT \
+            included (results, rows, thumbnails, cards), not just the site's chrome. \
+            Click by ref: a click step whose target is just the ref ("e12"). Type into a \
+            field by ref: a type step whose target is the field's ref and whose text is \
+            what to type (it replaces the field's current value). Refs are exact: never \
+            describe an element that has a ref, never invent a ref that isn't listed, and \
+            after a click that navigates, wait for the next screen block before using refs \
+            again (they are re-numbered on every read).
+
             NEVER click a microphone / "Search with your voice" control, and NEVER click
             a browser permission dialog (Allow / Allow this time / Block) — you must not
             grant a website microphone or camera access. If you can't see the result,

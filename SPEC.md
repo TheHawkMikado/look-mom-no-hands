@@ -280,7 +280,7 @@ a source user id only.
 
 ## 9. Build Phases
 
-**Status (2026-09-13):** every phase below has a first implementation on
+**Status (2026-10-03):** every phase below has a first implementation on
 `main`. What is real code and what still needs a credential or a device:
 
 | Phase | Built | Needs from the owner |
@@ -292,6 +292,7 @@ a source user id only.
 | 4 Evals + Shared Brain | fixtures, eval runner, weekly cron, scrubber, consent, admin review, SOP API | an Anthropic key for model candidates and the judge |
 | 5 Ad process | intake with a budget cap, project + 7 step issues in Paperclip, 80% check-in, spend cap | your real ad steps replacing the generic template |
 | 6 Wearables + hardening | Limitless ingest, quiet hours, lock/meeting-aware speaking, outbox, meeting-approval channel rule | Limitless API key; Plaud when their API allows |
+| Browser hand (Chrome extension) | page map with exact refs, click/type/select/scroll by ref, tabs, shadow DOM + frames, loopback pairing, Playwright smoke test | load the unpacked extension once (Settings › Chrome extension) |
 
 
 

@@ -200,7 +200,13 @@ fi
 git push origin main
 git push origin "v${VERSION}"
 
-gh release create "v${VERSION}" "${DMG}" \
+# The Chrome extension as a standalone download too (for a Mac that already
+# has the app, or to load it in another browser profile).
+EXT_ZIP="build/chrome-extension-${VERSION}.zip"
+rm -f "${EXT_ZIP}"
+(cd chrome-extension && zip -qr "../${EXT_ZIP}" . -x 'test/*' '.*')
+
+gh release create "v${VERSION}" "${DMG}" "${EXT_ZIP}" \
     --title "${DISPLAY} v${VERSION}" \
     --notes "${NOTES:-Release v${VERSION}}"
 

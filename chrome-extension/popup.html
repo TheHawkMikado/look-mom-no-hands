@@ -1,0 +1,30 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  body { font: 13px -apple-system, system-ui, sans-serif; width: 300px; margin: 0; padding: 14px; color: #222; }
+  h1 { font-size: 14px; margin: 0 0 8px; }
+  .status { display: flex; align-items: center; gap: 8px; margin: 8px 0 12px; }
+  .dot { width: 9px; height: 9px; border-radius: 50%; background: #9e9e9e; }
+  .dot.on { background: #2e7d32; }
+  label { display: block; font-size: 12px; color: #555; margin-top: 10px; }
+  input { width: 100%; box-sizing: border-box; padding: 6px 8px; font-size: 14px; letter-spacing: .12em; text-transform: uppercase; margin-top: 4px; }
+  input.port { letter-spacing: 0; text-transform: none; }
+  button { margin-top: 12px; padding: 7px 10px; width: 100%; }
+  p { font-size: 12px; color: #666; margin: 10px 0 0; line-height: 1.4; }
+  .detail { color: #666; font-size: 12px; }
+</style>
+</head>
+<body>
+  <h1>Look Ma, No Hands</h1>
+  <div class="status"><span class="dot" id="dot"></span><span id="detail" class="detail">checking…</span></div>
+  <label>Pairing code (from the app’s Settings → Chrome extension)
+    <input id="token" maxlength="12" autocomplete="off" spellcheck="false" placeholder="ABC123">
+  </label>
+  <label>Port <input id="port" class="port" inputmode="numeric"></label>
+  <button id="save">Save and connect</button>
+  <p>This extension only talks to the app running on this Mac. Pages you open are read on request so it can click the exact element instead of guessing from a screenshot.</p>
+  <script src="popup.js"></script>
+</body>
+</html>

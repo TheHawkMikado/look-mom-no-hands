@@ -1,0 +1,25 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Fixture — Chrome hand</title>
+<style>#hidden{display:none} .far{margin-top:3000px}</style></head>
+<body>
+<h1>Welcome to the fixture</h1>
+<nav><a href="/pricing">Pricing</a> <a href="/docs" title="Documentation">Docs</a></nav>
+<form id="f" onsubmit="event.preventDefault(); document.getElementById('out').textContent='submitted:'+document.getElementById('email').value">
+  <label for="email">Email address</label>
+  <input id="email" type="email" placeholder="you@example.com">
+  <select id="plan" aria-label="Plan"><option value="s">Starter</option><option value="t">Team</option></select>
+  <button type="submit">Sign in</button>
+</form>
+<button id="count" onclick="this.textContent='Clicked '+(++window.n)">Click me</button>
+<div id="hidden"><button>Invisible</button></div>
+<div id="host"></div>
+<div contenteditable="true" id="note" aria-label="Note">old</div>
+<p id="out"></p>
+<div class="far"><a href="#far" id="far">Far away link</a></div>
+<script>
+  window.n = 0;
+  const root = document.getElementById('host').attachShadow({mode:'open'});
+  root.innerHTML = '<button id="shadow">Shadow button</button>';
+  root.getElementById('shadow').addEventListener('click', () => document.getElementById('out').textContent = 'shadow clicked');
+</script>
+</body></html>
