@@ -175,6 +175,20 @@ struct ActionPlan: Decodable, Sendable {
         case goalComplete = "goal_complete"
     }
 
+    /// A one-step plan the APP decided, with no model round-trip — auto-join
+    /// already knows its meeting's exact url, and "join my meeting" resolves
+    /// against the calendar deterministically. Built through the decoder so it
+    /// carries exactly the tolerant-decoding semantics the executor expects.
+    /// Pure — unit-tested.
+    static func direct(kind: ScreenAction.Kind, target: String = "", url: String = "") -> ActionPlan? {
+        let object: [String: Any] = [
+            "say": "", "confidence": 1.0, "goal_complete": true,
+            "steps": [["kind": kind.rawValue, "target": target, "url": url]]
+        ]
+        guard let data = try? JSONSerialization.data(withJSONObject: object) else { return nil }
+        return try? JSONDecoder().decode(ActionPlan.self, from: data)
+    }
+
     /// Never throws out of an array decode — a bad element becomes `isBad`.
     /// Probes for a team step first (its decoder throws for screen kinds), then
     /// a screen step; both containers come from the same decoder, which is fine

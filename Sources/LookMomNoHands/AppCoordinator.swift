@@ -1451,7 +1451,10 @@ final class AppCoordinator: ObservableObject {
                     }
                     return
                 }
-                try await self.runGoal(text: text, gen: gen, seedProgress: seedProgress)
+                // Meeting commands resolve deterministically before the planner
+                // is consulted (nil = not a meeting command, or nothing to join).
+                let direct = answeringClarification ? nil : self.directMeetingPlan(for: text)
+                try await self.runGoal(text: text, gen: gen, seedProgress: seedProgress, directPlan: direct)
             } catch {
                 // Cancellation isn't a failure: Stop was pressed while the call was
                 // in flight, and acting now would defy the user's explicit off.
@@ -1484,8 +1487,10 @@ final class AppCoordinator: ObservableObject {
     /// what makes it *finish* a task — continue into the panel it just opened rather
     /// than stopping there. Parse/network errors propagate to the caller's catch;
     /// step-execution failures are reported here and end the loop.
+    /// `directPlan`: round 0 runs this app-decided plan instead of asking the
+    /// model — the lease, preemption, logging and execution are identical.
     private func runGoal(text: String, gen: Int, seedProgress: [String],
-                         holder: ScreenLease.Holder = .voice) async throws {
+                         holder: ScreenLease.Holder = .voice, directPlan: ActionPlan? = nil) async throws {
         guard let claude else { return }
         // Voice always gets the screen (acquiring revokes an automated holder);
         // an automated run only starts on a free screen — and a refusal THROWS,
@@ -1507,32 +1512,40 @@ final class AppCoordinator: ObservableObject {
             // callers must never consult the lease to classify an outcome.
             if ScreenLease.shared.revoked(holder) { throw ScreenLease.Revoked() }
             phase = .thinking
-            // A fresh speculative snapshot (taken while the user was still talking)
-            // saves the whole AX walk on round 0 — the parse starts immediately.
-            let screen: String
-            if round == 0, let p = screenPrefetch, p.gen == gen, Date().timeIntervalSince(p.at) < 4 {
-                screen = p.text
-                screenPrefetch = nil
-                store.log("screen", "using prefetched snapshot")
+            let plan: ActionPlan
+            var screen = ""   // stays empty for a direct round — the loop fingerprint skips it
+            if round == 0, let directPlan {
+                // No screen read either: gatherScreen raises the working-context
+                // window, and an app-decided step has no use for the snapshot.
+                plan = directPlan
+                store.log("plan", "round 0: direct \(directPlan.steps.map(\.kind.rawValue).joined(separator: ","))")
             } else {
-                screen = try await gatherScreen(for: text, round: round)
-            }
-            var context = buildPlannerContext(command: text, taskProgress: performedAll)
-            // Per-turn, not in the cached stable block: connecting a server must
-            // show up on the next command, not when the cache rolls.
-            let mcpBlock = mcp.promptBlock
-            if !mcpBlock.isEmpty { context += "\n\n" + mcpBlock }
-            // `vocabulary` is the cached half of the prompt, so only genuinely stable
-            // things belong here — the word list and durable facts about the user.
-            // Anything that changes between turns goes in `context`/`screen` instead,
-            // or it invalidates the cache on every command.
-            let stable = [vocabulary.promptContext, knowledge.promptContext]
-                .filter { !$0.isEmpty }.joined(separator: "\n\n")
-            let plan = try await claude.parsePlan(text, dialogue: dialogue,
+                // A fresh speculative snapshot (taken while the user was still talking)
+                // saves the whole AX walk on round 0 — the parse starts immediately.
+                if round == 0, let p = screenPrefetch, p.gen == gen, Date().timeIntervalSince(p.at) < 4 {
+                    screen = p.text
+                    screenPrefetch = nil
+                    store.log("screen", "using prefetched snapshot")
+                } else {
+                    screen = try await gatherScreen(for: text, round: round)
+                }
+                var context = buildPlannerContext(command: text, taskProgress: performedAll)
+                // Per-turn, not in the cached stable block: connecting a server must
+                // show up on the next command, not when the cache rolls.
+                let mcpBlock = mcp.promptBlock
+                if !mcpBlock.isEmpty { context += "\n\n" + mcpBlock }
+                // `vocabulary` is the cached half of the prompt, so only genuinely stable
+                // things belong here — the word list and durable facts about the user.
+                // Anything that changes between turns goes in `context`/`screen` instead,
+                // or it invalidates the cache on every command.
+                let stable = [vocabulary.promptContext, knowledge.promptContext]
+                    .filter { !$0.isEmpty }.joined(separator: "\n\n")
+                plan = try await claude.parsePlan(text, dialogue: dialogue,
                                                   vocabulary: stable,
                                                   screen: screen, context: context)
-            try Task.checkCancellation()
-            store.log("claude", "round \(round): \(plan.steps.count) step(s) complete=\(plan.goalComplete)\(plan.clarify != nil ? " +question" : "")")
+                try Task.checkCancellation()
+                store.log("claude", "round \(round): \(plan.steps.count) step(s) complete=\(plan.goalComplete)\(plan.clarify != nil ? " +question" : "")")
+            }
 
             // A taught correction applies regardless of the rest of the plan.
             if let fact = plan.learn, fact.isValid, gen == runGeneration {
@@ -2137,6 +2150,7 @@ final class AppCoordinator: ObservableObject {
     /// once. Fleet goals, phone goals, and whatever channel comes next are
     /// adapters supplying only their reply transport.
     private func runAutomatedGoal(text: String, holder: ScreenLease.Holder, tag: String,
+                                  directPlan: ActionPlan? = nil,
                                   report: @escaping (AgentEventKind, String) -> Void) {
         // scheduledTask is the single automated-run slot; overwriting a live
         // one would orphan its only cancellation handle.
@@ -2152,7 +2166,8 @@ final class AppCoordinator: ObservableObject {
                 self.drainPhoneGoals()   // a freed slot serves the queue immediately
             }
             do {
-                try await self.runGoal(text: text, gen: self.runGeneration, seedProgress: [], holder: holder)
+                try await self.runGoal(text: text, gen: self.runGeneration, seedProgress: [],
+                                       holder: holder, directPlan: directPlan)
                 self.store.log(tag, "goal done")
                 report(.goalDone, "finished on \(FleetIdentity.machineName)")
             } catch is ScreenLease.Busy {
@@ -2307,6 +2322,47 @@ final class AppCoordinator: ObservableObject {
     }
 
     // MARK: Meetings (join + record)
+
+    /// "join my meeting", "join the standup", "join my zoom", "hop on the call"
+    /// — the spoken shapes that mean a meeting join. Pure — unit-tested.
+    nonisolated static func isJoinMeetingCommand(_ text: String) -> Bool {
+        let t = normalizedForMatching(text)
+        guard !t.contains("don t join"), !t.contains("do not join") else { return false }
+        let verb = t.contains("join") || t.contains("hop on") || t.contains("get on") || t.contains("jump on")
+        let object = ["meeting", "call", "standup", "stand up", "zoom", "teams", "meet", "sync", "huddle"]
+            .contains { t.contains($0) }
+        return verb && object
+    }
+
+    /// "leave the meeting", "hang up", "end the call", "stop recording the
+    /// meeting". Pure — unit-tested.
+    nonisolated static func isLeaveMeetingCommand(_ text: String) -> Bool {
+        let t = normalizedForMatching(text)
+        if t.contains("hang up") { return true }
+        let verb = t.contains("leave") || t.contains("exit") || t.contains("stop recording") || t.contains("get off")
+        let object = t.contains("meeting") || t.contains("call")
+        return verb && object
+    }
+
+    /// Deterministic front door for meeting commands, consulted BEFORE the
+    /// planner: a join that resolves against the calendar (or a spoken link),
+    /// or a leave while a meeting records, becomes a direct plan. Joining must
+    /// never hinge on the planner model picking join_meeting out of a long
+    /// rulebook — the router's small model once answered "goal complete, 0
+    /// steps" to exactly this request. Nil = let the planner handle it (which
+    /// may still emit join_meeting, or ask which meeting).
+    private func directMeetingPlan(for text: String) -> ActionPlan? {
+        if meetingRecording != nil, Self.isLeaveMeetingCommand(text) {
+            return .direct(kind: .leaveMeeting)
+        }
+        guard meetingRecording == nil, Self.isJoinMeetingCommand(text) else { return nil }
+        if let link = MeetingLink.detect(in: text) {
+            return .direct(kind: .joinMeeting, url: link.url)
+        }
+        guard let m = calendarMeetings.nextJoinable(matching: text) else { return nil }
+        store.log("meeting", "“\(text)” → \(m.title) (\(m.link.service.label))")
+        return .direct(kind: .joinMeeting, target: m.title, url: m.link.url)
+    }
 
     /// What the planner needs to know while a meeting records, so "stop recording
     /// the meeting" resolves to leave_meeting instead of a guess.
@@ -2683,9 +2739,13 @@ final class AppCoordinator: ObservableObject {
         store.log("meeting", "auto-joining \(m.title)")
         events.report(kind: .goalStarted, title: m.title, detail: "auto-joining calendar meeting")
         // Same rail as fleet/phone/scheduled goals: the adapter owns the slot,
-        // the lease, and the retry-signal semantics.
-        runAutomatedGoal(text: "join my \(m.title) meeting and record it",
-                         holder: .scheduled("meeting-\(m.id)"), tag: "meeting") { [weak self] kind, detail in
+        // the lease, and the retry-signal semantics. The plan is DIRECT — the
+        // calendar already knows the exact url, and routing "join my meeting"
+        // through the planner once ended with the model answering "goal
+        // complete, 0 steps" while looking at the Settings pane.
+        runAutomatedGoal(text: "auto-join: \(m.title)",
+                         holder: .scheduled("meeting-\(m.id)"), tag: "meeting",
+                         directPlan: .direct(kind: .joinMeeting, target: m.title, url: m.link.url)) { [weak self] kind, detail in
             switch kind {
             case .goalProgress, .goalDone: break   // the join/record flow announces itself
             default: self?.events.report(kind: kind, title: m.title, detail: detail)

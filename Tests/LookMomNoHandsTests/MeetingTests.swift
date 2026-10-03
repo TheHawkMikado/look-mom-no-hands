@@ -91,6 +91,41 @@ final class MeetingTests: XCTestCase {
         XCTAssertFalse(MeetingLink.leaveControls.contains { $0.lowercased().contains("end") })
     }
 
+    // MARK: Deterministic meeting commands (no planner round-trip)
+
+    func testDirectPlanBuildsAJoinStep() throws {
+        let plan = try XCTUnwrap(ActionPlan.direct(kind: .joinMeeting, target: "Standup",
+                                                   url: "https://meet.google.com/abc-defg-hij"))
+        XCTAssertEqual(plan.steps.count, 1)
+        XCTAssertEqual(plan.steps.first?.kind, .joinMeeting)
+        XCTAssertEqual(plan.steps.first?.url, "https://meet.google.com/abc-defg-hij")
+        XCTAssertEqual(plan.steps.first?.target, "Standup")
+        XCTAssertTrue(plan.goalComplete)
+        XCTAssertTrue(plan.teamSteps.isEmpty)
+        XCTAssertFalse(plan.malformed)
+        XCTAssertNil(plan.clarify)
+    }
+
+    func testJoinMeetingPhrases() {
+        for yes in ["join my meeting", "Join the standup", "hop on the call", "join my zoom",
+                    "join my 2 o'clock meeting and record it", "get on the teams call"] {
+            XCTAssertTrue(AppCoordinator.isJoinMeetingCommand(yes), yes)
+        }
+        for no in ["don't join the meeting", "open my calendar", "join the two words together",
+                   "what meetings do I have today", "play some music"] {
+            XCTAssertFalse(AppCoordinator.isJoinMeetingCommand(no), no)
+        }
+    }
+
+    func testLeaveMeetingPhrases() {
+        for yes in ["leave the meeting", "Mama hang up", "stop recording the meeting", "get off this call"] {
+            XCTAssertTrue(AppCoordinator.isLeaveMeetingCommand(yes), yes)
+        }
+        for no in ["leave a comment", "stop the music", "call my mom"] {
+            XCTAssertFalse(AppCoordinator.isLeaveMeetingCommand(no), no)
+        }
+    }
+
     // MARK: New plan kinds
 
     func testMeetingKindsDecode() throws {
