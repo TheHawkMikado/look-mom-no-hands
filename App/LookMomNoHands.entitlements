@@ -10,5 +10,13 @@
          it the app never prompts and never appears in the Microphone list. -->
     <key>com.apple.security.device.audio-input</key>
     <true/>
+    <!-- Calendars behave exactly like the microphone under hardened runtime:
+         without this, requestFullAccessToEvents returns "declined" instantly,
+         no dialog ever appears, and the app never shows up in System Settings →
+         Privacy → Calendars. The Info.plist usage string alone is not enough.
+         Any future protected resource (Reminders, Contacts, Photos) needs its
+         own com.apple.security.personal-information.* key here too. -->
+    <key>com.apple.security.personal-information.calendars</key>
+    <true/>
 </dict>
 </plist>
