@@ -9,12 +9,23 @@
  * so they run under jest without native modules.
  */
 
-/** What the server's summarizer returns — same shape as the Mac's reports. */
+/** A task the server filed from one of the note's action items. */
+export interface NoteTask {
+  id: string;
+  title: string;
+  status: string;
+  owner_name: string | null;
+}
+
+/** What the server's summarizer returns — same shape as the Mac's reports,
+ *  plus the tasks it filed from the action items. */
 export interface NoteReport {
   title: string;
   summary: string;
   keyPoints: string[];
   actionItems: string[];
+  /** Absent on reports stored before tasks were filed from notes. */
+  tasks?: NoteTask[];
 }
 
 export interface Note {

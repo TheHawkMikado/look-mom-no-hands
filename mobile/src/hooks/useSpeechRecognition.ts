@@ -5,10 +5,16 @@ import {
 } from "expo-speech-recognition";
 import { takeSegment } from "../lib/segments";
 
-/** Silence that ends an utterance in continuous mode. Short enough that a
- * command feels acted-on, long enough that a mid-sentence breath doesn't cut
- * "open… youtube" into two segments. */
-const SEGMENT_SILENCE_MS = 1200;
+/** Default silence that ends an utterance in continuous mode — right for
+ * note-taking, where a cut only decides where a paragraph break lands.
+ * Consumers for whom a cut is destructive (a task split mid-command ran as
+ * "open" without its "amazon.com") pass a longer gap to start(). */
+const DEFAULT_SEGMENT_SILENCE_MS = 1200;
+
+export interface StartOptions {
+  /** Silence gap, in ms, that cuts a segment in continuous mode. */
+  silenceMs?: number;
+}
 
 interface SpeechCallbacks {
   onPartial: (text: string) => void;
@@ -58,6 +64,7 @@ export function useSpeechRecognition(callbacks: SpeechCallbacks) {
   const processedRef = useRef(0);
   const transcriptRef = useRef("");
   const silenceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const silenceMsRef = useRef(DEFAULT_SEGMENT_SILENCE_MS);
 
   const clearSilenceTimer = useCallback(() => {
     if (silenceTimerRef.current) {
@@ -119,7 +126,7 @@ export function useSpeechRecognition(callbacks: SpeechCallbacks) {
     callbacksRef.current.onPartial(text);
     if (continuousRef.current) {
       clearSilenceTimer();
-      silenceTimerRef.current = setTimeout(cutSegment, SEGMENT_SILENCE_MS);
+      silenceTimerRef.current = setTimeout(cutSegment, silenceMsRef.current);
     }
   });
 
@@ -145,8 +152,9 @@ export function useSpeechRecognition(callbacks: SpeechCallbacks) {
   });
 
   const start = useCallback(
-    async (continuous: boolean) => {
+    async (continuous: boolean, options: StartOptions = {}) => {
       continuousRef.current = continuous;
+      silenceMsRef.current = options.silenceMs ?? DEFAULT_SEGMENT_SILENCE_MS;
       await startEngine();
     },
     [startEngine],

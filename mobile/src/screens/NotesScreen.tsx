@@ -15,6 +15,7 @@ import { splitStopPhrase } from "../lib/wake";
 import { useSpeechRecognition } from "../hooks/useSpeechRecognition";
 import { useNotes } from "../state/NotesContext";
 import { useGoalQueue } from "../state/GoalQueueContext";
+import { useTasks } from "../state/TasksContext";
 import { Note } from "../lib/notesStore";
 import { formatRelative } from "../lib/time";
 import { colors, spacing } from "../theme";
@@ -30,6 +31,7 @@ export function NotesScreen() {
   const insets = useSafeAreaInsets();
   const { notes, storageError, addNote, attachReport, markSentToMac, deleteNote } = useNotes();
   const { submit } = useGoalQueue();
+  const { refresh: refreshTasks } = useTasks();
 
   const [recording, setRecording] = useState(false);
   const recordingRef = useRef(false);
@@ -46,7 +48,17 @@ export function NotesScreen() {
     async (note: Note) => {
       setSummarizing((s) => new Set(s).add(note.id));
       try {
-        attachReport(note.id, await reportNote(note.text));
+        const report = await reportNote(note.text);
+        attachReport(note.id, report);
+        const filed = report.tasks?.length ?? 0;
+        if (filed > 0) {
+          setStatus(`Summarized — ${filed} task${filed === 1 ? "" : "s"} filed to your Tasks tab.`);
+          // The Tasks tab polls, but a note's to-dos should be there the
+          // moment you look, not a poll later.
+          void refreshTasks();
+        } else {
+          setStatus("Summarized.");
+        }
       } catch {
         // The note is safe; the summary is a retryable extra.
         setStatus("Couldn't summarize — open the note and tap Summarize to retry.");
@@ -58,7 +70,7 @@ export function NotesScreen() {
         });
       }
     },
-    [attachReport],
+    [attachReport, refreshTasks],
   );
 
   const finishNote = useCallback(
@@ -302,6 +314,23 @@ function NoteReportView({ report }: { report: NonNullable<Note["report"]> }) {
           ))}
         </>
       ) : null}
+      {report.tasks && report.tasks.length > 0 ? (
+        <>
+          <Text style={styles.sectionLabel}>Filed as tasks</Text>
+          {report.tasks.map((t) => (
+            <Text key={t.id} style={styles.bullet} selectable>
+              {"→  "}
+              {t.title}
+              <Text style={styles.taskMeta}>
+                {"  ·  "}
+                {t.owner_name ?? "you"}
+                {"  ·  "}
+                {t.status.replace(/_/g, " ")}
+              </Text>
+            </Text>
+          ))}
+        </>
+      ) : null}
     </View>
   );
 }
@@ -432,6 +461,10 @@ const styles = StyleSheet.create({
     fontSize: 15,
     lineHeight: 22,
     paddingLeft: 4,
+  },
+  taskMeta: {
+    color: colors.muted,
+    fontSize: 13,
   },
   actions: {
     flexDirection: "row",

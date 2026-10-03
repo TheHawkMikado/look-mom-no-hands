@@ -28,6 +28,10 @@ const LOCK_SLIDE_DISTANCE = 90;
  * falling back to the last partial, so a release never swallows the goal. */
 const FINAL_RESULT_GRACE_MS = 900;
 
+/** Silence that ends a hands-free task. Long enough to think mid-sentence
+ * ("open… amazon.com"), short enough that a finished request feels acted on. */
+const HANDS_FREE_SILENCE_MS = 2500;
+
 export function TalkScreen() {
   const insets = useSafeAreaInsets();
   const { pendingApprovals, decide, setKeepPolling } = useFeed();
@@ -91,15 +95,11 @@ export function TalkScreen() {
       // whatever was said before it still counts.
       const beforeStop = splitStopPhrase(segment);
       const content = beforeStop ?? segment;
-      // Only utterances carrying the wake phrase become goals — and when one
-      // doesn't, say so: a silently dropped "go open YouTube" reads as the
-      // whole app being broken.
-      const command = extractCommand(content);
+      // Hands-free means everything you say is a task — no wake phrase
+      // required (the Mac's own planner shrugs off chit-chat). A "Hey Mama"
+      // habit still works: it's stripped rather than treated as content.
+      const command = extractCommand(content) ?? content.trim();
       if (command) void sendGoal(command);
-      else if (beforeStop === null && content.trim()) {
-        const heard = content.length > 40 ? `${content.slice(0, 40)}…` : content;
-        setStatus(`Heard "${heard}" — start with "Hey Mama" to send it as a task.`);
-      }
       if (beforeStop !== null) dispatchRef.current("tapStop");
     },
   });
@@ -135,7 +135,9 @@ export function TalkScreen() {
           // Restart, don't just flip a flag: the engine may have already
           // ended during the hold (Android silence timeout, iOS final result),
           // and a flag-only lock would show "Listening" over a dead mic.
-          void speech.start(true);
+          // A task cut mid-thought is a wrong task ("open" ran without its
+          // "amazon.com"), so hands-free waits a long beat before sending.
+          void speech.start(true, { silenceMs: HANDS_FREE_SILENCE_MS });
           setKeepPolling(true);
           setStatus(null);
           break;
@@ -258,7 +260,7 @@ export function TalkScreen() {
 
         <Text style={styles.hint}>
           {locked
-            ? "Say 'Hey Mama…' — 'Adios Mama' or tap to stop"
+            ? "Hands-free — just say what to do; 'Adios Mama' or tap to stop"
             : holding
               ? "Release to send"
               : "Hold to talk · slide up for hands-free"}
