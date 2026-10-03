@@ -17,6 +17,19 @@ assemble_app() {
     mkdir -p "${app}/Contents/MacOS" "${app}/Contents/Resources"
     cp "${bin}" "${app}/Contents/MacOS/${NAME}"
     cp App/Info.plist "${app}/Contents/Info.plist"
+    # Google OAuth client secret: injected at assembly, never committed — the
+    # repo is PUBLIC and Google's leak scanner disables clients it finds in
+    # source. CI provides it from the LMNH_GOOGLE_OAUTH_SECRET Actions secret;
+    # local builds export it first. Absent = the Google Connect button stays
+    # hidden (CalendarOAuthClientIDs.isConfigured).
+    if [ -n "${LMNH_GOOGLE_OAUTH_SECRET:-}" ]; then
+        /usr/libexec/PlistBuddy -c "Add :LMNHGoogleOAuthSecret string ${LMNH_GOOGLE_OAUTH_SECRET}" \
+            "${app}/Contents/Info.plist" 2>/dev/null \
+        || /usr/libexec/PlistBuddy -c "Set :LMNHGoogleOAuthSecret ${LMNH_GOOGLE_OAUTH_SECRET}" \
+            "${app}/Contents/Info.plist"
+    else
+        echo "  ! LMNH_GOOGLE_OAUTH_SECRET not set — Google Calendar connect will be hidden in this build" >&2
+    fi
     if [ -f Assets/AppIcon.icns ]; then
         cp Assets/AppIcon.icns "${app}/Contents/Resources/AppIcon.icns"
     else

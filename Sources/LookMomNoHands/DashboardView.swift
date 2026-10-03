@@ -1411,9 +1411,32 @@ private struct SettingsTab: View {
             Section("Meetings") {
                 Text("Say “Hey Mama, join my meeting” (or name it: “join the standup”) — it finds the Google Meet, Zoom, or Teams link on your calendar or in your words, clicks through the join screens, and records the audio. “Mama, leave the meeting” hangs up and saves the file.")
                     .font(.caption).foregroundStyle(.secondary)
-                LabeledContent("Calendar access") { statusPill(calendar.authorized) }
-                if !calendar.authorized {
-                    Button("Grant Calendar…") { calendar.requestAccess() }
+                Text("Connect the calendar your meetings actually live on — no macOS account setup needed. Apple covers anything already synced into macOS.")
+                    .font(.caption).foregroundStyle(.secondary)
+                ForEach(RemoteCalendarKind.allCases.filter(\.isConfigured), id: \.self) { kind in
+                    LabeledContent(kind.label) {
+                        if let email = calendar.connected[kind] {
+                            HStack(spacing: 8) {
+                                Text(email).font(.caption).foregroundStyle(.secondary)
+                                Button("Disconnect") { calendar.disconnect(kind) }
+                            }
+                        } else {
+                            Button(calendar.connecting == kind ? "Waiting for browser…" : "Connect…") {
+                                calendar.connect(kind)
+                            }
+                            .disabled(calendar.connecting != nil)
+                        }
+                    }
+                }
+                LabeledContent("Apple Calendar") {
+                    if calendar.authorized {
+                        statusPill(true)
+                    } else {
+                        Button("Grant access…") { calendar.requestAccess() }
+                    }
+                }
+                if let notice = calendar.connectionNotice {
+                    Text(notice).font(.caption).foregroundStyle(.orange)
                 }
                 Toggle("Auto-join calendar meetings", isOn: $coordinator.autoJoinMeetings)
                 Text("Joins (and records) each calendar meeting by itself at its start time, when the Mac is free. Off = join by voice only.")

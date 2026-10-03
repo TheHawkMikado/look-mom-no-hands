@@ -2,14 +2,16 @@ import Foundation
 import AppKit
 import EventKit
 
-/// Reads the user's calendar (on-device, read-only) for events carrying a
-/// Meet/Zoom/Teams link, so "join my 2pm" resolves to a real URL and — when
-/// auto-join is on — meetings join themselves at start time.
+/// The app's one calendar hub: merges meetings from every connected source —
+/// Google Calendar and Microsoft Outlook (connected in-app via OAuth, no
+/// macOS account setup) plus Apple/EventKit for users who live in macOS
+/// calendars — so "join my 2pm" and auto-join see a single upcoming list and
+/// never care where an event came from.
 @MainActor
 final class CalendarMeetings: ObservableObject {
 
     struct UpcomingMeeting: Identifiable, Sendable, Equatable {
-        let id: String        // eventIdentifier + start — occurrences of a recurring series must not collide
+        let id: String        // source-prefixed + start — occurrences of a recurring series must not collide
         let title: String
         let start: Date
         let end: Date
@@ -17,7 +19,17 @@ final class CalendarMeetings: ObservableObject {
     }
 
     @Published private(set) var upcoming: [UpcomingMeeting] = []
-    @Published private(set) var authorized = false
+    @Published private(set) var authorized = false            // the Apple/EventKit source
+    /// Connected in-app providers → the signed-in address (drives Settings).
+    @Published private(set) var connected: [RemoteCalendarKind: String] = [:]
+    /// Provider with a browser sign-in currently in flight (disables its button).
+    @Published private(set) var connecting: RemoteCalendarKind?
+    /// One-line status for the Settings pane ("connection expired — reconnect").
+    @Published private(set) var connectionNotice: String?
+
+    private var remoteTokens: [RemoteCalendarKind: RemoteCalendarTokens] = [:]
+    private var remoteMeetings: [RemoteCalendarKind: [UpcomingMeeting]] = [:]
+    private var appleMeetings: [UpcomingMeeting] = []
 
     /// Asks the coordinator to auto-join a meeting whose start is imminent.
     /// Returns whether the join actually STARTED — a "no" (Mac busy, session
@@ -43,6 +55,8 @@ final class CalendarMeetings: ObservableObject {
             authorized = true
             refresh()
         }
+        loadRemoteConnections()
+        refreshRemote()
         // Tolerance + .common mode match ProcedureScheduler: a menu being open or
         // a window drag must not suspend the tick — checkDue's one-minute window
         // means a suspended tick is an auto-join silently skipped.
@@ -50,10 +64,14 @@ final class CalendarMeetings: ObservableObject {
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 self.ticks += 1
-                // The EventKit rescan is main-thread work; change notifications
-                // plus a 5-minute horizon refresh keep it fresh — only the due
-                // check needs 30s granularity.
-                if self.ticks % 10 == 0 { self.refresh() }
+                // Rescans are heavier than the due check: EventKit is
+                // main-thread work and the remote providers are network calls,
+                // so both ride the 5-minute tick — only the due check needs
+                // 30s granularity.
+                if self.ticks % 10 == 0 {
+                    self.refresh()
+                    self.refreshRemote()
+                }
                 self.checkDue()
             }
         }
@@ -91,8 +109,8 @@ final class CalendarMeetings: ObservableObject {
         }
     }
 
-    /// Rescans a -10min…+10h window. Small and synchronous — EventKit predicate
-    /// queries over hours are milliseconds at this cadence.
+    /// Rescans Apple/EventKit over the -10min…+10h window. Small and synchronous
+    /// — EventKit predicate queries over hours are milliseconds at this cadence.
     func refresh() {
         guard authorized else { return }
         let now = Date()
@@ -100,7 +118,7 @@ final class CalendarMeetings: ObservableObject {
                                                  end: now.addingTimeInterval(10 * 3600),
                                                  calendars: nil)
         var seen: Set<String> = []
-        let meetings: [UpcomingMeeting] = store.events(matching: predicate).compactMap { event in
+        appleMeetings = store.events(matching: predicate).compactMap { event in
             guard !event.isAllDay, let eventID = event.eventIdentifier else { return nil }
             // eventIdentifier is SHARED across occurrences of a recurring series;
             // keying on it alone would drop today's second stand-up entirely.
@@ -113,9 +131,114 @@ final class CalendarMeetings: ObservableObject {
             seen.insert(id)
             return UpcomingMeeting(id: id, title: event.title ?? "meeting",
                                    start: event.startDate, end: event.endDate, link: link)
-        }.sorted { $0.start < $1.start }
-        let capped = Array(meetings.prefix(8))
+        }
+        rebuildUpcoming()
+    }
+
+    /// Merges every source into the one list the rest of the app reads. The
+    /// same event reached through two sources (Google connected in-app AND the
+    /// same account synced into macOS) is deduped by its link + start minute —
+    /// ids can't match across sources, but a double-listed meeting would make
+    /// auto-join fire twice.
+    private func rebuildUpcoming() {
+        var all = appleMeetings
+        for (_, list) in remoteMeetings { all += list }
+        var seen: Set<String> = []
+        let merged = all.sorted { $0.start < $1.start }.filter { m in
+            let key = "\(m.link.url)#\(Int(m.start.timeIntervalSince1970 / 60))"
+            return seen.insert(key).inserted
+        }
+        let capped = Array(merged.prefix(8))
         if capped != upcoming { upcoming = capped }
+    }
+
+    // MARK: In-app providers (Google / Microsoft)
+
+    /// Restores saved connections from the Keychain at launch.
+    private func loadRemoteConnections() {
+        for kind in RemoteCalendarKind.allCases {
+            guard let json = KeychainStore.load(account: RemoteCalendarTokens.keychainAccount(kind)),
+                  let tokens = try? JSONDecoder().decode(RemoteCalendarTokens.self, from: Data(json.utf8))
+            else { continue }
+            remoteTokens[kind] = tokens
+            connected[kind] = tokens.email
+        }
+    }
+
+    private func saveTokens(_ tokens: RemoteCalendarTokens) {
+        remoteTokens[tokens.kind] = tokens
+        if let data = try? JSONEncoder().encode(tokens) {
+            KeychainStore.save(String(decoding: data, as: UTF8.self),
+                               account: RemoteCalendarTokens.keychainAccount(tokens.kind))
+        }
+    }
+
+    /// Browser sign-in for one provider (the Settings Connect button).
+    func connect(_ kind: RemoteCalendarKind) {
+        let configured = kind == .google ? !CalendarOAuthClientIDs.google.isEmpty
+                                         : !CalendarOAuthClientIDs.microsoft.isEmpty
+        guard configured else {
+            connectionNotice = "\(kind.label) isn't set up in this build yet — its OAuth client ID is missing."
+            return
+        }
+        guard connecting == nil else { return }
+        connecting = kind
+        connectionNotice = nil
+        log("connecting \(kind.label)…")
+        Task {
+            defer { self.connecting = nil }
+            do {
+                let tokens = try await RemoteCalendarClient(kind: kind).connect()
+                self.saveTokens(tokens)
+                self.connected[kind] = tokens.email
+                self.log("\(kind.label) connected as \(tokens.email)")
+                self.refreshRemote()
+            } catch {
+                self.connectionNotice = "\(kind.label): \(error)"
+                self.log("\(kind.label) connect failed: \(error)")
+            }
+        }
+    }
+
+    func disconnect(_ kind: RemoteCalendarKind) {
+        KeychainStore.delete(account: RemoteCalendarTokens.keychainAccount(kind))
+        remoteTokens[kind] = nil
+        remoteMeetings[kind] = nil
+        connected[kind] = nil
+        connectionNotice = nil
+        log("\(kind.label) disconnected")
+        rebuildUpcoming()
+    }
+
+    /// Fetches each connected provider's window off the main actor and merges
+    /// the results back in. One provider failing (offline, rate limit) keeps
+    /// its last good list — a flaky network must not blank the auto-join queue.
+    private func refreshRemote() {
+        for (kind, tokens) in remoteTokens {
+            Task {
+                let client = RemoteCalendarClient(kind: kind)
+                do {
+                    if let fresh = try await client.refreshedIfNeeded(tokens) {
+                        self.saveTokens(fresh)
+                    }
+                    let current = self.remoteTokens[kind] ?? tokens
+                    let meetings = try await client.upcomingMeetings(
+                        tokens: current,
+                        from: Date().addingTimeInterval(-10 * 60),
+                        to: Date().addingTimeInterval(10 * 3600))
+                    self.remoteMeetings[kind] = meetings
+                    self.rebuildUpcoming()
+                } catch RemoteCalendarClient.ClientError.reauthNeeded {
+                    // Revoked or expired beyond refresh: flip the UI back to
+                    // Connect rather than erroring forever in the background.
+                    self.disconnect(kind)
+                    self.connectionNotice = "\(kind.label) connection expired — reconnect in Settings."
+                    self.log("\(kind.label) needs reconnecting")
+                } catch {
+                    self.log("\(kind.label) refresh failed: \(error)")
+                }
+            }
+        }
     }
 
     /// Planner context block. Per-turn (rides outside the cached prefix).
