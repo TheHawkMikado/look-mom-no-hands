@@ -96,7 +96,10 @@ jobs:
           security list-keychains -d user -s "$KEYCHAIN" login.keychain-db
           security find-identity -v -p codesigning "$KEYCHAIN"
           rm -f "$RUNNER_TEMP/cert.p12"
-          xcrun notarytool store-credentials ci --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" --password "$APPLE_APP_PASSWORD" --keychain "$KEYCHAIN"
+          # Notarisation credentials go straight to notarytool at submit time
+          # (APPLE_ID / APPLE_TEAM_ID / APPLE_APP_PASSWORD are in the job env):
+          # `notarytool store-credentials` crashes (SIGTRAP) against a fresh
+          # runner keychain, and a stored profile buys nothing on a throwaway VM.
 
       - name: Cut the release
         if: steps.secrets.outputs.ready == 'true'
@@ -109,7 +112,7 @@ jobs:
           if [ -z "$NOTES" ]; then
             NOTES="$(git log -1 --pretty=%s)"
           fi
-          SIGN_ID="$MAC_SIGN_ID" NOTARY_PROFILE=ci ./Scripts/release.sh "$MARKETING" --notes "$NOTES"
+          SIGN_ID="$MAC_SIGN_ID" ./Scripts/release.sh "$MARKETING" --notes "$NOTES"
           echo "VERSION=$(/usr/libexec/PlistBuddy -c 'Print CFBundleShortVersionString' App/Info.plist)" >> "$GITHUB_ENV"
           echo "NOTES=$NOTES" >> "$GITHUB_ENV"
 

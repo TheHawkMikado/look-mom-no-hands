@@ -47,3 +47,19 @@ sign_app() {
         --entitlements App/LookMomNoHands.entitlements \
         --sign "${identity}" "${app}"
 }
+
+# notary_configured — true when notarytool can be run, and sets NOTARY_ARGS to
+# the matching credential flags: a stored keychain profile (NOTARY_PROFILE) or
+# the raw Apple ID credentials (APPLE_ID, APPLE_TEAM_ID, APPLE_APP_PASSWORD).
+NOTARY_ARGS=()
+notary_configured() {
+    if [ -n "${NOTARY_PROFILE:-}" ]; then
+        NOTARY_ARGS=(--keychain-profile "${NOTARY_PROFILE}")
+        return 0
+    fi
+    if [ -n "${APPLE_ID:-}" ] && [ -n "${APPLE_TEAM_ID:-}" ] && [ -n "${APPLE_APP_PASSWORD:-}" ]; then
+        NOTARY_ARGS=(--apple-id "${APPLE_ID}" --team-id "${APPLE_TEAM_ID}" --password "${APPLE_APP_PASSWORD}")
+        return 0
+    fi
+    return 1
+}
