@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { Lockup } from "@/components/Logo";
+import { ExtensionPairStatus } from "@/components/ExtensionPairStatus";
 
 export const metadata: Metadata = {
   title: "Chrome extension — Look Ma, No Hands",
@@ -7,11 +8,15 @@ export const metadata: Metadata = {
 };
 
 const RELEASES = "https://github.com/TheHawkMikado/look-mom-no-hands/releases/latest";
+// Set once the listing is live (Vercel env). Until then the page explains the
+// unpacked install, which is what the app's "Show extension folder" is for.
+const STORE = process.env.NEXT_PUBLIC_CHROME_WEBSTORE_URL ?? "";
 
 /**
- * Setup guide for the Chrome extension. The Mac app's Settings link here, and
- * the extension itself ships inside the app (Settings › Chrome extension ›
- * Show extension folder) and as a zip on every release.
+ * Setup page for the Chrome extension. The Mac app opens it as
+ * /chrome-extension#code=XXXXXX, so install + pairing is one click: the
+ * extension's content script reads the code from the fragment (never sent to
+ * the server) and connects.
  */
 export default function ChromeExtension() {
   return (
@@ -34,7 +39,21 @@ export default function ChromeExtension() {
           No more guessing from screenshots. It only ever talks to the app on your Mac.
         </p>
 
-        <div className="grid" style={{ marginTop: 28 }}>
+        {STORE ? (
+          <p style={{ marginTop: 20 }}>
+            <a className="btn btn-primary" href={STORE} target="_blank" rel="noreferrer">
+              Add to Chrome
+            </a>
+            <span className="dim small" style={{ marginLeft: 12 }}>
+              One click in the Chrome Web Store. Works in Brave, Edge, Arc and Vivaldi too.
+            </span>
+          </p>
+        ) : null}
+
+        <ExtensionPairStatus />
+
+        <h2 style={{ marginTop: 40 }}>{STORE ? "Installing by hand instead" : "Installing"}</h2>
+        <div className="grid" style={{ marginTop: 12 }}>
           <div className="card">
             <h3>1. Find the extension folder</h3>
             <p>
@@ -48,14 +67,14 @@ export default function ChromeExtension() {
             <p>
               Paste <code>chrome://extensions</code> into the address bar. Turn on{" "}
               <strong>Developer mode</strong> (top right). Click <strong>Load unpacked</strong> and choose
-              that folder. Works the same in Brave, Edge, Arc and Vivaldi.
+              that folder.
             </p>
           </div>
           <div className="card">
             <h3>3. Pair it</h3>
             <p>
-              Click the extension&rsquo;s icon in the toolbar, enter the <strong>pairing code</strong> shown in
-              the app&rsquo;s Settings, and save. The dot turns green when the two are talking.
+              Come back to this page from the app&rsquo;s Settings (Install Chrome extension) and it pairs
+              itself. Or click the extension&rsquo;s icon and enter the <strong>pairing code</strong> from Settings.
             </p>
           </div>
         </div>
@@ -72,7 +91,8 @@ export default function ChromeExtension() {
         <p className="dim">
           The extension connects only to <code>127.0.0.1</code> on this Mac, never to a server. A page is read
           only when the assistant is working on it, and what it reads goes exactly where the
-          Accessibility snapshot already goes: into the planner for that one command.
+          Accessibility snapshot already goes: into the planner for that one command.{" "}
+          <a href="/chrome-extension/privacy">Full privacy policy</a>.
         </p>
       </section>
     </div>

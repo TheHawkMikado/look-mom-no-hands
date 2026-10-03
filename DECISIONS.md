@@ -393,3 +393,20 @@ coordinator's `openWithPreference`:
   nothing, so a missed question never locks in a guess.
 - "Chrome" means Google Chrome when installed, else the default browser.
 - Memory › Where things open lists the choices; removing one re-asks.
+
+## 2026-10-03 — Chrome extension: real icon, one-click install, automatic pairing
+
+- The extension carries the app's own icon (Assets/png, rendered from
+  Assets/icon.svg) instead of a placeholder.
+- Install is one click once the Chrome Web Store listing exists
+  (`chrome-extension/STORE.md` is the owner's checklist; the privacy policy
+  it needs is `/chrome-extension/privacy`). Chrome allows no silent install
+  by a Mac app, and a forced-install policy would brand the browser "managed
+  by your organization", so the store is the right path.
+- Pairing is automatic: Settings › Install Chrome extension opens
+  `nohandsapp.com/chrome-extension#code=<pairing code>`. A content script on
+  that page alone reads the code from the URL fragment (which browsers never
+  send to a server), stores it, and the extension reconnects announcing it.
+  On install the background script injects the same script into an
+  already-open setup tab, so no reload is needed. Covered by the Playwright
+  smoke test.

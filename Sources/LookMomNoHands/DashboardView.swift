@@ -1878,18 +1878,21 @@ private struct ChromeExtensionSection: View {
             Text("With the extension installed, every web page is read as a numbered map of its real elements — links, buttons, fields, results — and clicks land on the exact element instead of a screenshot guess. Works in Chrome, Brave, Edge, Arc and other Chromium browsers.")
                 .font(.caption).foregroundStyle(.secondary)
             HStack {
+                Button("Install Chrome extension…") {
+                    // The setup page pairs the extension by itself from the
+                    // code in the fragment (never sent to the server).
+                    if let url = URL(string: "https://nohandsapp.com/chrome-extension#code=\(hand.token)") {
+                        NSWorkspace.shared.open(url)
+                    }
+                }
+                .buttonStyle(.borderedProminent)
                 Button("Show extension folder…") {
                     if let url = ChromeHand.installExtensionCopy() {
                         NSWorkspace.shared.activateFileViewerSelecting([url])
                     }
                 }
-                Button("Setup guide") {
-                    NSPasteboard.general.clearContents()
-                    NSPasteboard.general.setString("chrome://extensions", forType: .string)
-                    if let url = URL(string: "https://nohandsapp.com/chrome-extension") { NSWorkspace.shared.open(url) }
-                }
             }
-            Text("Install once: in Chrome open chrome://extensions, turn on Developer mode (top right), click Load unpacked, and choose the folder above. Then click the extension's icon in the toolbar and enter the pairing code. Chrome blocks apps from opening chrome:// pages, so that address is copied to your clipboard — paste it into the address bar.")
+            Text("Install Chrome extension opens the setup page with your pairing code: click Add to Chrome and it pairs itself. To load it by hand instead, open chrome://extensions, turn on Developer mode, Load unpacked, and pick the folder above, then enter the pairing code in the extension's popup.")
                 .font(.caption).foregroundStyle(.secondary)
         }
     }

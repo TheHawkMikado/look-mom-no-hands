@@ -15,12 +15,14 @@ const PORT = 47831;
 // --- the "Mac app": one WS server, one request queue ----------------------
 const wss = new WebSocketServer({ host: "127.0.0.1", port: PORT });
 let sock = null, nextId = 1; const pending = new Map();
+const hellos = [];
+let onHello = null;
 const hello = new Promise((res) => {
   wss.on("connection", (ws) => {
     sock = ws;
     ws.on("message", (raw) => {
       const m = JSON.parse(raw);
-      if (m.type === "hello") { ws.send(JSON.stringify({ type: "hello_ok" })); res(m); return; }
+      if (m.type === "hello") { ws.send(JSON.stringify({ type: "hello_ok" })); hellos.push(m); if (onHello) onHello(m); res(m); return; }
       const p = pending.get(m.id); if (!p) return; pending.delete(m.id);
       m.error ? p.reject(new Error(m.error)) : p.resolve(m.result);
     });
@@ -33,7 +35,13 @@ const call = (method, params = {}) => new Promise((resolve, reject) => {
 });
 
 // --- a page to drive -------------------------------------------------------
-const srv = http.createServer((_q, r) => { r.setHeader("content-type", "text/html"); r.end(fs.readFileSync(path.join(here, "fixture.html"))); });
+const PAIR_PAGE = `<!doctype html><html><head><meta charset="utf-8"><title>Setup</title></head>
+<body><h1>Setup</h1><p data-lmnh-status>Install the extension to continue.</p></body></html>`;
+const srv = http.createServer((q, r) => {
+  r.setHeader("content-type", "text/html");
+  if (q.url.startsWith("/chrome-extension")) return r.end(PAIR_PAGE);
+  r.end(fs.readFileSync(path.join(here, "fixture.html")));
+});
 await new Promise((r) => srv.listen(0, "127.0.0.1", r));
 const fixture = `http://127.0.0.1:${srv.address().port}/`;
 
@@ -110,6 +118,17 @@ try {
   await call("tabs.close", { tabId: opened.tab.id }); console.log("✓ tabs.open / tabs.close");
 
   const shot = await call("page.screenshot"); assert.ok(shot.png_base64.length > 1000); console.log("✓ page.screenshot");
+
+  // Pairing through the setup page: the code rides in the URL fragment, the
+  // content script stores it, and the extension reconnects announcing it.
+  const paired = new Promise((res) => { onHello = (m) => { if (m.token === "TEST42") res(m); }; });
+  const setup = await ctx.newPage();
+  await setup.goto(fixture + "chrome-extension#code=test42");
+  await Promise.race([paired, new Promise((_, rej) => setTimeout(() => rej(new Error("no reconnect with the pairing code")), 15000))]);
+  await setup.waitForFunction(() => document.querySelector("[data-lmnh-status]")?.getAttribute("data-state") === "ok", null, { timeout: 10000 });
+  assert.equal(await setup.getAttribute("html", "data-lmnh-extension"), "installed");
+  console.log("✓ pairing via the setup page (fragment code → storage → reconnect)");
+  await setup.close();
   console.log("\nALL GREEN");
 } catch (e) {
   failed = true; console.error("\n✗", e.message);
