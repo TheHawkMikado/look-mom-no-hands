@@ -424,8 +424,17 @@ export async function submitPhoneGoal(
  * every delivery — so a Mac that slept through the morning can never wake up
  * and run stale half-thoughts, whether or not anything was submitted since.
  */
+/** An idle Mac leaves a fresh goal alone this long so the Mac the user is
+ *  actually sitting at — polling every 10s — gets to it first. */
+const IDLE_MAC_HOLDBACK_SECONDS = 15;
+
 export async function takePendingGoals(
   email: string,
+  /** Whether the polling Mac has seen keyboard/mouse input recently. An
+   *  account with two Macs signed in is a race, and the user watched the
+   *  idle laptop in the other room win it: it "finished" opening amazon.com
+   *  while the Mac in front of them did nothing. */
+  active: boolean,
 ): Promise<{ id: string; text: string; kind: string; created_at: Date }[]> {
   const db = sql();
   // ONE goal per take, not the batch: taken goals exist only in the taker's
@@ -438,6 +447,7 @@ export async function takePendingGoals(
        SELECT email, id FROM phone_goals
         WHERE email = ${email.toLowerCase()}
           AND created_at > now() - interval '1 hour'
+          AND (${active} OR created_at < now() - make_interval(secs => ${IDLE_MAC_HOLDBACK_SECONDS}))
         ORDER BY created_at ASC
         LIMIT 1
      ) next

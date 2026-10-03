@@ -1,4 +1,5 @@
 import Foundation
+import CoreGraphics
 
 /// One name per lifecycle moment, shared by every producer in the app. The
 /// authoritative mirror is AGENT_EVENT_KINDS in web/lib/db.ts — the server
@@ -188,6 +189,14 @@ final class EventReporter {
         goalTimer = t
     }
 
+    private struct GoalPollBody: Encodable { let idleSeconds: Double }
+
+    /// Seconds since the last keyboard, mouse or trackpad event in this login
+    /// session — the "is anyone at this Mac" signal the goal poll reports.
+    nonisolated static func secondsSinceUserInput() -> Double {
+        CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: CGEventType(rawValue: ~0)!)
+    }
+
     private struct GoalsResponse: Decodable {
         struct Goal: Decodable {
             let id: String
@@ -204,7 +213,10 @@ final class EventReporter {
         // the goal right now leaves it on the server for whoever can.
         guard canAcceptGoal?() != false else { return }
         guard let bearer = bearer(), onPhoneGoal != nil else { return }
-        let req = authedRequest("api/app/goals/poll", bearer: bearer)
+        var req = authedRequest("api/app/goals/poll", bearer: bearer)
+        // Two Macs on one account race for every goal; the server lets the
+        // one with a human at the keyboard win, so say how idle this one is.
+        req.httpBody = try? Self.encoder.encode(GoalPollBody(idleSeconds: Self.secondsSinceUserInput()))
         guard let (data, response) = try? await URLSession.shared.data(for: req) else { return }
         let status = (response as? HTTPURLResponse)?.statusCode ?? 0
         if status == 401 { cachedBearer = nil; return }

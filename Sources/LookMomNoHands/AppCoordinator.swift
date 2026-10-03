@@ -2075,7 +2075,9 @@ final class AppCoordinator: ObservableObject {
         guard !phoneGoalQueue.isEmpty, automatedSlotFree, claude != nil else { return }
         let text = phoneGoalQueue.removeFirst()
         let title = String(text.prefix(60))
-        events.report(kind: .goalStarted, title: title, detail: "your Mac picked it up")
+        // Name the machine: with two Macs on the account, "your Mac picked it
+        // up" hid that the idle laptop ran the goal, not the one in use.
+        events.report(kind: .goalStarted, title: title, detail: "\(FleetIdentity.machineName) picked it up")
         runAutomatedGoal(text: text, holder: .remote("phone-\(UUID().uuidString)"), tag: "phone") { [weak self] kind, detail in
             switch kind {
             case .goalProgress: break   // pickup already announced above
@@ -2093,12 +2095,12 @@ final class AppCoordinator: ObservableObject {
         let title = String(text.prefix(60))
         guard ScreenController.isTrusted else {
             store.log("phone", "dictation (\(text.count) chars) on clipboard — press ⌘V (auto-paste needs Accessibility)")
-            events.report(kind: .goalDone, title: title, detail: "on your Mac's clipboard — press ⌘V")
+            events.report(kind: .goalDone, title: title, detail: "on \(FleetIdentity.machineName)'s clipboard — press ⌘V")
             return
         }
         guard let target = NSWorkspace.shared.frontmostApplication else {
             store.log("phone", "dictation (\(text.count) chars) on clipboard — no frontmost app to paste into")
-            events.report(kind: .goalDone, title: title, detail: "on your Mac's clipboard — press ⌘V")
+            events.report(kind: .goalDone, title: title, detail: "on \(FleetIdentity.machineName)'s clipboard — press ⌘V")
             return
         }
         try? await Task.sleep(nanoseconds: 40_000_000)   // let the app register the clipboard
@@ -2107,7 +2109,7 @@ final class AppCoordinator: ObservableObject {
         try? ScreenController.sendPaste(toPid: target.processIdentifier)
         store.log("phone", "dictation sent ⌘V (\(text.count) chars) to \(target.localizedName ?? "frontmost app")")
         events.report(kind: .goalDone, title: title,
-                      detail: "pasted into \(target.localizedName ?? "the frontmost app")")
+                      detail: "pasted into \(target.localizedName ?? "the frontmost app") on \(FleetIdentity.machineName)")
     }
 
     /// Single slot, revocable lease, the local user always preempts — stated
@@ -2131,7 +2133,7 @@ final class AppCoordinator: ObservableObject {
             do {
                 try await self.runGoal(text: text, gen: self.runGeneration, seedProgress: [], holder: holder)
                 self.store.log(tag, "goal done")
-                report(.goalDone, "finished")
+                report(.goalDone, "finished on \(FleetIdentity.machineName)")
             } catch is ScreenLease.Busy {
                 self.store.log(tag, "goal refused — screen was busy")
                 report(.goalFailed, "the screen was busy — nothing ran")
