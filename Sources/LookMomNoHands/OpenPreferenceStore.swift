@@ -91,7 +91,7 @@ final class OpenPreferenceStore: ObservableObject {
     /// Things that are both a Mac app and a web app, by the name people say.
     /// The planner also fills `url` on open_app for anything it knows is a web
     /// app, so this table is the floor, not the ceiling.
-    nonisolated static let webEquivalents: [String: String] = [
+    nonisolated static var webEquivalents: [String: String] { [
         "chatgpt": "chatgpt.com", "claude": "claude.ai", "gemini": "gemini.google.com",
         "perplexity": "perplexity.ai", "slack": "app.slack.com", "discord": "discord.com/app",
         "notion": "notion.so", "spotify": "open.spotify.com", "zoom": "zoom.us",
@@ -108,7 +108,7 @@ final class OpenPreferenceStore: ObservableObject {
         "x": "x.com", "twitter": "x.com", "facebook": "facebook.com", "instagram": "instagram.com",
         "linkedin": "linkedin.com", "tiktok": "tiktok.com", "reddit": "reddit.com",
         "obsidian": "obsidian.md", "monday": "monday.com", "clickup": "app.clickup.com",
-    ]
+    ] }
 
     /// The web address for an app name, when it is also a web app.
     nonisolated static func webURL(forApp name: String) -> String? {
@@ -161,13 +161,12 @@ final class OpenPreferenceStore: ObservableObject {
         choice(inWordsOf: answer)
     }
 
-    private nonisolated static let browserWords: Set<String> = [
-        "chrome", "browser", "safari", "web", "website", "online", "tab", "tabs", "site",
-    ]
-    private nonisolated static let appWords: Set<String> = [
-        "app", "apps", "application", "desktop", "computer", "mac", "native", "natively",
-        "installed", "program",
-    ]
+    private nonisolated static var browserWords: Set<String> {
+        ["chrome", "browser", "safari", "web", "website", "online", "tab", "tabs", "site"]
+    }
+    private nonisolated static var appWords: Set<String> {
+        ["app", "apps", "application", "desktop", "computer", "mac", "native", "natively", "installed", "program"]
+    }
 
     /// Whole words only ("tab" never matches "table"); when both sides are
     /// named, the one said last wins — people correct themselves mid-sentence.
