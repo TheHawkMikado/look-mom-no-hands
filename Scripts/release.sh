@@ -187,9 +187,9 @@ fi
 # commit itself fails the plist still needs putting back.
 git add App/Info.plist
 git commit -qm "Release v${VERSION}"
-git tag -a "v${VERSION}" -m "v${VERSION}"
 
 if [ "${DRY_RUN}" = 1 ]; then
+    git tag -a "v${VERSION}" -m "v${VERSION}"
     echo
     echo "✓ dry run: built ${DMG}, committed and tagged v${VERSION} locally."
     echo "  Nothing pushed or published. Undo with:"
@@ -197,7 +197,23 @@ if [ "${DRY_RUN}" = 1 ]; then
     exit 0
 fi
 
-git push origin main
+# main may have moved while we built (a push from another machine, a PR that
+# landed): a plain push is then rejected and a notarised DMG is thrown away.
+# Rebase the one bump commit onto whatever main is now and try again. The tag
+# is created only after the push lands, so it always names the pushed commit.
+pushed=0
+for attempt in 1 2 3; do
+    git fetch -q origin main
+    if ! git rebase -q origin/main; then
+        git rebase --abort
+        die "could not rebase the version bump onto origin/main (someone else changed App/Info.plist?) — the DMG is in ${DMG}; resolve and rerun"
+    fi
+    if git push origin HEAD:main; then pushed=1; break; fi
+    echo "  main moved during the push (attempt ${attempt}) — retrying"
+    sleep 2
+done
+[ "${pushed}" = 1 ] || die "could not push the version bump to main after 3 attempts — the DMG is in ${DMG}"
+git tag -a "v${VERSION}" -m "v${VERSION}"
 git push origin "v${VERSION}"
 
 # The Chrome extension as a standalone download too (for a Mac that already
