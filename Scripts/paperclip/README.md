@@ -3,24 +3,31 @@
 Paperclip is the team behind the assistant: agents with roles, budgets and
 an audit trail. No Hands talks to it; you never have to open its board.
 
-Three commands, once:
+One command, once:
+
+```sh
+./Scripts/paperclip/setup.sh
+```
+
+It installs Node if needed, asks for your Anthropic key (Enter to skip),
+starts Paperclip on this machine, creates the "No Hands" company and starter
+agents, opens the sign-in page so you can paste the account token, and sets
+Paperclip and the bridge to start at login. Rerun it any time; it only does
+what is still missing.
+
+The pieces it runs, if you'd rather drive them yourself:
 
 ```sh
 ./Scripts/paperclip/up.sh                 # start Paperclip on this machine (Node 20+; or PAPERCLIP_ENGINE=docker)
 node Scripts/paperclip/bootstrap.mjs      # create the "No Hands" company + starter agents
 NOHANDS_APP_TOKEN=… node Scripts/paperclip/bootstrap.mjs   # connect it to your account
 node Scripts/paperclip/bridge.mjs         # keep this running (Paperclip is on localhost)
+./Scripts/paperclip/install-launchagents.sh    # starts at login, restarts if it stops; --uninstall to remove
 ```
 
 Get the token by opening `https://nohandsapp.com/app/login?client=bridge`
-after signing in. Put a real `ANTHROPIC_API_KEY` in `Scripts/paperclip/.env`
-so the Content Drafter writes real drafts (stubs otherwise).
-
-On a laptop, make it survive reboots and lid-closes:
-
-```sh
-./Scripts/paperclip/install-launchagents.sh    # starts at login, restarts if it stops; --uninstall to remove
-```
+after signing in. A real `ANTHROPIC_API_KEY` in `Scripts/paperclip/.env`
+makes the Content Drafter write real drafts (stubs otherwise).
 
 ## Two ways to connect
 
