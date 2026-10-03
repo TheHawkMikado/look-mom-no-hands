@@ -311,10 +311,21 @@ final class ChromeHand: ObservableObject {
 
     /// Where the unpacked extension lives for Chrome to load: a copy outside the
     /// signed bundle (so an app update doesn't move it from under Chrome) that is
-    /// refreshed whenever the bundled copy changes.
+    /// refreshed whenever the bundled copy changes. Lives beside the app's own
+    /// data in ~/Library/Application Support/LookMaNoHands/.
     static var installedExtensionURL: URL {
-        let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-        return support.appendingPathComponent("LookMomNoHands/chrome-extension", isDirectory: true)
+        supportDirectory.appendingPathComponent("LookMaNoHands/chrome-extension", isDirectory: true)
+    }
+
+    /// The first release put the copy under a misspelled folder. Anyone who
+    /// loaded the extension from there keeps a working, up-to-date copy at that
+    /// path until they re-load it from the right one; nothing breaks mid-task.
+    static var legacyExtensionURL: URL {
+        supportDirectory.appendingPathComponent("LookMomNoHands/chrome-extension", isDirectory: true)
+    }
+
+    private static var supportDirectory: URL {
+        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
     }
 
     @discardableResult
@@ -325,19 +336,30 @@ final class ChromeHand: ObservableObject {
               fm.fileExists(atPath: bundled.appendingPathComponent("manifest.json").path) else {
             return fm.fileExists(atPath: dest.appendingPathComponent("manifest.json").path) ? dest : nil
         }
+        let synced = sync(bundled, to: dest)
+        if fm.fileExists(atPath: legacyExtensionURL.appendingPathComponent("manifest.json").path) {
+            _ = sync(bundled, to: legacyExtensionURL)
+        }
+        return synced ? dest : (fm.fileExists(atPath: dest.appendingPathComponent("manifest.json").path) ? dest : nil)
+    }
+
+    /// Copies `source` over `dest` when their load-bearing files differ. True
+    /// when `dest` is usable afterwards.
+    private static func sync(_ source: URL, to dest: URL) -> Bool {
+        let fm = FileManager.default
         let stamp = { (dir: URL) -> Data in
             ["manifest.json", "background.js", "content.js", "popup.js", "popup.html"]
                 .compactMap { try? Data(contentsOf: dir.appendingPathComponent($0)) }
                 .reduce(Data(), +)
         }
-        if fm.fileExists(atPath: dest.path), stamp(dest) == stamp(bundled) { return dest }
+        if fm.fileExists(atPath: dest.path), stamp(dest) == stamp(source) { return true }
         do {
             try fm.createDirectory(at: dest.deletingLastPathComponent(), withIntermediateDirectories: true)
             if fm.fileExists(atPath: dest.path) { try fm.removeItem(at: dest) }
-            try fm.copyItem(at: bundled, to: dest)
-            return dest
+            try fm.copyItem(at: source, to: dest)
+            return true
         } catch {
-            return fm.fileExists(atPath: dest.appendingPathComponent("manifest.json").path) ? dest : nil
+            return fm.fileExists(atPath: dest.appendingPathComponent("manifest.json").path)
         }
     }
 }

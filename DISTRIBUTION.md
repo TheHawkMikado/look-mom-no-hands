@@ -189,6 +189,6 @@ ever changes, that string and `APPLE_TEAM_ID` change together.
 `Scripts/common.sh` copies `chrome-extension/` (minus its tests) into
 `Contents/Resources/chrome-extension`, and `release.sh` attaches
 `chrome-extension-<version>.zip` to the GitHub release. On launch the app
-mirrors the bundled copy to `~/Library/Application Support/LookMomNoHands/chrome-extension`
+mirrors the bundled copy to `~/Library/Application Support/LookMaNoHands/chrome-extension`
 and Settings points Chrome at that path, so an app update never moves the
 unpacked extension out from under the browser.
