@@ -1,12 +1,48 @@
 {
   "manifest_version": 3,
-  "name": "Look Ma, No Hands — Chrome hand",
+  "name": "Look Ma, No Hands",
   "version": "0.1.0",
   "description": "Lets the Look Ma, No Hands assistant read every element on the page and click or type by exact reference instead of guessing from screenshots. Talks only to the app on this Mac.",
   "minimum_chrome_version": "116",
-  "permissions": ["tabs", "scripting", "storage", "alarms"],
-  "host_permissions": ["<all_urls>"],
-  "background": { "service_worker": "background.js" },
-  "action": { "default_popup": "popup.html", "default_title": "Look Ma, No Hands" },
-  "icons": { "16": "icons/16.png", "48": "icons/48.png", "128": "icons/128.png" }
+  "permissions": [
+    "tabs",
+    "scripting",
+    "storage",
+    "alarms"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Look Ma, No Hands",
+    "default_icon": {
+      "16": "icons/16.png",
+      "32": "icons/32.png"
+    }
+  },
+  "icons": {
+    "16": "icons/16.png",
+    "32": "icons/32.png",
+    "64": "icons/64.png",
+    "128": "icons/128.png"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://nohandsapp.com/chrome-extension*",
+        "https://www.nohandsapp.com/chrome-extension*",
+        "http://127.0.0.1/chrome-extension*",
+        "http://localhost/chrome-extension*"
+      ],
+      "js": [
+        "pair.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ],
+  "homepage_url": "https://nohandsapp.com/chrome-extension"
 }

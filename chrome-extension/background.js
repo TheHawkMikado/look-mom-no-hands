@@ -188,6 +188,14 @@ async function dispatch(method, params) {
 
 chrome.runtime.onMessage.addListener((msg, _sender, reply) => {
   if (msg && msg.lmnhStatus) { reply(status); return true; }
+  if (msg && typeof msg.lmnhPair === "string") {
+    // The setup page handed us the pairing code (pair.js); storing it makes
+    // the storage listener below reconnect with it.
+    const token = msg.lmnhPair.trim().toUpperCase();
+    if (token) chrome.storage.local.set({ token }).then(() => reply({ ok: true }));
+    else reply({ ok: false });
+    return true;
+  }
   if (msg && msg.lmnhReconnect) {
     if (socket) { try { socket.close(); } catch {} socket = null; }
     backoff = 1000;
@@ -211,5 +219,14 @@ chrome.storage.onChanged.addListener((changes, area) => {
 chrome.alarms.create("lmnh-keepalive", { periodInMinutes: 0.5 });
 chrome.alarms.onAlarm.addListener((a) => { if (a.name === "lmnh-keepalive") connect(); });
 chrome.runtime.onStartup.addListener(connect);
-chrome.runtime.onInstalled.addListener(connect);
+chrome.runtime.onInstalled.addListener(async () => {
+  connect();
+  // The setup page is usually already open when the user clicks "Add to
+  // Chrome"; content scripts don't reach existing tabs, so inject pair.js
+  // there now and pairing completes without a reload.
+  try {
+    const tabs = await chrome.tabs.query({ url: ["https://nohandsapp.com/chrome-extension*", "https://www.nohandsapp.com/chrome-extension*", "http://127.0.0.1/chrome-extension*", "http://localhost/chrome-extension*"] });
+    for (const t of tabs) chrome.scripting.executeScript({ target: { tabId: t.id }, files: ["pair.js"] }).catch(() => {});
+  } catch {}
+});
 connect();
