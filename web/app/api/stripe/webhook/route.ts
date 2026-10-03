@@ -11,6 +11,8 @@ import { mintLicenceKey } from "@/lib/licence";
 import { stripe, UNLIMITED } from "@/lib/stripe";
 import { entitlementsForPrice } from "@/lib/catalogue";
 import { lifetimeTier } from "@/lib/lifetime";
+import { BETA_PLAN } from "@/lib/beta";
+import { recordBetaRedemption } from "@/lib/db-beta";
 import { sendLicenceEmail } from "@/lib/email";
 
 /**
@@ -104,6 +106,41 @@ async function onCheckoutCompleted(session: any) {
   }
 
   if (!email) throw new Error(`session ${session.id} has no email`);
+
+  // Beta seat (one-time payment, $99 less a BETA## code) — a perpetual BYOK
+  // licence on the `beta` plan. Free seats never reach Stripe; see
+  // /api/checkout/beta. Idempotent on the session id like every licence.
+  if (session.metadata?.nohands_beta === "1") {
+    const key = mintLicenceKey();
+    await createLicence({
+      key,
+      email,
+      plan: BETA_PLAN,
+      expiresAt: null,
+      seats: UNLIMITED,
+      phones: 0,
+      subUsers: 0,
+      resell: false,
+      mode: "byok",
+      stripeSession: session.id,
+      stripeCustomer: typeof session.customer === "string" ? session.customer : null,
+      stripeSubscription: null,
+    });
+    await recordBetaRedemption({
+      email,
+      code: (session.metadata?.nohands_beta_code as string) || null,
+      discount_cents: parseInt((session.metadata?.nohands_beta_discount_cents as string) ?? "0", 10) || 0,
+      paid_cents: session.amount_total ?? 0,
+      stripe_session: session.id,
+      licence_key: key,
+    });
+    try {
+      await sendLicenceEmail(email, key);
+    } catch (err) {
+      console.error("beta licence email failed (key was still issued)", err);
+    }
+    return;
+  }
 
   // Lifetime purchase (one-time payment) — mint a perpetual BYOK licence with the
   // tier's entitlements and no subscription. Distinct from the weekly flow below.
