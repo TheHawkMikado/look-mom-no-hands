@@ -48,6 +48,8 @@ final class OpenPreferenceTests: XCTestCase {
         XCTAssertEqual(OpenPreferenceStore.explicitChoice(in: "open the ChatGPT app"), .app)
         XCTAssertEqual(OpenPreferenceStore.explicitChoice(in: "open slack on my computer"), .app)
         XCTAssertNil(OpenPreferenceStore.explicitChoice(in: "open chatgpt"))
+        XCTAssertNil(OpenPreferenceStore.explicitChoice(in: "open the table of contents"), "whole words only")
+        XCTAssertEqual(OpenPreferenceStore.explicitChoice(in: "open chatgpt in a new tab"), .browser)
     }
 
     func testParseAnswer() {

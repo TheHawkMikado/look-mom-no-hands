@@ -153,32 +153,37 @@ final class OpenPreferenceStore: ObservableObject {
 
     /// The user already said where: "open chatgpt in chrome" / "open the chatgpt app".
     nonisolated static func explicitChoice(in command: String) -> OpenChoice? {
-        let c = " " + command.lowercased() + " "
-        let browser = [" in chrome", " in the browser", " in a browser", " in my browser", " in safari",
-                       " on the web", " the website", " the web version", " in a tab", " in a new tab"]
-        let app = [" the app ", " the app.", " desktop app", " the application", " on my computer",
-                   " on my mac", " on the mac", " on this computer", " natively", " the mac app", " the installed"]
-        if browser.contains(where: { c.contains($0) }) { return .browser }
-        if app.contains(where: { c.contains($0) }) { return .app }
-        return nil
+        choice(inWordsOf: command)
     }
 
     /// The spoken (or clicked) answer to "the app, or Chrome?".
     nonisolated static func parseAnswer(_ answer: String) -> OpenChoice? {
-        let a = answer.lowercased()
-        guard !a.trimmingCharacters(in: .whitespaces).isEmpty else { return nil }
-        let browserWords = ["chrome", "browser", "web", "online", "tab", "site", "safari"]
-        let appWords = ["app", "application", "computer", "desktop", "mac", "native", "installed", "program"]
-        let saysBrowser = browserWords.contains { a.contains($0) }
-        let saysApp = appWords.contains { a.contains($0) }
-        if saysBrowser && !saysApp { return .browser }
-        if saysApp && !saysBrowser { return .app }
-        if saysBrowser && saysApp {
-            // "the app in chrome"? Take whichever comes last — people correct themselves.
-            let bi = browserWords.compactMap { a.range(of: $0)?.lowerBound }.max()
-            let ai = appWords.compactMap { a.range(of: $0)?.lowerBound }.max()
-            if let bi, let ai { return bi > ai ? .browser : .app }
+        choice(inWordsOf: answer)
+    }
+
+    private nonisolated static let browserWords: Set<String> = [
+        "chrome", "browser", "safari", "web", "website", "online", "tab", "tabs", "site",
+    ]
+    private nonisolated static let appWords: Set<String> = [
+        "app", "apps", "application", "desktop", "computer", "mac", "native", "natively",
+        "installed", "program",
+    ]
+
+    /// Whole words only ("tab" never matches "table"); when both sides are
+    /// named, the one said last wins — people correct themselves mid-sentence.
+    nonisolated static func choice(inWordsOf text: String) -> OpenChoice? {
+        let words = text.lowercased().split(whereSeparator: { !$0.isLetter && !$0.isNumber }).map(String.init)
+        var lastBrowser: Int?
+        var lastApp: Int?
+        for (i, w) in words.enumerated() {
+            if browserWords.contains(w) { lastBrowser = i }
+            if appWords.contains(w) { lastApp = i }
         }
-        return nil
+        switch (lastBrowser, lastApp) {
+        case (nil, nil): return nil
+        case (.some, nil): return .browser
+        case (nil, .some): return .app
+        case (.some(let b), .some(let a)): return b > a ? .browser : .app
+        }
     }
 }
