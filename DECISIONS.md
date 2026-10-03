@@ -410,3 +410,20 @@ coordinator's `openWithPreference`:
   On install the background script injects the same script into an
   already-open setup tab, so no reload is needed. Covered by the Playwright
   smoke test.
+
+## 2026-10-03 — Beta testers: ten free lifetime seats for real use and honest forms
+
+Owner wants to promote on social media: 10 free seats in exchange for 5+
+hours of use a month and one feedback form a month, for three months.
+
+- `/testers` is the public application (name, email, what they do, their
+  Mac, what they'd hand it first, two commitment checkboxes). It shows seats
+  left, counted from accepted applications.
+- `/admin › Beta testers` lists applications; **Accept** mints a free
+  lifetime `beta` licence (same plan as the $99 offer), records it as a
+  TESTER redemption, and emails the key with the install steps and the
+  feedback-form link. Decline just marks it.
+- `/testers/feedback` is the monthly form (hours, score, what worked, what
+  broke, one wish), listed in admin. No login: the email they applied with
+  is the key, which is enough for ten known people.
+- The posts live in `marketing/beta-testers-posts.md`.

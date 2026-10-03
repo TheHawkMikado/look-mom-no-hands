@@ -15,6 +15,7 @@ import { stripe } from "@/lib/stripe";
 import { Lockup } from "@/components/Logo";
 import BrainReview from "./BrainReview";
 import BetaAdmin from "./BetaAdmin";
+import TestersAdmin from "./TestersAdmin";
 import {
   adminArchivePrice,
   adminCreatePrice,
@@ -442,6 +443,8 @@ export default async function Admin({
       </section>
 
       <BetaAdmin />
+
+      <TestersAdmin />
 
       <BrainReview />
     </div>
