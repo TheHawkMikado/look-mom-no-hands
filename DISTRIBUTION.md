@@ -145,7 +145,22 @@ publishes the GitHub release, and moves `LATEST_APP_VERSION` on Vercel — so
 every installed copy sees the new build on its next check, and installs it
 by itself if "Update automatically when idle" is on (the default).
 
-It needs these repository secrets (Settings → Secrets and variables → Actions):
+It needs ten repository secrets. On the Mac that has the Developer ID
+certificate, one command collects and stores all of them, then offers to cut
+the first signed release:
+
+```sh
+./Scripts/setup_release_secrets.sh
+```
+
+It reads the certificate from your keychain, asks for an Apple app-specific
+password (account.apple.com → App-Specific Passwords) and a Vercel token
+(vercel.com/account/tokens), finds the Vercel project and makes a deploy hook,
+checks the notarisation login with Apple, and writes everything with `gh secret
+set`. Nothing is kept on disk. If the keychain export refuses, export the
+certificate from Keychain Access as a .p12 and rerun with `--p12 <file>`.
+
+For the record, the secrets it sets (Settings → Secrets and variables → Actions):
 
 | Secret | What it is | Where to get it |
 |---|---|---|
@@ -154,15 +169,17 @@ It needs these repository secrets (Settings → Secrets and variables → Action
 | `MAC_CERT_PASSWORD` | the password you gave the .p12 export | you chose it |
 | `APPLE_ID` | your Apple ID email | — |
 | `APPLE_TEAM_ID` | `B59AM8227J` | developer.apple.com → Membership |
-| `APPLE_APP_PASSWORD` | an app-specific password for notarisation | appleid.apple.com → Sign-In and Security → App-Specific Passwords |
+| `APPLE_APP_PASSWORD` | an app-specific password for notarisation | account.apple.com → Sign-In and Security → App-Specific Passwords |
 | `VERCEL_TOKEN` | a Vercel API token | vercel.com → Account → Tokens |
 | `VERCEL_PROJECT_ID` | the nohandsapp.com project id | Vercel project → Settings → General |
 | `VERCEL_TEAM_ID` | only if the project is under a team | Vercel team → Settings |
 | `VERCEL_DEPLOY_HOOK_URL` | optional; a Deploy Hook for the production branch | Vercel project → Settings → Git → Deploy Hooks |
 
-Until the signing secrets exist the workflow builds, tests, and then stops
-with a warning naming what is missing. It never publishes an unsigned build:
-the updater pins the team's Developer ID and would refuse it.
+Until the signing secrets exist the workflow builds and tests, then publishes
+an **unsigned pre-release** (tag `unsigned-<version>`) as a stopgap. The
+updater pins the team's Developer ID and refuses those, and the version
+manifest is not moved, so installed apps never see them: an unsigned build is
+installed by hand (right-click → Open) and only ever by the owner.
 
 The team-ID requirement lives in `AppUpdater.requirement`. If the Apple team
 ever changes, that string and `APPLE_TEAM_ID` change together.
