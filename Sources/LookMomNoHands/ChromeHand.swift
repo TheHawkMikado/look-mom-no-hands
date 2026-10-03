@@ -280,8 +280,10 @@ final class ChromeHand: ObservableObject {
         return (tokens.count == 1 || lower.contains("[")) ? hit : nil
     }
 
+    /// Whatever the user typed or pasted — spaces, hyphens, lowercase — down to
+    /// the six characters that matter.
     nonisolated static func normalizeToken(_ raw: String) -> String {
-        raw.trimmingCharacters(in: .whitespacesAndNewlines).uppercased().replacingOccurrences(of: "-", with: "")
+        String(raw.uppercased().filter { $0.isLetter || $0.isNumber })
     }
 
     /// Six characters, no look-alikes (0/O, 1/I/L), so it survives being read aloud.
