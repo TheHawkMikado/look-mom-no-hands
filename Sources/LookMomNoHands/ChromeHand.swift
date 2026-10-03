@@ -314,7 +314,7 @@ final class ChromeHand: ObservableObject {
     /// refreshed whenever the bundled copy changes. Lives beside the app's own
     /// data in ~/Library/Application Support/LookMaNoHands/.
     static var installedExtensionURL: URL {
-        supportDirectory.appendingPathComponent("LookMaNoHands/chrome-extension", isDirectory: true)
+        supportDirectory.appendingPathComponent(AppIdentity.storageFolder, isDirectory: true).appendingPathComponent("chrome-extension", isDirectory: true)
     }
 
     /// The first release put the copy under a misspelled folder. Anyone who
