@@ -6,8 +6,14 @@
 #   ./Scripts/paperclip/setup.sh
 #
 # Options:
-#   --api URL     the No Hands service to register with (default https://nohandsapp.com)
-#   --no-login    don't install the launch agents (run bridge.mjs yourself)
+#   --api URL        the No Hands service to register with (default https://nohandsapp.com)
+#   --no-login       don't install the launch agents (run bridge.mjs yourself)
+#   --railway URL    use a Paperclip you already host (Railway, a VPS) instead
+#                    of running one here: signs you in to it, mints a board API
+#                    key, hires the starter agents there as Claude Code agents,
+#                    and registers the connection in direct mode. Nothing then
+#                    needs to run on this machine.
+#   --key KEY        with --railway: a board API key you already have
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/../.." && pwd)"
@@ -15,10 +21,14 @@ cd "$ROOT"
 
 API="https://nohandsapp.com"
 LOGIN=1
+HOSTED=""
+KEY="${PAPERCLIP_API_KEY:-}"
 while [ $# -gt 0 ]; do
   case "$1" in
     --api) API="${2%/}"; shift 2 ;;
     --no-login) LOGIN=0; shift ;;
+    --railway|--hosted) HOSTED="${2%/}"; shift 2 ;;
+    --key) KEY="$2"; shift 2 ;;
     *) echo "unknown option: $1" >&2; exit 2 ;;
   esac
 done
@@ -70,12 +80,32 @@ fi
 if [ -n "${ANTHROPIC_API_KEY:-}" ] || [ -n "$current_key" ]; then ok "key on file"; else echo "  · skipped (placeholder drafts)"; fi
 
 # ------------------------------------------------------------ paperclip --------
-say "Paperclip"
-"$HERE/up.sh" up
-ok "running on http://localhost:${PAPERCLIP_PORT:-3100}"
+if [ -n "$HOSTED" ]; then
+  say "Your hosted Paperclip ($HOSTED)"
+  curl -fsS "$HOSTED/api/health" >/dev/null 2>&1 || fail "Nothing answers at $HOSTED/api/health — check the URL (the Railway service's public domain, https://…)."
+  ok "reachable"
+  if [ -z "$KEY" ]; then
+    echo "  Signing you in to it (a browser window opens; approve the CLI there)…"
+    npx --yes paperclipai auth login --api-base "$HOSTED" | sed 's/^/  /'
+    echo "  Minting a board API key for No Hands…"
+    KEY="$(npx --yes paperclipai token board create --name nohands --never-expires --api-base "$HOSTED" --json 2>/dev/null \
+      | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{const j=JSON.parse(d);const k=j.key||j;const t=k.token||k.key||k.secret||k.plaintext||"";process.stdout.write(String(t))})')"
+    [ -n "$KEY" ] || fail "Could not mint a board API key. Make one in Paperclip (or: npx paperclipai token board create --api-base $HOSTED) and rerun with --key …"
+    ok "board API key minted"
+  else
+    ok "using the board API key you gave"
+  fi
+  say "Company and starter agents (on your Paperclip)"
+  PAPERCLIP_API_KEY="$KEY" ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY:-$current_key}" \
+    node "$HERE/bootstrap.mjs" --hosted --paperclip "$HOSTED" --api "$API" | sed 's/^/  /'
+else
+  say "Paperclip"
+  "$HERE/up.sh" up
+  ok "running on http://localhost:${PAPERCLIP_PORT:-3100}"
 
-say "Company and starter agents"
-node "$HERE/bootstrap.mjs" --api "$API" | sed 's/^/  /'
+  say "Company and starter agents"
+  node "$HERE/bootstrap.mjs" --api "$API" | sed 's/^/  /'
+fi
 
 # ------------------------------------------------------------- account ---------
 say "Connect to your No Hands account"
@@ -87,6 +117,8 @@ if [ -n "$TOKEN" ]; then
   code="$(curl -s -o /dev/null -w '%{http_code}' -H "authorization: Bearer $TOKEN" "$API/api/app/paperclip/connection" || echo 000)"
   if [ "$code" = "200" ]; then ok "already connected"; else TOKEN=""; echo "  · the saved token no longer works — signing in again"; fi
 fi
+BOOT_EXTRA=()
+if [ -n "$HOSTED" ]; then BOOT_EXTRA=(--hosted --paperclip "$HOSTED"); fi
 if [ -z "$TOKEN" ]; then
   URL="$API/app/login?client=bridge"
   echo "  Sign in at $URL"
@@ -95,10 +127,16 @@ if [ -z "$TOKEN" ]; then
   read -r -s -p "  Token: " TOKEN; echo
   TOKEN="$(printf '%s' "$TOKEN" | tr -d '[:space:]')"
   [ -n "$TOKEN" ] || fail "No token — rerun ./Scripts/paperclip/setup.sh when you have it."
-  NOHANDS_APP_TOKEN="$TOKEN" node "$HERE/bootstrap.mjs" --api "$API" | sed 's/^/  /'
+  PAPERCLIP_API_KEY="$KEY" NOHANDS_APP_TOKEN="$TOKEN" node "$HERE/bootstrap.mjs" --api "$API" "${BOOT_EXTRA[@]}" | sed 's/^/  /'
 fi
 
 # --------------------------------------------------------------- login ---------
+if [ -n "$HOSTED" ]; then
+  say "Done"
+  echo "  Your hosted Paperclip does the work; the No Hands service talks to it directly."
+  echo "  Nothing runs on this machine. Board: $HOSTED"
+  exit 0
+fi
 if [ "$LOGIN" = 1 ] && [ "$(uname)" = Darwin ]; then
   say "Start at login"
   "$HERE/install-launchagents.sh" | sed 's/^/  /'

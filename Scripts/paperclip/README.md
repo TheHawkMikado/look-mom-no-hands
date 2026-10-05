@@ -15,6 +15,19 @@ agents, opens the sign-in page so you can paste the account token, and sets
 Paperclip and the bridge to start at login. Rerun it any time; it only does
 what is still missing.
 
+**Already hosting Paperclip (Railway, a VPS)?** Use that instead; nothing
+then has to run on your machine and delegation works while your Mac sleeps:
+
+```sh
+./Scripts/paperclip/setup.sh --railway https://your-paperclip.up.railway.app
+```
+
+It signs you in to that Paperclip (browser approval), mints a board API key,
+hires the two starter agents there as Claude Code agents (Paperclip's image
+ships the CLI; set `ANTHROPIC_API_KEY` in the Railway service's variables or
+paste it when asked), and registers the connection in direct mode. Pass
+`--key …` if you already have a board API key.
+
 The pieces it runs, if you'd rather drive them yourself:
 
 ```sh
