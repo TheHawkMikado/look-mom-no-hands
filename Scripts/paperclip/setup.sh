@@ -62,7 +62,10 @@ current_key=""
 if [ -f "$ENV_FILE" ]; then
   current_key="$(sed -n 's/^ANTHROPIC_API_KEY=//p' "$ENV_FILE" | head -1)"
 fi
-if [ -z "${ANTHROPIC_API_KEY:-}" ] && [ -z "$current_key" ]; then
+if [ -n "$HOSTED" ]; then
+  echo "  A hosted Paperclip takes the key from its own environment: set ANTHROPIC_API_KEY"
+  echo "  on the Railway service (Variables tab). Nothing to paste here."
+elif [ -z "${ANTHROPIC_API_KEY:-}" ] && [ -z "$current_key" ]; then
   echo "  The starter agents draft with Anthropic. Paste your API key (sk-ant-…),"
   echo "  or press Enter to skip — they'll post placeholder drafts until you add one."
   read -r -s -p "  Anthropic API key: " ANTHROPIC_API_KEY; echo
@@ -77,7 +80,7 @@ if [ -n "${ANTHROPIC_API_KEY:-}" ] && [ -f "$ENV_FILE" ]; then
     echo "ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}" >> "$ENV_FILE"
   fi
 fi
-if [ -n "${ANTHROPIC_API_KEY:-}" ] || [ -n "$current_key" ]; then ok "key on file"; else echo "  · skipped (placeholder drafts)"; fi
+if [ -n "$HOSTED" ]; then :; elif [ -n "${ANTHROPIC_API_KEY:-}" ] || [ -n "$current_key" ]; then ok "key on file"; else echo "  · skipped (placeholder drafts)"; fi
 
 # ------------------------------------------------------------ paperclip --------
 if [ -n "$HOSTED" ]; then
@@ -96,8 +99,7 @@ if [ -n "$HOSTED" ]; then
     ok "using the board API key you gave"
   fi
   say "Company and starter agents (on your Paperclip)"
-  PAPERCLIP_API_KEY="$KEY" ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY:-$current_key}" \
-    node "$HERE/bootstrap.mjs" --hosted --paperclip "$HOSTED" --api "$API" | sed 's/^/  /'
+  PAPERCLIP_API_KEY="$KEY" node "$HERE/bootstrap.mjs" --hosted --paperclip "$HOSTED" --api "$API" | sed 's/^/  /'
 else
   say "Paperclip"
   "$HERE/up.sh" up
