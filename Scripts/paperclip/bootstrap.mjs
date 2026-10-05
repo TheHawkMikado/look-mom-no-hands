@@ -177,12 +177,14 @@ const existing = await pc("GET", `/api/companies/${company.id}/agents`);
 const agents = [];
 for (const s of STARTERS) {
   const adapterType = HOSTED ? "claude_local" : "process";
+  // Hosted boards run in authenticated mode, whose strict secrets policy
+  // rejects provider keys passed through agent settings: the Claude CLI on the
+  // host reads ANTHROPIC_API_KEY from the service's own environment instead.
   const adapterConfig = HOSTED
     ? {
         model: "claude-sonnet-4-6",
         effort: "low",
         timeoutSec: 600,
-        env: { ...(ANTHROPIC_KEY ? { ANTHROPIC_API_KEY: ANTHROPIC_KEY } : {}) },
       }
     : {
         command: node,
@@ -204,9 +206,8 @@ for (const s of STARTERS) {
   }
   agents.push({ id: a.id, name: a.name, role: a.role, title: a.title ?? s.title, capabilities: a.capabilities ?? s.capabilities });
 }
-if (!ANTHROPIC_KEY) console.log(HOSTED
-  ? "Note: no ANTHROPIC_API_KEY given — the agents rely on the key set on the Paperclip host (Railway variables)."
-  : "Note: no ANTHROPIC_API_KEY in Scripts/paperclip/.env — the Content Drafter will post stub drafts.");
+if (HOSTED) console.log("The agents use the ANTHROPIC_API_KEY set on the Paperclip host itself (Railway → service → Variables).");
+else if (!ANTHROPIC_KEY) console.log("Note: no ANTHROPIC_API_KEY in Scripts/paperclip/.env — the Content Drafter will post stub drafts.");
 
 // 4. Local connection file for the bridge / Mac app.
 const connection = { url: PAPERCLIP_URL, company_id: company.id, agents, mode: MODE, api: NOHANDS_API, ...(KEY ? { api_key: KEY } : {}), created_at: new Date().toISOString() };
