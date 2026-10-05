@@ -427,3 +427,22 @@ hours of use a month and one feedback form a month, for three months.
   broke, one wish), listed in admin. No login: the email they applied with
   is the key, which is enough for ten known people.
 - The posts live in `marketing/beta-testers-posts.md`.
+
+## 2026-10-05 — Hosted Paperclip (Railway) is the preferred home for the team
+
+The owner already runs Paperclip on Railway. That is the better shape:
+direct mode, nothing on the Mac, delegation works while it sleeps.
+
+- `bootstrap.mjs --hosted --key <board API key>`: authenticates every call
+  with the key, uses the board's existing company when there is exactly one,
+  and hires the two starter agents as `claude_local` agents (Paperclip's
+  image ships the Claude Code CLI) with the No Hands contract in their
+  instructions bundle: check out → do the work → post it as a comment →
+  in_review, never publish or spend. The connection is registered in direct
+  mode with the key, so the web service calls Paperclip itself.
+- `setup.sh --railway <url>` does the whole thing: signs in to that Paperclip
+  with the official CLI (browser approval), mints a non-expiring board API
+  key named "nohands", runs the hosted bootstrap, then the usual account
+  token step. No launch agents, no bridge.
+- Local mode (bridge + process-adapter scripts) stays as the fallback for
+  someone without a host.
